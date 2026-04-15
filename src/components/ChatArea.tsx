@@ -3,7 +3,7 @@ import { useAppStore, AssetRole, defaultSettings } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions } from '../lib/utils';
+import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, createThumbnail } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -317,10 +317,16 @@ export function ChatArea() {
     const currentSettings = { ...project.settings };
     const currentAssets = [...project.assets];
 
+    // Create tiny thumbnails for log storage (original base64 only used for API call)
+    const thumbAssets = await Promise.all(currentAssets.map(async a => ({
+      ...a,
+      url: await createThumbnail(a.url),
+    })));
+
     for (let i = 0; i < outputCount; i++) {
       const id = crypto.randomUUID();
       systemMessageIds.push(id);
-      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, usedSettings: currentSettings, usedAssets: currentAssets } as any);
+      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, usedSettings: currentSettings, usedAssets: thumbAssets } as any);
     }
     setTimeout(() => scrollToBottom(), 150);
 
@@ -355,7 +361,7 @@ export function ChatArea() {
           if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
           const taskId = data.id || data.data?.task_id;
           if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: currentAssets, promptText: plainText });
+          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, promptText: plainText });
           useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
         } catch (error: any) {
           updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });

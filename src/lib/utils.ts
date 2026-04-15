@@ -5,6 +5,27 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// Shrink base64 image to tiny thumbnail for log storage (saves IndexedDB space)
+export function createThumbnail(dataUrl: string, size: number = 80): Promise<string> {
+  return new Promise((resolve) => {
+    if (!dataUrl.startsWith('data:image')) { resolve(dataUrl); return; }
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(''); return; }
+      const scale = Math.max(size / img.width, size / img.height);
+      const w = img.width * scale, h = img.height * scale;
+      ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+      resolve(canvas.toDataURL('image/jpeg', 0.5));
+    };
+    img.onerror = () => resolve('');
+    img.src = dataUrl;
+  });
+}
+
 export function showNotification(title: string, options?: NotificationOptions) {
   if (!('Notification' in window)) return;
   if (Notification.permission === 'granted') {
