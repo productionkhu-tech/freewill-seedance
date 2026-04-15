@@ -78,11 +78,11 @@ function createWindow() {
       mainWindow.hide();
       if (!hiddenToTrayOnce) {
         hiddenToTrayOnce = true;
-        new Notification({
+        tray?.displayBalloon({
           title: 'Freewill Seedance 2.0',
-          body: 'Running in system tray. Double-click to reopen.',
-          icon: getIconPath(),
-        }).show();
+          content: 'Running in system tray. Double-click to reopen.',
+          iconType: 'info',
+        });
       }
     }
   });
