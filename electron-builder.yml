@@ -1,0 +1,42 @@
+appId: com.freewill.seedance
+productName: Freewill Seedance 2.0
+copyright: Copyright (c) 2026 Freewill
+
+directories:
+  output: release
+  buildResources: electron
+
+files:
+  - "dist/**/*"
+  - "electron/main.cjs"
+  - "electron/icon.png"
+  - "public/**/*"
+  - "!node_modules"
+  - "!src"
+  - "!temp-repo"
+
+extraResources:
+  - from: "dist-server/"
+    to: "."
+    filter:
+      - "server.cjs"
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: electron/icon.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Freewill Seedance 2.0
+
+publish:
+  provider: github
+  owner: productionkhu-tech
+  repo: freewill-seedance
+  private: true
+  releaseType: release
