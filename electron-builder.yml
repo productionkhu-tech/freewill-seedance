@@ -38,5 +38,4 @@ publish:
   provider: github
   owner: productionkhu-tech
   repo: freewill-seedance
-  private: true
   releaseType: release
