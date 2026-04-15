@@ -23,7 +23,6 @@ function translateError(error: string): string {
 function VideoPlayer({ src, className }: { src: string; className?: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -41,25 +40,14 @@ function VideoPlayer({ src, className }: { src: string; className?: string }) {
   }, []);
 
   return (
-    <div ref={containerRef} className={`${className} relative bg-black`}>
-      {!loaded && (
-        <div
-          className="absolute inset-0 flex items-center justify-center cursor-pointer bg-black/80 hover:bg-black/60 transition-colors z-10"
-          onClick={() => { setLoaded(true); setTimeout(() => videoRef.current?.play(), 100); }}
-        >
-          <div className="w-14 h-14 rounded-full bg-white/20 flex items-center justify-center">
-            <div className="w-0 h-0 border-t-[10px] border-t-transparent border-b-[10px] border-b-transparent border-l-[16px] border-l-white ml-1" />
-          </div>
-        </div>
-      )}
+    <div ref={containerRef} className={`${className} aspect-video bg-black`}>
       <video
         ref={videoRef}
-        src={loaded ? src : undefined}
+        src={src}
         controls
         muted
-        loop
         playsInline
-        preload="none"
+        preload="metadata"
         className="w-full h-full object-contain"
       />
     </div>

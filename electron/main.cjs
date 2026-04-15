@@ -116,21 +116,15 @@ function setupAutoUpdater() {
       type: 'info',
       title: 'Update Available',
       message: `New version available: v${info.version}`,
-      buttons: ['Update', 'Later'],
-    }).then(({ response }) => {
-      if (response === 0) autoUpdater.downloadUpdate();
+      detail: 'Downloading and restarting...',
+      buttons: ['OK'],
     });
+    autoUpdater.downloadUpdate();
   });
 
   autoUpdater.on('update-downloaded', () => {
-    dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      title: 'Update Ready',
-      message: 'Update downloaded. Restart now?',
-      buttons: ['Restart', 'Later'],
-    }).then(({ response }) => {
-      if (response === 0) { app.isQuitting = true; autoUpdater.quitAndInstall(); }
-    });
+    app.isQuitting = true;
+    autoUpdater.quitAndInstall();
   });
 
   autoUpdater.on('error', (err) => console.error('[Updater]', err));
