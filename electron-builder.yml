@@ -11,7 +11,14 @@ files:
   - "electron/main.cjs"
   - "electron/icon.png"
   - "public/**/*"
-  - "!node_modules"
+  - "node_modules/electron-updater/**/*"
+  - "node_modules/lazy-val/**/*"
+  - "node_modules/semver/**/*"
+  - "node_modules/builder-util-runtime/**/*"
+  - "node_modules/sax/**/*"
+  - "node_modules/js-yaml/**/*"
+  - "node_modules/argparse/**/*"
+  - "node_modules/tiny-typed-emitter/**/*"
   - "!src"
   - "!temp-repo"
 
@@ -20,6 +27,8 @@ extraResources:
     to: "."
     filter:
       - "server.cjs"
+  - from: "dist/"
+    to: "dist"
 
 win:
   target:
