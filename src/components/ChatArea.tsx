@@ -23,6 +23,7 @@ function translateError(error: string): string {
 function VideoPlayer({ src, className }: { src: string; className?: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -31,9 +32,7 @@ function VideoPlayer({ src, className }: { src: string; className?: string }) {
 
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (!entry.isIntersecting) {
-          video.pause();
-        }
+        if (!entry.isIntersecting && video) video.pause();
       },
       { threshold: 0.3 }
     );
@@ -42,15 +41,25 @@ function VideoPlayer({ src, className }: { src: string; className?: string }) {
   }, []);
 
   return (
-    <div ref={containerRef} className={className}>
+    <div ref={containerRef} className={`${className} relative bg-black`}>
+      {!loaded && (
+        <div
+          className="absolute inset-0 flex items-center justify-center cursor-pointer bg-black/80 hover:bg-black/60 transition-colors z-10"
+          onClick={() => { setLoaded(true); setTimeout(() => videoRef.current?.play(), 100); }}
+        >
+          <div className="w-14 h-14 rounded-full bg-white/20 flex items-center justify-center">
+            <div className="w-0 h-0 border-t-[10px] border-t-transparent border-b-[10px] border-b-transparent border-l-[16px] border-l-white ml-1" />
+          </div>
+        </div>
+      )}
       <video
         ref={videoRef}
-        src={src}
+        src={loaded ? src : undefined}
         controls
         muted
         loop
         playsInline
-        preload="metadata"
+        preload="none"
         className="w-full h-full object-contain"
       />
     </div>
