@@ -54,31 +54,56 @@ async function startServer() {
     }
   });
 
-  // Upload video/audio to temp public hosting → returns public URL for BytePlus API
+  // Media cache directory for video/audio reuse
+  const fs = require('fs');
+  const CACHE_DIR = path.join(process.cwd(), 'media-cache');
+  if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+  async function uploadToTmpFiles(fileBuffer: Buffer, filename: string): Promise<string> {
+    const formData = new FormData();
+    formData.append('file', new Blob([fileBuffer]), filename);
+    const response = await fetch('https://tmpfiles.org/api/v1/upload', { method: 'POST', body: formData });
+    const data = await response.json() as any;
+    if (data.status !== 'success' || !data.data?.url) throw new Error('Upload failed: ' + JSON.stringify(data));
+    return data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+  }
+
+  // Upload video/audio → cache locally + upload to tmpfiles → returns { url, cacheId }
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     const filename = (req.headers['x-filename'] as string) || 'upload.mp4';
-    console.log(`[Upload Public] Uploading ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB)...`);
+    const ext = path.extname(filename) || '.mp4';
+    const cacheId = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB)...`);
 
     try {
-      const formData = new FormData();
-      formData.append('file', new Blob([req.body]), filename);
+      // Save to local cache
+      fs.writeFileSync(path.join(CACHE_DIR, cacheId), req.body);
 
-      const response = await fetch('https://tmpfiles.org/api/v1/upload', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await response.json() as any;
+      // Upload to public hosting
+      const publicUrl = await uploadToTmpFiles(req.body, filename);
+      console.log(`[Upload] OK → ${publicUrl} (cached: ${cacheId})`);
+      res.json({ url: publicUrl, cacheId });
+    } catch (error: any) {
+      console.error('[Upload] Error:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-      if (data.status !== 'success' || !data.data?.url) {
-        throw new Error('Upload failed: ' + JSON.stringify(data));
+  // Re-upload from cache → new public URL
+  app.post('/api/reupload/:cacheId', async (req, res) => {
+    const cachePath = path.join(CACHE_DIR, req.params.cacheId);
+    console.log(`[Re-upload] ${req.params.cacheId}...`);
+
+    try {
+      if (!fs.existsSync(cachePath)) {
+        return res.status(404).json({ error: 'Cached file not found. Please re-attach the file.' });
       }
-
-      // Convert to direct download URL
-      const publicUrl = data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-      console.log(`[Upload Public] OK → ${publicUrl}`);
+      const fileBuffer = fs.readFileSync(cachePath);
+      const publicUrl = await uploadToTmpFiles(fileBuffer, req.params.cacheId);
+      console.log(`[Re-upload] OK → ${publicUrl}`);
       res.json({ url: publicUrl });
     } catch (error: any) {
-      console.error('[Upload Public] Error:', error.message);
+      console.error('[Re-upload] Error:', error.message);
       res.status(500).json({ error: error.message });
     }
   });

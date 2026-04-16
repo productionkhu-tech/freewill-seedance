@@ -3,7 +3,7 @@ import { useAppStore, AssetRole, defaultSettings } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, createThumbnail } from '../lib/utils';
+import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, createThumbnail, reuploadFromCache } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -291,9 +291,24 @@ export function ChatArea() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
-  const handleReuse = (msg: any) => {
+  const handleReuse = async (msg: any) => {
     if (msg.usedSettings) useAppStore.getState().updateProjectSettings(project.id, msg.usedSettings);
-    if (msg.usedAssets) { useAppStore.getState().clearAssets(project.id); msg.usedAssets.forEach((a: any) => useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID() })); }
+    if (msg.usedAssets) {
+      useAppStore.getState().clearAssets(project.id);
+      for (const a of msg.usedAssets) {
+        if (a.type === 'image_url') {
+          useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID() });
+        } else if (a.cacheId) {
+          // Video/audio: re-upload from local cache → new public URL
+          try {
+            const newUrl = await reuploadFromCache(a.cacheId);
+            useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: newUrl });
+          } catch {
+            alert(`${a.file_name || '미디어'} 재업로드 실패. 파일을 다시 첨부해주세요.`);
+          }
+        }
+      }
+    }
     if (msg.promptText && contentEditableRef.current) {
       contentEditableRef.current.innerHTML = textToHtml(msg.promptText, getAssetNames(msg.usedAssets || []));
       setHasText(true);

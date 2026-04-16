@@ -31,6 +31,7 @@ export interface Asset {
   url: string;
   role: AssetRole;
   file_name?: string;
+  cacheId?: string;
 }
 
 export interface GenerationSettings {

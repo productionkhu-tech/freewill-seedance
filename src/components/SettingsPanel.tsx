@@ -192,7 +192,10 @@ export function SettingsPanel() {
             const sizeMB = file.size / (1024 * 1024);
             const maxMB = type === 'video_url' ? 50 : 15;
             if (sizeMB > maxMB) { alert(`파일 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${maxMB}MB)`); continue; }
-            url = await uploadToPublicUrl(file);
+            const result = await uploadToPublicUrl(file);
+            url = result.url;
+            addAsset(project.id, { type, url, role, file_name: file.name, cacheId: result.cacheId });
+            continue;
           }
           addAsset(project.id, { type, url, role, file_name: file.name });
         } catch (e: any) {

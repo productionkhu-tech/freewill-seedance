@@ -78,8 +78,8 @@ export function validateImageDimensions(dataUrl: string): Promise<string | null>
   });
 }
 
-// Upload video/audio to temp public hosting → returns public URL
-export async function uploadToPublicUrl(file: File): Promise<string> {
+// Upload video/audio to temp public hosting → returns { url, cacheId }
+export async function uploadToPublicUrl(file: File): Promise<{ url: string; cacheId: string }> {
   const buffer = await file.arrayBuffer();
   const res = await fetch('/api/upload-public', {
     method: 'POST',
@@ -89,6 +89,16 @@ export async function uploadToPublicUrl(file: File): Promise<string> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || 'Upload failed');
+  }
+  return await res.json();
+}
+
+// Re-upload from local cache → new public URL
+export async function reuploadFromCache(cacheId: string): Promise<string> {
+  const res = await fetch(`/api/reupload/${cacheId}`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Re-upload failed');
   }
   const data = await res.json();
   return data.url;
