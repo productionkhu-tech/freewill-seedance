@@ -323,18 +323,24 @@ export function ChatArea() {
     if (msg.usedSettings) useAppStore.getState().updateProjectSettings(project.id, msg.usedSettings);
     if (msg.usedAssets) {
       useAppStore.getState().clearAssets(project.id);
+      let needReattach: string[] = [];
       for (const a of msg.usedAssets) {
         if (a.type === 'image_url') {
-          useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID() });
+          // Thumbnails are too small for API — user must re-attach original images
+          needReattach.push('이미지');
+          break;
         } else if (a.cacheId) {
           // Video/audio: re-upload from local cache → new public URL
           try {
             const newUrl = await reuploadFromCache(a.cacheId);
             useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: newUrl });
           } catch {
-            alert(`${a.file_name || '미디어'} 재업로드 실패. 파일을 다시 첨부해주세요.`);
+            needReattach.push(a.file_name || '미디어');
           }
         }
+      }
+      if (needReattach.length > 0) {
+        alert(`프롬프트와 설정이 복원되었습니다.\n래퍼런스 ${needReattach.join(', ')}는 원본 파일을 다시 첨부해주세요.`);
       }
     }
     if (msg.promptText && contentEditableRef.current) {
