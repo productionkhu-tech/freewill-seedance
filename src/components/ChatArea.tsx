@@ -135,7 +135,8 @@ export function ChatArea() {
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const dragCounter = useRef(0);
-  const [mentionState, setMentionState] = useState<{ active: boolean, query: string, index: number }>({ active: false, query: '', index: 0 });
+  const [mentionState, setMentionState] = useState<{ active: boolean, query: string }>({ active: false, query: '' });
+  const mentionIndexRef = useRef(0);
   const contentEditableRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -289,6 +290,18 @@ export function ChatArea() {
   };
 
   /* ─── Input handlers ─── */
+  const highlightMentionItem = useCallback(() => {
+    document.querySelectorAll('.mention-item').forEach((item, i) => {
+      if (i === mentionIndexRef.current) {
+        item.classList.add('bg-indigo-50', 'text-indigo-700');
+        item.classList.remove('text-gray-700');
+      } else {
+        item.classList.remove('bg-indigo-50', 'text-indigo-700');
+        item.classList.add('text-gray-700');
+      }
+    });
+  }, []);
+
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
     setHasText(!!e.currentTarget.innerText.trim());
     const sel = window.getSelection();
@@ -296,7 +309,8 @@ export function ChatArea() {
       const range = sel.getRangeAt(0);
       if (range.startContainer.nodeType === Node.TEXT_NODE) {
         const match = range.startContainer.textContent?.slice(0, range.startOffset).match(/@(\w*)$/);
-        setMentionState(match ? { active: true, query: match[1], index: 0 } : s => ({ ...s, active: false }));
+        if (match) { mentionIndexRef.current = 0; setMentionState({ active: true, query: match[1] }); }
+        else setMentionState(s => ({ ...s, active: false }));
       } else { setMentionState(s => ({ ...s, active: false })); }
     }
   };
@@ -342,9 +356,9 @@ export function ChatArea() {
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (mentionState.active && filteredMentionAssets.length > 0) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionState(s => ({ ...s, index: (s.index + 1) % filteredMentionAssets.length })); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionState(s => ({ ...s, index: (s.index - 1 + filteredMentionAssets.length) % filteredMentionAssets.length })); return; }
-      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertMention(filteredMentionAssets[mentionState.index]); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); mentionIndexRef.current = (mentionIndexRef.current + 1) % filteredMentionAssets.length; highlightMentionItem(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); mentionIndexRef.current = (mentionIndexRef.current - 1 + filteredMentionAssets.length) % filteredMentionAssets.length; highlightMentionItem(); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertMention(filteredMentionAssets[mentionIndexRef.current]); return; }
       if (e.key === 'Escape') { setMentionState(s => ({ ...s, active: false })); return; }
     }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
@@ -764,7 +778,7 @@ export function ChatArea() {
                 <div className="max-h-48 overflow-y-auto">
                   {filteredMentionAssets.map((asset, idx) => (
                     <button key={asset.id} onClick={() => insertMention(asset)}
-                      className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-indigo-50 transition-colors ${idx === mentionState.index ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700'}`}>
+                      className={`mention-item w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-indigo-50 transition-none ${idx === mentionIndexRef.current ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700'}`}>
                       {asset.type === 'image_url' ? <img src={asset.url} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" /> : asset.type === 'video_url' ? <div className="w-6 h-6 bg-purple-50 flex items-center justify-center rounded shrink-0"><Video size={14} className="text-purple-500" /></div> : <div className="w-6 h-6 bg-green-50 flex items-center justify-center rounded shrink-0"><Music size={14} className="text-green-500" /></div>}
                       <span className="font-medium">[{asset.name}]</span>
                       <span className="text-xs text-gray-400 ml-auto">{asset.role}</span>
