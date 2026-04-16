@@ -2,6 +2,7 @@ node_modules/
 build/
 dist/
 dist-server/
+media-cache/
 release/
 .DS_Store
 *.log
