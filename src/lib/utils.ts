@@ -88,14 +88,16 @@ export function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-export function downloadViaProxy(remoteUrl: string, filename: string) {
+export async function downloadViaProxy(remoteUrl: string, filename: string) {
   const params = new URLSearchParams({ url: remoteUrl, filename });
+  const res = await fetch(`/api/download?${params.toString()}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = `/api/download?${params.toString()}`;
+  a.href = url;
   a.download = filename;
-  document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 export function buildDownloadFilename(taskId: string, ext: string = '.mp4'): string {
