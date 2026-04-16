@@ -429,12 +429,42 @@ export function ChatArea() {
       alert('비디오를 첨부해주세요.'); return;
     }
 
-    contentEditableRef.current.innerHTML = ''; setHasText(false); setIsGenerating(true);
+    const currentSettings = { ...project.settings };
+    const currentAssets = [...project.assets];
+
+    // Pre-flight checks BEFORE clearing input or creating messages
+    // Check total payload size — count full data URL length (sent as-is in JSON)
+    const totalPayloadBytes = currentAssets.reduce((sum, a) => {
+      if (a.url.startsWith('data:')) return sum + a.url.length;
+      return sum;
+    }, 0);
+    const totalMB = totalPayloadBytes / (1024 * 1024);
+    if (totalMB > 60) {
+      alert(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB (최대 64MB)\n이미지 수를 줄이거나 작은 파일을 사용해주세요.`);
+      return;
+    }
+
+    // Re-upload video/audio assets if their public URLs may have expired
+    setIsGenerating(true);
+    for (let i = 0; i < currentAssets.length; i++) {
+      const a = currentAssets[i];
+      if ((a.type === 'video_url' || a.type === 'audio_url') && a.cacheId && a.url.includes('tmpfiles.org')) {
+        try {
+          const newUrl = await reuploadFromCache(a.cacheId);
+          currentAssets[i] = { ...a, url: newUrl };
+        } catch {
+          alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n파일을 다시 첨부해주세요.`);
+          setIsGenerating(false);
+          return;
+        }
+      }
+    }
+
+    // All checks passed — now clear input and create messages
+    contentEditableRef.current.innerHTML = ''; setHasText(false);
 
     const outputCount = project.settings.output_count || 1;
     const systemMessageIds: string[] = [];
-    const currentSettings = { ...project.settings };
-    const currentAssets = [...project.assets];
 
     // Create tiny thumbnails for log storage (original base64 only used for API call)
     const thumbAssets = await Promise.all(currentAssets.map(async a => ({
@@ -450,34 +480,6 @@ export function ChatArea() {
     setTimeout(() => scrollToBottom(), 150);
 
     try {
-
-      // Check total payload size — count full data URL length (sent as-is in JSON)
-      const totalPayloadBytes = currentAssets.reduce((sum, a) => {
-        if (a.url.startsWith('data:')) return sum + a.url.length; // full data URL string in JSON
-        return sum;
-      }, 0);
-      const totalMB = totalPayloadBytes / (1024 * 1024);
-      if (totalMB > 60) { // 60MB threshold (4MB margin for JSON structure overhead)
-        alert(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB (최대 64MB)\n이미지 수를 줄이거나 작은 파일을 사용해주세요.`);
-        setIsGenerating(false);
-        return;
-      }
-
-      // Re-upload video/audio assets if their public URLs may have expired
-      for (let i = 0; i < currentAssets.length; i++) {
-        const a = currentAssets[i];
-        if ((a.type === 'video_url' || a.type === 'audio_url') && a.cacheId && a.url.includes('tmpfiles.org')) {
-          try {
-            const newUrl = await reuploadFromCache(a.cacheId);
-            currentAssets[i] = { ...a, url: newUrl };
-          } catch {
-            alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n파일을 다시 첨부해주세요.`);
-            setIsGenerating(false);
-            return;
-          }
-        }
-      }
-
       const content: any[] = [{ type: 'text', text: plainText }];
       if (project.settings.use_asset_id) {
         const matches = plainText.match(/asset:\/\/[a-zA-Z0-9-]+/g);
