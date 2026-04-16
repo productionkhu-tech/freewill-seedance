@@ -217,7 +217,7 @@ export function ChatArea() {
 
         if (file.type.startsWith('image/')) {
           const imgCount = assets.filter(a => a.type === 'image_url').length;
-          const maxImg = project.settings.mode === 'multimodal_reference' ? 9 : project.settings.mode === 'image_to_video_first' ? 1 : project.settings.mode === 'image_to_video_first_last' ? 2 : Infinity;
+          const maxImg = project.settings.mode === 'multimodal_reference' ? 9 : project.settings.mode === 'edit_video' ? 9 : project.settings.mode === 'image_to_video_first' ? 1 : project.settings.mode === 'image_to_video_first_last' ? 2 : Infinity;
           if (imgCount >= maxImg) continue;
           let role: any = 'reference_image';
           if (project.settings.mode === 'image_to_video_first') role = 'first_frame';
@@ -400,16 +400,31 @@ export function ChatArea() {
 
     try {
 
-      // Check total payload size (base64 adds ~33%)
-      const totalBytes = currentAssets.reduce((sum, a) => {
-        if (a.url.startsWith('data:')) return sum + Math.ceil(a.url.length * 0.75);
+      // Check total payload size — count full data URL length (sent as-is in JSON)
+      const totalPayloadBytes = currentAssets.reduce((sum, a) => {
+        if (a.url.startsWith('data:')) return sum + a.url.length; // full data URL string in JSON
         return sum;
       }, 0);
-      const totalMB = totalBytes / (1024 * 1024);
-      if (totalMB > 64) {
+      const totalMB = totalPayloadBytes / (1024 * 1024);
+      if (totalMB > 60) { // 60MB threshold (4MB margin for JSON structure overhead)
         alert(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB (최대 64MB)\n이미지 수를 줄이거나 작은 파일을 사용해주세요.`);
         setIsGenerating(false);
         return;
+      }
+
+      // Re-upload video/audio assets if their public URLs may have expired
+      for (let i = 0; i < currentAssets.length; i++) {
+        const a = currentAssets[i];
+        if ((a.type === 'video_url' || a.type === 'audio_url') && a.cacheId && a.url.includes('tmpfiles.org')) {
+          try {
+            const newUrl = await reuploadFromCache(a.cacheId);
+            currentAssets[i] = { ...a, url: newUrl };
+          } catch {
+            alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n파일을 다시 첨부해주세요.`);
+            setIsGenerating(false);
+            return;
+          }
+        }
       }
 
       const content: any[] = [{ type: 'text', text: plainText }];
@@ -417,7 +432,7 @@ export function ChatArea() {
         const matches = plainText.match(/asset:\/\/[a-zA-Z0-9-]+/g);
         matches?.forEach(m => content.push({ type: 'image_url', image_url: { url: m }, role: 'reference_image' }));
       } else {
-        content.push(...project.assets.map(asset => {
+        content.push(...currentAssets.map(asset => {
           const item: any = { type: asset.type, [asset.type]: { url: asset.url } };
           if (currentSettings.mode !== 'image_to_video_first') item.role = asset.role;
           return item;

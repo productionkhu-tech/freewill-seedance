@@ -51,7 +51,7 @@ export default function App() {
       <ChatArea />
       <SettingsPanel />
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.04.1721
+        v26.4.1722
       </div>
     </div>
   );

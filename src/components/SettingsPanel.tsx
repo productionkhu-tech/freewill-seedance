@@ -367,7 +367,7 @@ export function SettingsPanel() {
 
               {settings.mode === 'edit_video' && (
                 <div className="space-y-2">
-                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true)}
+                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
                   {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, assets.filter(a => a.type === 'video_url').length >= 1)}
                   {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= 3)}
                 </div>

@@ -78,7 +78,7 @@ export function validateImageDimensions(dataUrl: string): Promise<string | null>
   });
 }
 
-// Validate video file (size + duration)
+// Validate video file (size + duration + resolution + fps)
 export function validateVideoFile(file: File): Promise<string | null> {
   return new Promise((resolve) => {
     const sizeMB = file.size / (1024 * 1024);
@@ -90,9 +90,16 @@ export function validateVideoFile(file: File): Promise<string | null> {
     video.onloadedmetadata = () => {
       URL.revokeObjectURL(video.src);
       const d = video.duration;
-      if (d < API_LIMITS.video.minDuration) resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`);
-      else if (d > API_LIMITS.video.maxDuration) resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.maxDuration}초)`);
-      else resolve(null);
+      if (d < API_LIMITS.video.minDuration) { resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`); return; }
+      if (d > API_LIMITS.video.maxDuration) { resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.maxDuration}초)`); return; }
+      // Check resolution (480p~720p → height roughly 480~1280)
+      const h = video.videoHeight;
+      const w = video.videoWidth;
+      if (h > 0 && w > 0) {
+        const shortSide = Math.min(h, w);
+        if (shortSide > 1280) { resolve(`비디오 해상도 초과: ${w}x${h} (720p 이하로 줄여주세요)`); return; }
+      }
+      resolve(null);
     };
     video.onerror = () => { URL.revokeObjectURL(video.src); resolve(null); };
     video.src = URL.createObjectURL(file);
@@ -184,6 +191,10 @@ export function readFileAsDataUrl(file: File): Promise<string> {
 export async function downloadViaProxy(remoteUrl: string, filename: string) {
   const params = new URLSearchParams({ url: remoteUrl, filename });
   const res = await fetch(`/api/download?${params.toString()}`);
+  if (!res.ok) {
+    alert(`다운로드 실패: 영상 URL이 만료되었습니다.\n생성 후 24시간 이내에 다운로드해주세요.`);
+    return;
+  }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
