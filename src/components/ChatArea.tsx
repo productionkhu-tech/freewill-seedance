@@ -384,6 +384,19 @@ export function ChatArea() {
     setTimeout(() => scrollToBottom(), 150);
 
     try {
+      // Validate required assets per mode
+      if (currentSettings.mode === 'image_to_video_first' && !currentAssets.some(a => a.role === 'first_frame')) {
+        alert('시작 프레임 이미지를 첨부해주세요.'); setIsGenerating(false); return;
+      }
+      if (currentSettings.mode === 'image_to_video_first_last') {
+        if (!currentAssets.some(a => a.role === 'first_frame') || !currentAssets.some(a => a.role === 'last_frame')) {
+          alert('시작 프레임과 끝 프레임 이미지를 모두 첨부해주세요.'); setIsGenerating(false); return;
+        }
+      }
+      if ((currentSettings.mode === 'edit_video' || currentSettings.mode === 'extend_video') && !currentAssets.some(a => a.type === 'video_url')) {
+        alert('비디오를 첨부해주세요.'); setIsGenerating(false); return;
+      }
+
       // Check total payload size (base64 adds ~33%)
       const totalBytes = currentAssets.reduce((sum, a) => {
         if (a.url.startsWith('data:')) return sum + Math.ceil(a.url.length * 0.75);
