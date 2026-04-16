@@ -3,7 +3,7 @@ import { useAppStore, AssetRole, defaultSettings } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl } from '../lib/utils';
+import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl, cacheFile, readCacheAsDataUrl } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -228,7 +228,8 @@ export function ChatArea() {
             const url = await readFileAsDataUrl(file);
             const dimErr = await validateImageDimensions(url);
             if (dimErr) { alert(dimErr); continue; }
-            addAsset(project.id, { type: 'image_url', url, role, file_name: file.name });
+            const imgCacheId = await cacheFile(file);
+            addAsset(project.id, { type: 'image_url', url, role, file_name: file.name, cacheId: imgCacheId });
           } catch (e) { console.error(e); }
 
         } else if (file.type.startsWith('video/')) {
@@ -303,7 +304,8 @@ export function ChatArea() {
       const url = await readFileAsDataUrl(file);
       const dimErr = await validateImageDimensions(url);
       if (dimErr) { alert(dimErr); return; }
-      addAsset(project.id, { type: 'image_url', url, role, file_name: file.name });
+      const imgCacheId = await cacheFile(file);
+      addAsset(project.id, { type: 'image_url', url, role, file_name: file.name, cacheId: imgCacheId });
     } catch (e) { alert(`이미지 업로드 실패: ${file.name}`); }
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
@@ -325,22 +327,27 @@ export function ChatArea() {
       useAppStore.getState().clearAssets(project.id);
       let needReattach: string[] = [];
       for (const a of msg.usedAssets) {
-        if (a.type === 'image_url') {
-          // Thumbnails are too small for API — user must re-attach original images
-          needReattach.push('이미지');
-          break;
-        } else if (a.cacheId) {
-          // Video/audio: re-upload from local cache → new public URL
+        if (a.cacheId) {
           try {
-            const newUrl = await reuploadFromCache(a.cacheId);
-            useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: newUrl });
+            if (a.type === 'image_url') {
+              // Restore original image from cache
+              const originalUrl = await readCacheAsDataUrl(a.cacheId);
+              useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: originalUrl });
+            } else {
+              // Video/audio: re-upload from cache → new public URL
+              const newUrl = await reuploadFromCache(a.cacheId);
+              useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: newUrl });
+            }
           } catch {
-            needReattach.push(a.file_name || '미디어');
+            needReattach.push(a.file_name || a.type.replace('_url', ''));
           }
+        } else if (a.type !== 'image_url' || !a.url.startsWith('data:image')) {
+          // No cache and not a valid base64 — need re-attach
+          needReattach.push(a.file_name || a.type.replace('_url', ''));
         }
       }
       if (needReattach.length > 0) {
-        alert(`프롬프트와 설정이 복원되었습니다.\n래퍼런스 ${needReattach.join(', ')}는 원본 파일을 다시 첨부해주세요.`);
+        alert(`일부 래퍼런스 복원 실패: ${needReattach.join(', ')}\n파일을 다시 첨부해주세요.`);
       }
     }
     if (msg.promptText && contentEditableRef.current) {

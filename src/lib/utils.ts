@@ -120,6 +120,31 @@ export function validateAudioFile(file: File): Promise<string | null> {
   });
 }
 
+// Cache file locally on server (for reuse) → returns cacheId
+export async function cacheFile(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const res = await fetch('/api/cache', {
+    method: 'POST',
+    headers: { 'Content-Type': file.type, 'X-Filename': file.name },
+    body: buffer,
+  });
+  const data = await res.json();
+  return data.cacheId;
+}
+
+// Read cached file as base64 data URL (for image reuse)
+export async function readCacheAsDataUrl(cacheId: string): Promise<string> {
+  const res = await fetch(`/api/cache/${cacheId}`);
+  if (!res.ok) throw new Error('Cache file not found');
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 // Upload video/audio to temp public hosting → returns { url, cacheId }
 export async function uploadToPublicUrl(file: File): Promise<{ url: string; cacheId: string }> {
   const buffer = await file.arrayBuffer();

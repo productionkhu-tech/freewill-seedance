@@ -80,6 +80,24 @@ async function startServer() {
     return data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
   }
 
+  // Cache file locally (for image reuse) → returns { cacheId }
+  app.post('/api/cache', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
+    const filename = (req.headers['x-filename'] as string) || 'file';
+    const ext = path.extname(filename) || '';
+    const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
+    const cacheId = `${hash}${ext}`;
+    const cachePath = path.join(CACHE_DIR, cacheId);
+    if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, req.body);
+    res.json({ cacheId });
+  });
+
+  // Read cached file
+  app.get('/api/cache/:cacheId', (req, res) => {
+    const cachePath = path.join(CACHE_DIR, req.params.cacheId);
+    if (!fs.existsSync(cachePath)) return res.status(404).json({ error: 'File not found in cache' });
+    res.sendFile(cachePath);
+  });
+
   // Upload video/audio → cache locally + upload to tmpfiles → returns { url, cacheId }
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     const filename = (req.headers['x-filename'] as string) || 'upload.mp4';

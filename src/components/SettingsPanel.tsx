@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl } from '../lib/utils';
+import { readFileAsDataUrl, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, cacheFile } from '../lib/utils';
 
 const RESOLUTIONS = ['480p', '720p'];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
@@ -187,6 +187,9 @@ export function SettingsPanel() {
             url = await readFileAsDataUrl(file);
             const dimErr = await validateImageDimensions(url);
             if (dimErr) { alert(dimErr); continue; }
+            const imgCacheId = await cacheFile(file);
+            addAsset(project.id, { type, url, role, file_name: file.name, cacheId: imgCacheId });
+            continue;
           } else {
             // Video/audio → validate + upload to temp public hosting
             const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
