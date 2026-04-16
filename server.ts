@@ -59,6 +59,17 @@ async function startServer() {
   const CACHE_DIR = path.join(process.cwd(), 'media-cache');
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
+  // Cleanup files older than 30 days
+  const CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+  try {
+    const now = Date.now();
+    for (const f of fs.readdirSync(CACHE_DIR)) {
+      const fp = path.join(CACHE_DIR, f);
+      const age = now - fs.statSync(fp).mtimeMs;
+      if (age > CACHE_MAX_AGE_MS) { fs.unlinkSync(fp); console.log(`[Cache] Deleted old file: ${f}`); }
+    }
+  } catch {};
+
   async function uploadToTmpFiles(fileBuffer: Buffer, filename: string): Promise<string> {
     const formData = new FormData();
     formData.append('file', new Blob([fileBuffer]), filename);
@@ -72,12 +83,16 @@ async function startServer() {
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     const filename = (req.headers['x-filename'] as string) || 'upload.mp4';
     const ext = path.extname(filename) || '.mp4';
-    const cacheId = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
-    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB)...`);
+    // Hash file content → same file = same cacheId (no duplicates)
+    const crypto = require('crypto');
+    const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
+    const cacheId = `${hash}${ext}`;
+    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash}`);
 
     try {
-      // Save to local cache
-      fs.writeFileSync(path.join(CACHE_DIR, cacheId), req.body);
+      // Save to local cache (skip if same file already cached)
+      const cachePath = path.join(CACHE_DIR, cacheId);
+      if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, req.body);
 
       // Upload to public hosting
       const publicUrl = await uploadToTmpFiles(req.body, filename);
