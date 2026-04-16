@@ -374,42 +374,36 @@ export function SettingsPanel() {
           {settings.mode !== 'text_to_video' && (
             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.15 }} className="overflow-hidden">
             <div className="space-y-3 pt-2 border-t border-gray-100 mt-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={settings.use_asset_id} onChange={(e) => updateProjectSettings(project.id, { use_asset_id: e.target.checked })} className="rounded text-[#0071e3] focus:ring-[#0071e3]" />
-                <span className="text-[14px] text-gray-700">Add via Asset ID or URL</span>
-              </label>
-
-              {settings.use_asset_id && (
-                <div className="flex flex-col gap-2 pt-2">
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={assetIdType}
-                      onChange={(e) => setAssetIdType(e.target.value as any)}
-                      className="w-20 shrink-0 px-2 py-1.5 bg-[#fafafc] border-[3px] border-black/5 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
-                    >
-                      {availableTypes.includes('image_url') && <option value="image_url">Image</option>}
-                      {availableTypes.includes('video_url') && <option value="video_url">Video</option>}
-                      {availableTypes.includes('audio_url') && <option value="audio_url">Audio</option>}
-                    </select>
-                    <input
-                      type="text"
-                      value={assetIdInput}
-                      onChange={(e) => setAssetIdInput(e.target.value)}
-                      placeholder="URL or asset-12345..."
-                      className="min-w-0 flex-1 px-2 py-1.5 bg-[#fafafc] border-[3px] border-black/5 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
-                    />
-                  </div>
-                  {assetIdType === 'video_url' && (
-                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">비디오: MP4/MOV, 480p~720p, 2~15초, 50MB 이하, 24~60fps</p>
-                  )}
-                  {assetIdType === 'audio_url' && (
-                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">오디오: WAV/MP3, 2~15초, 15MB 이하</p>
-                  )}
-                  <button onClick={handleAddAssetId} disabled={!assetIdInput.trim()} className="w-full py-1.5 bg-[#0071e3] text-white text-[12px] font-medium rounded-[8px] disabled:opacity-50 transition-colors hover:bg-[#0077ed]">
-                    Add Asset
-                  </button>
+              <p className="text-[12px] font-semibold text-black/60">URL / Asset ID로 추가</p>
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <select
+                    value={assetIdType}
+                    onChange={(e) => setAssetIdType(e.target.value as any)}
+                    className="w-20 shrink-0 px-2 py-1.5 bg-[#fafafc] border-[3px] border-black/5 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
+                  >
+                    {availableTypes.includes('image_url') && <option value="image_url">Image</option>}
+                    {availableTypes.includes('video_url') && <option value="video_url">Video</option>}
+                    {availableTypes.includes('audio_url') && <option value="audio_url">Audio</option>}
+                  </select>
+                  <input
+                    type="text"
+                    value={assetIdInput}
+                    onChange={(e) => setAssetIdInput(e.target.value)}
+                    placeholder="URL or asset-12345..."
+                    className="min-w-0 flex-1 px-2 py-1.5 bg-[#fafafc] border-[3px] border-black/5 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
+                  />
                 </div>
-              )}
+                {assetIdType === 'video_url' && (
+                  <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">비디오: MP4/MOV, 480p~720p, 2~15초, 50MB 이하, 24~60fps</p>
+                )}
+                {assetIdType === 'audio_url' && (
+                  <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">오디오: WAV/MP3, 2~15초, 15MB 이하</p>
+                )}
+                <button onClick={handleAddAssetId} disabled={!assetIdInput.trim()} className="w-full py-1.5 bg-[#0071e3] text-white text-[12px] font-medium rounded-[8px] disabled:opacity-50 transition-colors hover:bg-[#0077ed] active:scale-95 transition-all">
+                  추가
+                </button>
+              </div>
             </div>
             </motion.div>
           )}
