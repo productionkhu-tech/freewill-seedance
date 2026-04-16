@@ -69,7 +69,18 @@ function createWindow() {
   mainWindow.webContents.session.on('will-download', (event, item) => {
     const downloadsPath = app.getPath('downloads');
     const filename = item.getFilename();
-    item.setSavePath(path.join(downloadsPath, filename));
+    const savePath = path.join(downloadsPath, filename);
+    item.setSavePath(savePath);
+
+    item.on('done', (e, state) => {
+      if (state === 'completed') {
+        tray?.displayBalloon({
+          title: 'Download Complete',
+          content: filename,
+          iconType: 'info',
+        });
+      }
+    });
   });
 
   const waitForServer = () => {
