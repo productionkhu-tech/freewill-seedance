@@ -481,16 +481,11 @@ export function ChatArea() {
 
     try {
       const content: any[] = [{ type: 'text', text: plainText }];
-      if (project.settings.use_asset_id) {
-        const matches = plainText.match(/asset:\/\/[a-zA-Z0-9-]+/g);
-        matches?.forEach(m => content.push({ type: 'image_url', image_url: { url: m }, role: 'reference_image' }));
-      } else {
-        content.push(...currentAssets.map(asset => {
-          const item: any = { type: asset.type, [asset.type]: { url: asset.url } };
-          if (currentSettings.mode !== 'image_to_video_first') item.role = asset.role;
-          return item;
-        }));
-      }
+      content.push(...currentAssets.map(asset => {
+        const item: any = { type: asset.type, [asset.type]: { url: asset.url } };
+        if (currentSettings.mode !== 'image_to_video_first') item.role = asset.role;
+        return item;
+      }));
       const payload: any = {
         model: project.settings.model, content,
         generate_audio: currentSettings.return_last_frame ? false : project.settings.generate_audio,

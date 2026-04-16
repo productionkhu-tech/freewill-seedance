@@ -299,12 +299,18 @@ export const useAppStore = create<AppState>()(
       }),
       onRehydrateStorage: () => {
         return () => {
-          // Migrate: fill missing settings fields with defaults on existing projects
+          // Migrate: fill missing settings fields with defaults + clamp invalid values
+          const validResolutions = ['480p', '720p'];
           const state = useAppStore.getState();
-          const patched = state.projects.map(p => ({
-            ...p,
-            settings: { ...defaultSettings, ...p.settings },
-          }));
+          const patched = state.projects.map(p => {
+            const s = { ...defaultSettings, ...p.settings };
+            // Clamp duration to seedance 2.0 range (4–15)
+            if (s.duration < 4) s.duration = 4;
+            if (s.duration > 15) s.duration = 15;
+            // Clamp resolution to supported values
+            if (!validResolutions.includes(s.resolution)) s.resolution = '720p';
+            return { ...p, settings: s };
+          });
           useAppStore.setState({ projects: patched, _hasHydrated: true });
         };
       },

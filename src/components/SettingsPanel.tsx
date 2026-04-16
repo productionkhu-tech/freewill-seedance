@@ -167,7 +167,9 @@ export function SettingsPanel() {
       if (type === 'video_url') maxAllowed = 3;
       if (type === 'audio_url') maxAllowed = 3;
     } else if (settings.mode === 'edit_video') {
+      if (type === 'image_url') maxAllowed = 9;
       if (type === 'video_url') maxAllowed = 1;
+      if (type === 'audio_url') maxAllowed = 3;
     } else if (settings.mode === 'extend_video') {
       if (type === 'video_url') maxAllowed = 3;
     } else if (settings.mode === 'image_to_video_first' && type === 'image_url') {
