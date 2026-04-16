@@ -65,6 +65,13 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
+  // Auto-save downloads to Downloads folder (no dialog)
+  mainWindow.webContents.session.on('will-download', (event, item) => {
+    const downloadsPath = app.getPath('downloads');
+    const filename = item.getFilename();
+    item.setSavePath(path.join(downloadsPath, filename));
+  });
+
   const waitForServer = () => {
     fetch(`http://localhost:${PORT}`)
       .then(() => mainWindow.loadURL(`http://localhost:${PORT}`))
