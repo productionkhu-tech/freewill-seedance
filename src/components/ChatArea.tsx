@@ -371,6 +371,18 @@ export function ChatArea() {
     setTimeout(() => scrollToBottom(), 150);
 
     try {
+      // Check total payload size (base64 adds ~33%)
+      const totalBytes = currentAssets.reduce((sum, a) => {
+        if (a.url.startsWith('data:')) return sum + Math.ceil(a.url.length * 0.75);
+        return sum;
+      }, 0);
+      const totalMB = totalBytes / (1024 * 1024);
+      if (totalMB > 64) {
+        alert(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB (최대 64MB)\n이미지 수를 줄이거나 작은 파일을 사용해주세요.`);
+        setIsGenerating(false);
+        return;
+      }
+
       const content: any[] = [{ type: 'text', text: plainText }];
       if (project.settings.use_asset_id) {
         const matches = plainText.match(/asset:\/\/[a-zA-Z0-9-]+/g);

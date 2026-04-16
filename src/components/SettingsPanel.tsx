@@ -352,9 +352,10 @@ export function SettingsPanel() {
               {settings.mode === 'multimodal_reference' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
-                    이미지: {assets.filter(a => a.type === 'image_url').length}/9 (30MB, 300~6000px)
-                    &nbsp;&middot;&nbsp;비디오: {assets.filter(a => a.type === 'video_url').length}/3 (50MB, 2~15초)
-                    &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3 (15MB, 2~15초)
+                    이미지: {assets.filter(a => a.type === 'image_url').length}/9 (개당 30MB, 300~6000px)
+                    &nbsp;&middot;&nbsp;비디오: {assets.filter(a => a.type === 'video_url').length}/3 (개당 50MB, 2~15초)
+                    &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3 (개당 15MB, 2~15초)
+                    &nbsp;&middot;&nbsp;<span className="text-amber-600 font-medium">전체 합산 64MB 이하</span>
                   </p>
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
                   {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, assets.filter(a => a.type === 'video_url').length >= 3)}
