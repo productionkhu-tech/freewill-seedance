@@ -125,7 +125,7 @@ export async function cacheFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const res = await fetch('/api/cache', {
     method: 'POST',
-    headers: { 'Content-Type': file.type, 'X-Filename': file.name },
+    headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name) },
     body: buffer,
   });
   const data = await res.json();
@@ -150,7 +150,7 @@ export async function uploadToPublicUrl(file: File): Promise<{ url: string; cach
   const buffer = await file.arrayBuffer();
   const res = await fetch('/api/upload-public', {
     method: 'POST',
-    headers: { 'Content-Type': file.type, 'X-Filename': file.name },
+    headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name) },
     body: buffer,
   });
   if (!res.ok) {

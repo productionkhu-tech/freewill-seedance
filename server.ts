@@ -82,7 +82,7 @@ async function startServer() {
 
   // Cache file locally (for image reuse) → returns { cacheId }
   app.post('/api/cache', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
-    const filename = (req.headers['x-filename'] as string) || 'file';
+    const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'file');
     const ext = path.extname(filename) || '';
     const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
     const cacheId = `${hash}${ext}`;
@@ -100,7 +100,7 @@ async function startServer() {
 
   // Upload video/audio → cache locally + upload to tmpfiles → returns { url, cacheId }
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
-    const filename = (req.headers['x-filename'] as string) || 'upload.mp4';
+    const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'upload.mp4');
     const ext = path.extname(filename) || '.mp4';
     // Hash file content → same file = same cacheId (no duplicates)
     const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
