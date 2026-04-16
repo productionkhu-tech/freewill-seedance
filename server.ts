@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -55,7 +57,6 @@ async function startServer() {
   });
 
   // Media cache directory for video/audio reuse
-  const fs = require('fs');
   const CACHE_DIR = path.join(process.cwd(), 'media-cache');
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -84,7 +85,6 @@ async function startServer() {
     const filename = (req.headers['x-filename'] as string) || 'upload.mp4';
     const ext = path.extname(filename) || '.mp4';
     // Hash file content → same file = same cacheId (no duplicates)
-    const crypto = require('crypto');
     const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
     const cacheId = `${hash}${ext}`;
     console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash}`);
