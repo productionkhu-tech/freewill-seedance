@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, validateImageFile, validateImageDimensions, uploadToPublicUrl } from '../lib/utils';
+import { readFileAsDataUrl, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl } from '../lib/utils';
 
 const RESOLUTIONS = ['480p', '720p'];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
@@ -188,10 +188,9 @@ export function SettingsPanel() {
             const dimErr = await validateImageDimensions(url);
             if (dimErr) { alert(dimErr); continue; }
           } else {
-            // Video/audio → upload to temp public hosting
-            const sizeMB = file.size / (1024 * 1024);
-            const maxMB = type === 'video_url' ? 50 : 15;
-            if (sizeMB > maxMB) { alert(`파일 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${maxMB}MB)`); continue; }
+            // Video/audio → validate + upload to temp public hosting
+            const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+            if (vErr) { alert(vErr); continue; }
             const result = await uploadToPublicUrl(file);
             url = result.url;
             addAsset(project.id, { type, url, role, file_name: file.name, cacheId: result.cacheId });
@@ -353,9 +352,9 @@ export function SettingsPanel() {
               {settings.mode === 'multimodal_reference' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
-                    이미지: {assets.filter(a => a.type === 'image_url').length}/9
-                    &nbsp;&middot;&nbsp;비디오: {assets.filter(a => a.type === 'video_url').length}/3
-                    &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3
+                    이미지: {assets.filter(a => a.type === 'image_url').length}/9 (30MB, 300~6000px)
+                    &nbsp;&middot;&nbsp;비디오: {assets.filter(a => a.type === 'video_url').length}/3 (50MB, 2~15초)
+                    &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3 (15MB, 2~15초)
                   </p>
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
                   {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, assets.filter(a => a.type === 'video_url').length >= 3)}

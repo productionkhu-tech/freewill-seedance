@@ -3,7 +3,7 @@ import { useAppStore, AssetRole, defaultSettings } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, createThumbnail, reuploadFromCache, uploadToPublicUrl } from '../lib/utils';
+import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -235,11 +235,11 @@ export function ChatArea() {
           const vidCount = assets.filter(a => a.type === 'video_url').length;
           const maxVid = project.settings.mode === 'extend_video' ? 3 : project.settings.mode === 'edit_video' ? 1 : project.settings.mode === 'multimodal_reference' ? 3 : 0;
           if (vidCount >= maxVid) continue;
-          const sizeMB = file.size / (1024 * 1024);
-          if (sizeMB > 50) { alert(`비디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 50MB)`); continue; }
+          const vidErr = await validateVideoFile(file);
+          if (vidErr) { alert(vidErr); continue; }
           try {
             const result = await uploadToPublicUrl(file);
-            const role = project.settings.mode === 'extend_video' ? 'reference_video' : 'reference_video';
+            const role: any = 'reference_video';
             addAsset(project.id, { type: 'video_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId });
           } catch (e: any) { alert(`비디오 업로드 실패: ${e.message}`); }
 
@@ -247,8 +247,8 @@ export function ChatArea() {
           const audCount = assets.filter(a => a.type === 'audio_url').length;
           const maxAud = (project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video') ? 3 : 0;
           if (audCount >= maxAud) continue;
-          const sizeMB = file.size / (1024 * 1024);
-          if (sizeMB > 15) { alert(`오디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 15MB)`); continue; }
+          const audErr = await validateAudioFile(file);
+          if (audErr) { alert(audErr); continue; }
           try {
             const result = await uploadToPublicUrl(file);
             addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId });

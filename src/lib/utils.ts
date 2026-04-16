@@ -78,6 +78,48 @@ export function validateImageDimensions(dataUrl: string): Promise<string | null>
   });
 }
 
+// Validate video file (size + duration)
+export function validateVideoFile(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const sizeMB = file.size / (1024 * 1024);
+    if (sizeMB > API_LIMITS.video.maxSizeMB) { resolve(`비디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${API_LIMITS.video.maxSizeMB}MB)`); return; }
+    const validTypes = ['video/mp4', 'video/quicktime'];
+    if (!validTypes.includes(file.type)) { resolve(`지원하지 않는 형식: ${file.type} (지원: MP4, MOV)`); return; }
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(video.src);
+      const d = video.duration;
+      if (d < API_LIMITS.video.minDuration) resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`);
+      else if (d > API_LIMITS.video.maxDuration) resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.maxDuration}초)`);
+      else resolve(null);
+    };
+    video.onerror = () => { URL.revokeObjectURL(video.src); resolve(null); };
+    video.src = URL.createObjectURL(file);
+  });
+}
+
+// Validate audio file (size + duration)
+export function validateAudioFile(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const sizeMB = file.size / (1024 * 1024);
+    if (sizeMB > API_LIMITS.audio.maxSizeMB) { resolve(`오디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${API_LIMITS.audio.maxSizeMB}MB)`); return; }
+    const validTypes = ['audio/wav', 'audio/mpeg', 'audio/mp3'];
+    if (!validTypes.includes(file.type)) { resolve(`지원하지 않는 형식: ${file.type} (지원: WAV, MP3)`); return; }
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+    audio.onloadedmetadata = () => {
+      URL.revokeObjectURL(audio.src);
+      const d = audio.duration;
+      if (d < API_LIMITS.audio.minDuration) resolve(`오디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.audio.minDuration}초)`);
+      else if (d > API_LIMITS.audio.maxDuration) resolve(`오디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.audio.maxDuration}초)`);
+      else resolve(null);
+    };
+    audio.onerror = () => { URL.revokeObjectURL(audio.src); resolve(null); };
+    audio.src = URL.createObjectURL(file);
+  });
+}
+
 // Upload video/audio to temp public hosting → returns { url, cacheId }
 export async function uploadToPublicUrl(file: File): Promise<{ url: string; cacheId: string }> {
   const buffer = await file.arrayBuffer();
