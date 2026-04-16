@@ -139,8 +139,11 @@ export function SettingsPanel() {
       if (assetIdType === 'image_url') maxAllowed = 9;
       if (assetIdType === 'video_url') maxAllowed = 3;
       if (assetIdType === 'audio_url') maxAllowed = 3;
-    } else if (settings.mode === 'edit_video' && assetIdType === 'video_url') maxAllowed = 1;
-    else if (settings.mode === 'extend_video' && assetIdType === 'video_url') maxAllowed = 3;
+    } else if (settings.mode === 'edit_video') {
+      if (assetIdType === 'image_url') maxAllowed = 9;
+      if (assetIdType === 'video_url') maxAllowed = 1;
+      if (assetIdType === 'audio_url') maxAllowed = 3;
+    } else if (settings.mode === 'extend_video' && assetIdType === 'video_url') maxAllowed = 3;
 
     if (currentCount >= maxAllowed) return;
 
@@ -180,26 +183,21 @@ export function SettingsPanel() {
     (async () => {
       for (const file of files) {
         try {
-          let url: string;
           if (type === 'image_url') {
             const sizeErr = validateImageFile(file);
             if (sizeErr) { alert(sizeErr); continue; }
-            url = await readFileAsDataUrl(file);
+            const url = await readFileAsDataUrl(file);
             const dimErr = await validateImageDimensions(url);
             if (dimErr) { alert(dimErr); continue; }
             const imgCacheId = await cacheFile(file);
             addAsset(project.id, { type, url, role, file_name: file.name, cacheId: imgCacheId });
-            continue;
           } else {
             // Video/audio → validate + upload to temp public hosting
             const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
             if (vErr) { alert(vErr); continue; }
             const result = await uploadToPublicUrl(file);
-            url = result.url;
-            addAsset(project.id, { type, url, role, file_name: file.name, cacheId: result.cacheId });
-            continue;
+            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId });
           }
-          addAsset(project.id, { type, url, role, file_name: file.name });
         } catch (e: any) {
           console.error('Failed to process file:', e);
           alert(`파일 처리 실패: ${file.name}\n${e.message || ''}`);

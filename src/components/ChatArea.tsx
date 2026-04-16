@@ -216,8 +216,9 @@ export function ChatArea() {
         const assets = freshProject?.assets || [];
 
         if (file.type.startsWith('image/')) {
+          if (project.settings.mode === 'extend_video') continue; // extend_video only accepts video
           const imgCount = assets.filter(a => a.type === 'image_url').length;
-          const maxImg = project.settings.mode === 'multimodal_reference' ? 9 : project.settings.mode === 'edit_video' ? 9 : project.settings.mode === 'image_to_video_first' ? 1 : project.settings.mode === 'image_to_video_first_last' ? 2 : Infinity;
+          const maxImg = project.settings.mode === 'multimodal_reference' ? 9 : project.settings.mode === 'edit_video' ? 9 : project.settings.mode === 'image_to_video_first' ? 1 : project.settings.mode === 'image_to_video_first_last' ? 2 : 0;
           if (imgCount >= maxImg) continue;
           let role: any = 'reference_image';
           if (project.settings.mode === 'image_to_video_first') role = 'first_frame';
@@ -230,7 +231,7 @@ export function ChatArea() {
             if (dimErr) { alert(dimErr); continue; }
             const imgCacheId = await cacheFile(file);
             addAsset(project.id, { type: 'image_url', url, role, file_name: file.name, cacheId: imgCacheId });
-          } catch (e) { console.error(e); }
+          } catch (e: any) { alert(`이미지 처리 실패: ${file.name}\n${e.message || ''}`); }
 
         } else if (file.type.startsWith('video/')) {
           const vidCount = assets.filter(a => a.type === 'video_url').length;
@@ -361,6 +362,12 @@ export function ChatArea() {
   /* ─── Send ─── */
   const handleSend = async () => {
     if (!contentEditableRef.current || isGenerating) return;
+    // Remove mention pills that reference deleted assets
+    const currentNamedAssets = getAssetNames(project.assets);
+    contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
+      const name = pill.getAttribute('data-name');
+      if (name && !currentNamedAssets.some(a => a.name === name)) pill.remove();
+    });
     const plainText = getPlainText(contentEditableRef.current.innerHTML);
     if (!plainText.trim()) return;
 
