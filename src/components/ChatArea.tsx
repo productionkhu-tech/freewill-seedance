@@ -82,7 +82,7 @@ const textToHtml = (text: string, assets: any[]) => {
         const iconHtml = asset.type === 'image_url'
           ? `<img src="${imgSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px;" />`
           : `<span style="display:inline-block;width:16px;height:16px;background:#f0f0f5;border-radius:2px;vertical-align:middle;margin-right:4px;text-align:center;line-height:16px;font-size:10px;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
-        return `<span contenteditable="false" class="mention-pill" data-name="${asset.name}" style="display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;">${iconHtml}<span style="font-weight:500;">[${asset.name}]</span></span>&nbsp;`;
+        return `<span contenteditable="false" class="mention-pill" data-name="${asset.name}" data-asset-id="${asset.id}" style="display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;">${iconHtml}<span style="font-weight:500;">[${asset.name}]</span></span>&nbsp;`;
       }
     }
     return part;
@@ -151,14 +151,30 @@ export function ChatArea() {
     setPreviewItem(null);
   }, [currentProjectId]);
 
-  // Remove stale mention pills when assets change (e.g. user deletes an asset)
+  // Track mention pills by asset UUID — remove deleted, renumber shifted
   useEffect(() => {
     if (!contentEditableRef.current || !project) return;
-    const currentNames = getAssetNames(project.assets);
+    const named = getAssetNames(project.assets);
     let changed = false;
     contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
-      const name = pill.getAttribute('data-name');
-      if (name && !currentNames.some(a => a.name === name)) { pill.remove(); changed = true; }
+      const assetId = pill.getAttribute('data-asset-id');
+      if (assetId) {
+        const asset = named.find(a => a.id === assetId);
+        if (!asset) {
+          // Asset was deleted → remove the pill
+          pill.remove(); changed = true;
+        } else if (asset.name !== pill.getAttribute('data-name')) {
+          // Asset was renumbered (e.g. Image 3 → Image 2) → update pill
+          pill.setAttribute('data-name', asset.name);
+          const textSpan = pill.querySelector('span[style*="font-weight"]');
+          if (textSpan) textSpan.textContent = `[${asset.name}]`;
+          changed = true;
+        }
+      } else {
+        // No asset ID (legacy pill) — fallback to name matching
+        const name = pill.getAttribute('data-name');
+        if (name && !named.some(a => a.name === name)) { pill.remove(); changed = true; }
+      }
     });
     if (changed) setHasText(!!contentEditableRef.current.innerText.trim());
   }, [project?.assets]);
@@ -295,7 +311,7 @@ export function ChatArea() {
       if (mentionStart !== -1) { range.setStart(range.startContainer, mentionStart); range.deleteContents(); }
     }
     const pill = document.createElement('span');
-    pill.contentEditable = 'false'; pill.className = 'mention-pill'; pill.dataset.name = asset.name;
+    pill.contentEditable = 'false'; pill.className = 'mention-pill'; pill.dataset.name = asset.name; pill.dataset.assetId = asset.id;
     pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
     const imgSrc = asset.type === 'image_url' ? asset.url : '';
     const iconHtml = asset.type === 'image_url'
@@ -365,6 +381,14 @@ export function ChatArea() {
     }
     if (msg.promptText && contentEditableRef.current) {
       contentEditableRef.current.innerHTML = textToHtml(msg.promptText, getAssetNames(msg.usedAssets || []));
+      // Sync pill asset IDs with newly restored store assets (old IDs → new IDs)
+      const freshAssets = getAssetNames(useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []);
+      contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
+        const name = pill.getAttribute('data-name');
+        const match = freshAssets.find(a => a.name === name);
+        if (match) pill.setAttribute('data-asset-id', match.id);
+        else pill.removeAttribute('data-asset-id');
+      });
       setHasText(true);
     }
     if (showGallery) exitGallery();
@@ -374,12 +398,6 @@ export function ChatArea() {
   /* ─── Send ─── */
   const handleSend = async () => {
     if (!contentEditableRef.current || isGenerating) return;
-    // Remove mention pills that reference deleted assets
-    const currentNamedAssets = getAssetNames(project.assets);
-    contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
-      const name = pill.getAttribute('data-name');
-      if (name && !currentNamedAssets.some(a => a.name === name)) pill.remove();
-    });
     const plainText = getPlainText(contentEditableRef.current.innerHTML);
     if (!plainText.trim()) return;
 
