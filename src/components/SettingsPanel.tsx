@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, validateImageFile, validateImageDimensions } from '../lib/utils';
+import { readFileAsDataUrl, validateImageFile, validateImageDimensions, uploadToPublicUrl } from '../lib/utils';
 
 const RESOLUTIONS = ['480p', '720p'];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
@@ -154,13 +154,6 @@ export function SettingsPanel() {
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole, type: 'image_url' | 'video_url' | 'audio_url') => {
-    // Video/audio: only URL or Asset ID supported per API spec
-    if (type === 'video_url' || type === 'audio_url') {
-      alert('Video and audio files must be provided via URL or Asset ID. Local file upload is not supported by the API.');
-      e.target.value = '';
-      return;
-    }
-
     let files = Array.from(e.target.files || []);
 
     let currentCount = assets.filter(a => a.type === type).length;
@@ -168,6 +161,12 @@ export function SettingsPanel() {
 
     if (settings.mode === 'multimodal_reference') {
       if (type === 'image_url') maxAllowed = 9;
+      if (type === 'video_url') maxAllowed = 3;
+      if (type === 'audio_url') maxAllowed = 3;
+    } else if (settings.mode === 'edit_video') {
+      if (type === 'video_url') maxAllowed = 1;
+    } else if (settings.mode === 'extend_video') {
+      if (type === 'video_url') maxAllowed = 3;
     } else if (settings.mode === 'image_to_video_first' && type === 'image_url') {
       maxAllowed = 1;
     } else if (settings.mode === 'image_to_video_first_last' && type === 'image_url') {
@@ -176,22 +175,29 @@ export function SettingsPanel() {
     }
 
     const availableSlots = Math.max(0, maxAllowed - currentCount);
-    if (files.length > availableSlots) {
-      files = files.slice(0, availableSlots);
-    }
+    if (files.length > availableSlots) files = files.slice(0, availableSlots);
 
     (async () => {
       for (const file of files) {
-        const sizeErr = validateImageFile(file);
-        if (sizeErr) { alert(sizeErr); continue; }
         try {
-          const url = await readFileAsDataUrl(file);
-          const dimErr = await validateImageDimensions(url);
-          if (dimErr) { alert(dimErr); continue; }
+          let url: string;
+          if (type === 'image_url') {
+            const sizeErr = validateImageFile(file);
+            if (sizeErr) { alert(sizeErr); continue; }
+            url = await readFileAsDataUrl(file);
+            const dimErr = await validateImageDimensions(url);
+            if (dimErr) { alert(dimErr); continue; }
+          } else {
+            // Video/audio → upload to temp public hosting
+            const sizeMB = file.size / (1024 * 1024);
+            const maxMB = type === 'video_url' ? 50 : 15;
+            if (sizeMB > maxMB) { alert(`파일 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${maxMB}MB)`); continue; }
+            url = await uploadToPublicUrl(file);
+          }
           addAsset(project.id, { type, url, role, file_name: file.name });
-        } catch (e) {
-          console.error('Failed to read file:', e);
-          alert(`파일 읽기 실패: ${file.name}`);
+        } catch (e: any) {
+          console.error('Failed to process file:', e);
+          alert(`파일 처리 실패: ${file.name}\n${e.message || ''}`);
         }
       }
     })();
@@ -344,27 +350,30 @@ export function SettingsPanel() {
               {settings.mode === 'multimodal_reference' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
-                    이미지: {assets.filter(a => a.type === 'image_url').length}/9 (로컬 업로드)
+                    이미지: {assets.filter(a => a.type === 'image_url').length}/9
                     &nbsp;&middot;&nbsp;비디오: {assets.filter(a => a.type === 'video_url').length}/3
                     &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3
-                    &nbsp;(URL/Asset ID)
                   </p>
-                  {renderUploadButton('Add Reference Image', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
+                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
+                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, assets.filter(a => a.type === 'video_url').length >= 3)}
+                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= 3)}
                 </div>
               )}
 
               {settings.mode === 'edit_video' && (
                 <div className="space-y-2">
-                  <p className="text-[12px] text-gray-500 leading-tight">이미지 (로컬), 비디오/오디오 (URL/Asset ID)</p>
-                  {renderUploadButton('Add Reference Image', 'reference_image', 'image_url', 'image/*', true)}
+                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true)}
+                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, assets.filter(a => a.type === 'video_url').length >= 1)}
+                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= 3)}
                 </div>
               )}
 
               {settings.mode === 'extend_video' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
-                    비디오: {assets.filter(a => a.type === 'video_url').length}/3 (URL/Asset ID, 최대 3개 이어붙이기)
+                    비디오: {assets.filter(a => a.type === 'video_url').length}/3 (최대 3개 이어붙이기)
                   </p>
+                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, assets.filter(a => a.type === 'video_url').length >= 3)}
                 </div>
               )}
             </motion.div>

@@ -78,6 +78,22 @@ export function validateImageDimensions(dataUrl: string): Promise<string | null>
   });
 }
 
+// Upload video/audio to temp public hosting → returns public URL
+export async function uploadToPublicUrl(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const res = await fetch('/api/upload-public', {
+    method: 'POST',
+    headers: { 'Content-Type': file.type, 'X-Filename': file.name },
+    body: buffer,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Upload failed');
+  }
+  const data = await res.json();
+  return data.url;
+}
+
 // Read file as base64 data URL — lossless, no compression, no server upload
 export function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

@@ -54,8 +54,36 @@ async function startServer() {
     }
   });
 
+  // Upload video/audio to temp public hosting → returns public URL for BytePlus API
+  app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
+    const filename = (req.headers['x-filename'] as string) || 'upload.mp4';
+    console.log(`[Upload Public] Uploading ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB)...`);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', new Blob([req.body]), filename);
+
+      const response = await fetch('https://tmpfiles.org/api/v1/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json() as any;
+
+      if (data.status !== 'success' || !data.data?.url) {
+        throw new Error('Upload failed: ' + JSON.stringify(data));
+      }
+
+      // Convert to direct download URL
+      const publicUrl = data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+      console.log(`[Upload Public] OK → ${publicUrl}`);
+      res.json({ url: publicUrl });
+    } catch (error: any) {
+      console.error('[Upload Public] Error:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // BytePlus API — Create Task
-  // Images arrive as base64 data URLs from the frontend, passed directly to BytePlus (which accepts them)
   app.post('/api/byteplus/tasks', async (req, res) => {
     console.log('[BytePlus API] Creating task...');
 
