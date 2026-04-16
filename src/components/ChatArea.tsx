@@ -3,7 +3,7 @@ import { useAppStore, AssetRole, defaultSettings } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, createThumbnail, reuploadFromCache } from '../lib/utils';
+import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, createThumbnail, reuploadFromCache, uploadToPublicUrl } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -208,17 +208,21 @@ export function ChatArea() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault(); dragCounter.current = 0; setIsDragging(false);
     if (project.settings.mode === 'text_to_video') return;
-    let files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
-    let currentCount = project.assets.filter(a => a.type === 'image_url').length;
-    let maxAllowed = project.settings.mode === 'multimodal_reference' ? 9 : project.settings.mode === 'image_to_video_first' ? 1 : project.settings.mode === 'image_to_video_first_last' ? 2 : Infinity;
-    files = files.slice(0, Math.max(0, maxAllowed - currentCount));
+    const allFiles = Array.from(e.dataTransfer.files);
+
     (async () => {
-      for (const file of files) {
+      for (const file of allFiles) {
         const freshProject = useAppStore.getState().projects.find(p => p.id === project.id);
-        let role: any = 'reference_image';
-        if (project.settings.mode === 'image_to_video_first') role = 'first_frame';
-        else if (project.settings.mode === 'image_to_video_first_last') role = freshProject?.assets.some(a => a.role === 'first_frame') ? 'last_frame' : 'first_frame';
-        const sizeErr = validateImageFile(file);
+        const assets = freshProject?.assets || [];
+
+        if (file.type.startsWith('image/')) {
+          const imgCount = assets.filter(a => a.type === 'image_url').length;
+          const maxImg = project.settings.mode === 'multimodal_reference' ? 9 : project.settings.mode === 'image_to_video_first' ? 1 : project.settings.mode === 'image_to_video_first_last' ? 2 : Infinity;
+          if (imgCount >= maxImg) continue;
+          let role: any = 'reference_image';
+          if (project.settings.mode === 'image_to_video_first') role = 'first_frame';
+          else if (project.settings.mode === 'image_to_video_first_last') role = assets.some(a => a.role === 'first_frame') ? 'last_frame' : 'first_frame';
+          const sizeErr = validateImageFile(file);
           if (sizeErr) { alert(sizeErr); continue; }
           try {
             const url = await readFileAsDataUrl(file);
@@ -226,6 +230,30 @@ export function ChatArea() {
             if (dimErr) { alert(dimErr); continue; }
             addAsset(project.id, { type: 'image_url', url, role, file_name: file.name });
           } catch (e) { console.error(e); }
+
+        } else if (file.type.startsWith('video/')) {
+          const vidCount = assets.filter(a => a.type === 'video_url').length;
+          const maxVid = project.settings.mode === 'extend_video' ? 3 : project.settings.mode === 'edit_video' ? 1 : project.settings.mode === 'multimodal_reference' ? 3 : 0;
+          if (vidCount >= maxVid) continue;
+          const sizeMB = file.size / (1024 * 1024);
+          if (sizeMB > 50) { alert(`비디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 50MB)`); continue; }
+          try {
+            const result = await uploadToPublicUrl(file);
+            const role = project.settings.mode === 'extend_video' ? 'reference_video' : 'reference_video';
+            addAsset(project.id, { type: 'video_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId });
+          } catch (e: any) { alert(`비디오 업로드 실패: ${e.message}`); }
+
+        } else if (file.type.startsWith('audio/')) {
+          const audCount = assets.filter(a => a.type === 'audio_url').length;
+          const maxAud = (project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video') ? 3 : 0;
+          if (audCount >= maxAud) continue;
+          const sizeMB = file.size / (1024 * 1024);
+          if (sizeMB > 15) { alert(`오디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 15MB)`); continue; }
+          try {
+            const result = await uploadToPublicUrl(file);
+            addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId });
+          } catch (e: any) { alert(`오디오 업로드 실패: ${e.message}`); }
+        }
       }
     })();
   };
@@ -391,8 +419,8 @@ export function ChatArea() {
       {isDragging && (
         <div className="absolute inset-0 z-50 bg-indigo-50/90 flex flex-col items-center justify-center border-4 border-dashed border-indigo-400 m-4 rounded-2xl animate-fade-in">
           <UploadCloud size={64} className="text-indigo-500 mb-4" />
-          <h2 className="text-2xl font-bold text-indigo-700">이미지를 여기에 놓으세요</h2>
-          <p className="text-indigo-500 mt-2">래퍼런스 이미지로 추가됩니다</p>
+          <h2 className="text-2xl font-bold text-indigo-700">파일을 여기에 놓으세요</h2>
+          <p className="text-indigo-500 mt-2">이미지 / 비디오 / 오디오 래퍼런스로 추가됩니다</p>
         </div>
       )}
 
