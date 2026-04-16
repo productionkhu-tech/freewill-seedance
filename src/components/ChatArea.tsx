@@ -151,6 +151,18 @@ export function ChatArea() {
     setPreviewItem(null);
   }, [currentProjectId]);
 
+  // Remove stale mention pills when assets change (e.g. user deletes an asset)
+  useEffect(() => {
+    if (!contentEditableRef.current || !project) return;
+    const currentNames = getAssetNames(project.assets);
+    let changed = false;
+    contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
+      const name = pill.getAttribute('data-name');
+      if (name && !currentNames.some(a => a.name === name)) { pill.remove(); changed = true; }
+    });
+    if (changed) setHasText(!!contentEditableRef.current.innerText.trim());
+  }, [project?.assets]);
+
   const handleMessagesScroll = useCallback(() => {
     if (messagesScrollRef.current) {
       const el = messagesScrollRef.current;
