@@ -28,7 +28,7 @@ async function startServer() {
   const ALLOWED_DOWNLOAD_HOSTS = ['bytepluses.com', 'byteplus.com', 'bytedance.com', 'volccdn.com', 'volces.com', 'ibytedtos.com', 'volceapplog.com'];
 
   app.get('/api/download', async (req, res) => {
-    const { url, filename } = req.query;
+    const { url, filename, check } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).json({ error: 'Missing url' });
 
     try {
@@ -37,6 +37,14 @@ async function startServer() {
         return res.status(403).json({ error: 'Domain not allowed' });
       }
     } catch { return res.status(400).json({ error: 'Invalid URL' }); }
+
+    // Check mode: tiny Range GET to verify URL liveness (BytePlus signed URLs only allow GET)
+    if (check) {
+      try {
+        const probe = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+        return res.status(probe.ok || probe.status === 206 ? 200 : probe.status).end();
+      } catch { return res.status(502).end(); }
+    }
 
     try {
       const response = await fetch(url);

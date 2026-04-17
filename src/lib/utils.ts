@@ -198,11 +198,22 @@ export function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-export function downloadViaProxy(remoteUrl: string, filename: string) {
+export async function downloadViaProxy(remoteUrl: string, filename: string) {
   const params = new URLSearchParams({ url: remoteUrl, filename });
   const proxyUrl = `/api/download?${params.toString()}`;
-  // Direct anchor click — Electron's will-download streams to Downloads folder with progress.
-  // If URL is expired/invalid, error surfaces in the download tray (not a false-positive alert).
+
+  // Liveness probe via tiny Range GET (BytePlus signed URLs reject HEAD but accept Range GET)
+  try {
+    const probe = await fetch(`/api/download?${new URLSearchParams({ url: remoteUrl, check: '1' }).toString()}`);
+    if (!probe.ok) {
+      alert(`다운로드 실패: 영상 URL이 만료되었거나 접근할 수 없습니다.\n생성 후 24시간 이내에 다운로드해주세요.`);
+      return;
+    }
+  } catch {
+    // network error → proceed with anchor click; Electron tray will show any failure
+  }
+
+  // Anchor click — Electron's will-download streams to Downloads folder with progress
   const a = document.createElement('a');
   a.href = proxyUrl;
   a.download = filename;
