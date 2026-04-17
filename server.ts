@@ -27,6 +27,20 @@ async function startServer() {
   // Download proxy (SSRF-safe: BytePlus CDN only)
   const ALLOWED_DOWNLOAD_HOSTS = ['bytepluses.com', 'byteplus.com', 'bytedance.com', 'volccdn.com', 'volces.com', 'ibytedtos.com', 'volceapplog.com'];
 
+  // HEAD: lightweight liveness check for download URLs (used to detect expired URLs before full download)
+  app.head('/api/download', async (req, res) => {
+    const { url } = req.query;
+    if (!url || typeof url !== 'string') return res.status(400).end();
+    try {
+      const parsed = new URL(url);
+      if (!ALLOWED_DOWNLOAD_HOSTS.some(d => parsed.hostname.endsWith(d))) return res.status(403).end();
+    } catch { return res.status(400).end(); }
+    try {
+      const response = await fetch(url, { method: 'HEAD' });
+      res.status(response.ok ? 200 : response.status).end();
+    } catch { res.status(502).end(); }
+  });
+
   app.get('/api/download', async (req, res) => {
     const { url, filename } = req.query;
     if (!url || typeof url !== 'string') return res.status(400).json({ error: 'Missing url' });
