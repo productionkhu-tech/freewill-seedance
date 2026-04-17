@@ -4,7 +4,7 @@ import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, Chevr
 import { motion, AnimatePresence } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail } from '../lib/utils';
 
-const RESOLUTIONS = ['480p', '720p'];
+const RESOLUTIONS = ['480p', '720p', '1080p'];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
 
 const MODES: { id: GenerationMode; name: string }[] = [
