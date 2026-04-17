@@ -21,37 +21,45 @@ function translateError(error: string): string {
   return error;
 }
 
-/* ─── Video player with IntersectionObserver auto-pause ─── */
+/* ─── Video player: lazy mount + active preload when near viewport ─── */
 function VideoPlayer({ src, className }: { src: string; className?: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    const video = videoRef.current;
     const container = containerRef.current;
-    if (!video || !container) return;
+    if (!container) return;
 
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (!entry.isIntersecting && video) video.pause();
+        if (entry.isIntersecting) {
+          setMounted(true); // mount + preload when within 500px of viewport
+        } else if (videoRef.current) {
+          videoRef.current.pause();
+        }
       },
-      { threshold: 0.3 }
+      { threshold: 0, rootMargin: '500px' }
     );
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
 
   return (
-    <div ref={containerRef} className={`${className} aspect-video bg-black`}>
-      <video
-        ref={videoRef}
-        src={src}
-        controls
-        muted
-        playsInline
-        preload="metadata"
-        className="w-full h-full object-contain"
-      />
+    <div ref={containerRef} className={`${className} aspect-video bg-black flex items-center justify-center`}>
+      {mounted ? (
+        <video
+          ref={videoRef}
+          src={src}
+          controls
+          muted
+          playsInline
+          preload="auto"
+          className="w-full h-full object-contain"
+        />
+      ) : (
+        <Play size={40} className="text-white/30" />
+      )}
     </div>
   );
 }
