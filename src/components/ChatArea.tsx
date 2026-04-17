@@ -13,6 +13,8 @@ function translateError(error: string): string {
   if (error.includes('resource download failed')) return '리소스 다운로드 실패: 이미지에 접근할 수 없습니다. 파일을 다시 업로드해주세요.';
   if (error.includes('rate limit') || error.includes('429')) return 'API 요청 한도 초과: 잠시 후 다시 시도해주세요.';
   if (error.includes('No task ID')) return 'Task ID를 받지 못했습니다. API 응답을 확인해주세요.';
+  if (error.includes('1080p is not supported for this account')) return '1080p는 현재 계정에서 사용할 수 없습니다. BytePlus 콘솔에서 1080p 권한을 활성화하거나 480p/720p를 사용해주세요.';
+  if (error.includes('not supported for this account')) return `현재 계정에서 사용할 수 없는 옵션입니다: ${error}`;
   if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;
   if (error.includes('timeout') || error.includes('ETIMEDOUT')) return '요청 시간 초과: 네트워크 연결을 확인해주세요.';
   if (error.includes('Failed to fetch') || error.includes('NetworkError')) return '네트워크 오류: 인터넷 연결을 확인해주세요.';
@@ -236,56 +238,70 @@ export function ChatArea() {
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault(); dragCounter.current = 0; setIsDragging(false);
-    if (project.settings.mode === 'text_to_video') return;
+    const mode = project.settings.mode;
     const allFiles = Array.from(e.dataTransfer.files);
+    if (allFiles.length === 0) return;
+    if (mode === 'text_to_video') {
+      alert('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
+      return;
+    }
 
     (async () => {
+      const rejected: string[] = [];
       for (const file of allFiles) {
         const freshProject = useAppStore.getState().projects.find(p => p.id === project.id);
         const assets = freshProject?.assets || [];
 
         if (file.type.startsWith('image/')) {
-          if (project.settings.mode === 'extend_video') continue; // extend_video only accepts video
+          if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
           const imgCount = assets.filter(a => a.type === 'image_url').length;
-          const maxImg = project.settings.mode === 'multimodal_reference' ? 9 : project.settings.mode === 'edit_video' ? 9 : project.settings.mode === 'image_to_video_first' ? 1 : project.settings.mode === 'image_to_video_first_last' ? 2 : 0;
-          if (imgCount >= maxImg) continue;
+          const maxImg = mode === 'multimodal_reference' ? 9 : mode === 'edit_video' ? 9 : mode === 'image_to_video_first' ? 1 : mode === 'image_to_video_first_last' ? 2 : 0;
+          if (imgCount >= maxImg) { rejected.push(`${file.name}: 이미지 한도 ${maxImg}개 초과`); continue; }
           let role: any = 'reference_image';
-          if (project.settings.mode === 'image_to_video_first') role = 'first_frame';
-          else if (project.settings.mode === 'image_to_video_first_last') role = assets.some(a => a.role === 'first_frame') ? 'last_frame' : 'first_frame';
+          if (mode === 'image_to_video_first') role = 'first_frame';
+          else if (mode === 'image_to_video_first_last') role = assets.some(a => a.role === 'first_frame') ? 'last_frame' : 'first_frame';
           const sizeErr = validateImageFile(file);
-          if (sizeErr) { alert(sizeErr); continue; }
+          if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
           try {
             const dimErr = await validateImageDimensions(file);
-            if (dimErr) { alert(dimErr); continue; }
+            if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
             const result = await uploadToPublicUrl(file);
             addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
-          } catch (e: any) { alert(`이미지 처리 실패: ${file.name}\n${e.message || ''}`); }
+          } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
 
         } else if (file.type.startsWith('video/')) {
+          if (mode === 'image_to_video_first' || mode === 'image_to_video_first_last') {
+            rejected.push(`${file.name}: 이 모드는 이미지만 받습니다.`); continue;
+          }
           const vidCount = assets.filter(a => a.type === 'video_url').length;
-          const maxVid = project.settings.mode === 'extend_video' ? 3 : project.settings.mode === 'edit_video' ? 1 : project.settings.mode === 'multimodal_reference' ? 3 : 0;
-          if (vidCount >= maxVid) continue;
+          const maxVid = mode === 'extend_video' ? 3 : mode === 'edit_video' ? 1 : mode === 'multimodal_reference' ? 3 : 0;
+          if (vidCount >= maxVid) { rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue; }
           const vidErr = await validateVideoFile(file);
-          if (vidErr) { alert(vidErr); continue; }
+          if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
           try {
             const result = await uploadToPublicUrl(file);
-            const role: any = 'reference_video';
-            addAsset(project.id, { type: 'video_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId });
-          } catch (e: any) { alert(`비디오 업로드 실패: ${e.message}`); }
+            addAsset(project.id, { type: 'video_url', url: result.url, role: 'reference_video', file_name: file.name, cacheId: result.cacheId });
+          } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
 
         } else if (file.type.startsWith('audio/')) {
+          if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
+            rejected.push(`${file.name}: 이 모드에서는 오디오를 사용할 수 없습니다.`); continue;
+          }
           const audCount = assets.filter(a => a.type === 'audio_url').length;
-          const maxAud = (project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video') ? 3 : 0;
-          if (audCount >= maxAud) continue;
+          const maxAud = 3;
+          if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
           const audErr = await validateAudioFile(file);
-          if (audErr) { alert(audErr); continue; }
+          if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
           try {
             const result = await uploadToPublicUrl(file);
             addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId });
-          } catch (e: any) { alert(`오디오 업로드 실패: ${e.message}`); }
+          } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
+        } else {
+          rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
         }
       }
+      if (rejected.length > 0) alert(`일부 파일이 추가되지 않았습니다:\n\n${rejected.join('\n')}`);
     })();
   };
 

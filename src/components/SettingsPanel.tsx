@@ -4,7 +4,7 @@ import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, Chevr
 import { motion, AnimatePresence } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail } from '../lib/utils';
 
-const RESOLUTIONS = ['480p', '720p', '1080p'];
+const RESOLUTIONS = ['480p', '720p'];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
 
 const MODES: { id: GenerationMode; name: string }[] = [
@@ -180,31 +180,36 @@ export function SettingsPanel() {
     }
 
     const availableSlots = Math.max(0, maxAllowed - currentCount);
-    if (files.length > availableSlots) files = files.slice(0, availableSlots);
+    const skipped: string[] = [];
+    if (files.length > availableSlots) {
+      skipped.push(...files.slice(availableSlots).map(f => `${f.name}: 한도 ${maxAllowed}개 초과로 제외됨`));
+      files = files.slice(0, availableSlots);
+    }
 
     (async () => {
+      const rejected = [...skipped];
       for (const file of files) {
         try {
           if (type === 'image_url') {
             const sizeErr = validateImageFile(file);
-            if (sizeErr) { alert(sizeErr); continue; }
+            if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
             const dimErr = await validateImageDimensions(file);
-            if (dimErr) { alert(dimErr); continue; }
+            if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
             const result = await uploadToPublicUrl(file);
             addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
           } else {
-            // Video/audio → validate + upload to temp public hosting
             const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
-            if (vErr) { alert(vErr); continue; }
+            if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
             const result = await uploadToPublicUrl(file);
             addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId });
           }
         } catch (e: any) {
           console.error('Failed to process file:', e);
-          alert(`파일 처리 실패: ${file.name}\n${e.message || ''}`);
+          rejected.push(`${file.name}: ${e.message || '처리 실패'}`);
         }
       }
+      if (rejected.length > 0) alert(`일부 파일이 추가되지 않았습니다:\n\n${rejected.join('\n')}`);
     })();
     e.target.value = '';
   };
