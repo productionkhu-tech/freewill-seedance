@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, cacheFile } from '../lib/utils';
+import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail } from '../lib/utils';
 
 const RESOLUTIONS = ['480p', '720p'];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
@@ -188,11 +188,11 @@ export function SettingsPanel() {
           if (type === 'image_url') {
             const sizeErr = validateImageFile(file);
             if (sizeErr) { alert(sizeErr); continue; }
-            const url = await readFileAsDataUrl(file);
-            const dimErr = await validateImageDimensions(url);
+            const dimErr = await validateImageDimensions(file);
             if (dimErr) { alert(dimErr); continue; }
-            const imgCacheId = await cacheFile(file);
-            addAsset(project.id, { type, url, role, file_name: file.name, cacheId: imgCacheId });
+            const thumbnailUrl = await createThumbnail(file);
+            const result = await uploadToPublicUrl(file);
+            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
           } else {
             // Video/audio → validate + upload to temp public hosting
             const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
@@ -314,8 +314,8 @@ export function SettingsPanel() {
               <div key={asset.id} className="flex items-start justify-between p-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px]">
                 <div className="flex items-center gap-2 overflow-hidden">
                   {asset.type === 'image_url' && (
-                    asset.url.startsWith('data:image') || asset.url.startsWith('http') ? (
-                      <img src={asset.url} alt="asset" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
+                    (asset as any).thumbnailUrl || asset.url.startsWith('data:image') || asset.url.startsWith('http') ? (
+                      <img src={(asset as any).thumbnailUrl || asset.url} alt="asset" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
                     ) : (
                       <ImageIcon size={14} className="text-blue-500 shrink-0" />
                     )
@@ -355,7 +355,7 @@ export function SettingsPanel() {
               {settings.mode === 'multimodal_reference' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
-                    이미지: {assets.filter(a => a.type === 'image_url').length}/9 (합산 64MB 이하, 300~6000px)
+                    이미지: {assets.filter(a => a.type === 'image_url').length}/9 (개당 30MB, 300~6000px)
                     &nbsp;&middot;&nbsp;비디오: {assets.filter(a => a.type === 'video_url').length}/3 (개당 50MB, 2~15초)
                     &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3 (개당 15MB, 2~15초)
                   </p>

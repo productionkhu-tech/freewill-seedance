@@ -3,7 +3,7 @@ import { useAppStore, AssetRole, defaultSettings } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { readFileAsDataUrl, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl, cacheFile, readCacheAsDataUrl } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -78,7 +78,7 @@ const textToHtml = (text: string, assets: any[]) => {
       const name = part.slice(1, -1);
       const asset = assets.find(a => a.name === name);
       if (asset) {
-        const imgSrc = asset.type === 'image_url' ? asset.url : '';
+        const imgSrc = asset.type === 'image_url' ? (asset.thumbnailUrl || asset.url) : '';
         const iconHtml = asset.type === 'image_url'
           ? `<img src="${imgSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px;" />`
           : `<span style="display:inline-block;width:16px;height:16px;background:#f0f0f5;border-radius:2px;vertical-align:middle;margin-right:4px;text-align:center;line-height:16px;font-size:10px;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
@@ -255,11 +255,11 @@ export function ChatArea() {
           const sizeErr = validateImageFile(file);
           if (sizeErr) { alert(sizeErr); continue; }
           try {
-            const url = await readFileAsDataUrl(file);
-            const dimErr = await validateImageDimensions(url);
+            const dimErr = await validateImageDimensions(file);
             if (dimErr) { alert(dimErr); continue; }
-            const imgCacheId = await cacheFile(file);
-            addAsset(project.id, { type: 'image_url', url, role, file_name: file.name, cacheId: imgCacheId });
+            const thumbnailUrl = await createThumbnail(file);
+            const result = await uploadToPublicUrl(file);
+            addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
           } catch (e: any) { alert(`이미지 처리 실패: ${file.name}\n${e.message || ''}`); }
 
         } else if (file.type.startsWith('video/')) {
@@ -327,7 +327,7 @@ export function ChatArea() {
     const pill = document.createElement('span');
     pill.contentEditable = 'false'; pill.className = 'mention-pill'; pill.dataset.name = asset.name; pill.dataset.assetId = asset.id;
     pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
-    const imgSrc = asset.type === 'image_url' ? asset.url : '';
+    const imgSrc = asset.type === 'image_url' ? (asset.thumbnailUrl || asset.url) : '';
     const iconHtml = asset.type === 'image_url'
       ? `<img src="${imgSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
       : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
@@ -344,11 +344,11 @@ export function ChatArea() {
     const sizeErr = validateImageFile(file);
     if (sizeErr) { alert(sizeErr); return; }
     try {
-      const url = await readFileAsDataUrl(file);
-      const dimErr = await validateImageDimensions(url);
+      const dimErr = await validateImageDimensions(file);
       if (dimErr) { alert(dimErr); return; }
-      const imgCacheId = await cacheFile(file);
-      addAsset(project.id, { type: 'image_url', url, role, file_name: file.name, cacheId: imgCacheId });
+      const thumbnailUrl = await createThumbnail(file);
+      const result = await uploadToPublicUrl(file);
+      addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
     } catch (e) { alert(`이미지 업로드 실패: ${file.name}`); }
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
@@ -372,20 +372,14 @@ export function ChatArea() {
       for (const a of msg.usedAssets) {
         if (a.cacheId) {
           try {
-            if (a.type === 'image_url') {
-              // Restore original image from cache
-              const originalUrl = await readCacheAsDataUrl(a.cacheId);
-              useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: originalUrl });
-            } else {
-              // Video/audio: re-upload from cache → new public URL
-              const newUrl = await reuploadFromCache(a.cacheId);
-              useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: newUrl });
-            }
+            // Re-upload original bytes from server cache → new public URL (works for image/video/audio)
+            const newUrl = await reuploadFromCache(a.cacheId);
+            useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: newUrl });
           } catch {
             needReattach.push(a.file_name || a.type.replace('_url', ''));
           }
-        } else if (a.type !== 'image_url' || !a.url.startsWith('data:image')) {
-          // No cache and not a valid base64 — need re-attach
+        } else {
+          // No cache → can't restore
           needReattach.push(a.file_name || a.type.replace('_url', ''));
         }
       }
@@ -432,23 +426,22 @@ export function ChatArea() {
     const currentSettings = { ...project.settings };
     const currentAssets = [...project.assets];
 
-    // Pre-flight checks BEFORE clearing input or creating messages
-    // Check total payload size — count full data URL length (sent as-is in JSON)
+    // Pre-flight: legacy data URL safety check (only matters for old assets pre-URL migration)
     const totalPayloadBytes = currentAssets.reduce((sum, a) => {
       if (a.url.startsWith('data:')) return sum + a.url.length;
       return sum;
     }, 0);
     const totalMB = totalPayloadBytes / (1024 * 1024);
     if (totalMB > 60) {
-      alert(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB (최대 64MB)\n이미지 수를 줄이거나 작은 파일을 사용해주세요.`);
+      alert(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB\n이미지를 다시 첨부해주세요.`);
       return;
     }
 
-    // Re-upload video/audio assets if their public URLs may have expired
+    // Re-upload assets if their public URLs may have expired (all types now use URLs)
     setIsGenerating(true);
     for (let i = 0; i < currentAssets.length; i++) {
       const a = currentAssets[i];
-      if ((a.type === 'video_url' || a.type === 'audio_url') && a.cacheId && a.url.includes('tmpfiles.org')) {
+      if (a.cacheId && a.url.includes('tmpfiles.org')) {
         try {
           const newUrl = await reuploadFromCache(a.cacheId);
           currentAssets[i] = { ...a, url: newUrl };
@@ -466,10 +459,10 @@ export function ChatArea() {
     const outputCount = project.settings.output_count || 1;
     const systemMessageIds: string[] = [];
 
-    // Create tiny thumbnails for log storage (original base64 only used for API call)
+    // Pre-computed thumbnail (image upload time) used as-is; for legacy/non-image just pass through
     const thumbAssets = await Promise.all(currentAssets.map(async a => ({
       ...a,
-      url: await createThumbnail(a.url),
+      url: a.thumbnailUrl || (await createThumbnail(a.url)) || a.url,
     })));
 
     for (let i = 0; i < outputCount; i++) {
@@ -794,7 +787,7 @@ export function ChatArea() {
                   <div className="relative w-20 h-20 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center overflow-hidden group hover:border-indigo-400 transition-colors bg-white">
                     {project.assets.find(a => a.role === 'first_frame') ? (
                       <>
-                        <img src={project.assets.find(a => a.role === 'first_frame')?.url} className="w-full h-full object-cover" />
+                        <img src={(project.assets.find(a => a.role === 'first_frame') as any)?.thumbnailUrl || project.assets.find(a => a.role === 'first_frame')?.url} className="w-full h-full object-cover" />
                         <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                           <button onClick={() => removeAsset(project.id, project.assets.find(a => a.role === 'first_frame')!.id)} className="text-white bg-red-500 p-1 rounded-full hover:bg-red-600"><X size={12} /></button>
                         </div>
@@ -813,7 +806,7 @@ export function ChatArea() {
                     <div className="relative w-20 h-20 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center overflow-hidden group hover:border-indigo-400 transition-colors bg-white">
                       {project.assets.find(a => a.role === 'last_frame') ? (
                         <>
-                          <img src={project.assets.find(a => a.role === 'last_frame')?.url} className="w-full h-full object-cover" />
+                          <img src={(project.assets.find(a => a.role === 'last_frame') as any)?.thumbnailUrl || project.assets.find(a => a.role === 'last_frame')?.url} className="w-full h-full object-cover" />
                           <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                             <button onClick={() => removeAsset(project.id, project.assets.find(a => a.role === 'last_frame')!.id)} className="text-white bg-red-500 p-1 rounded-full hover:bg-red-600"><X size={12} /></button>
                           </div>

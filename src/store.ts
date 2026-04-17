@@ -32,6 +32,7 @@ export interface Asset {
   role: AssetRole;
   file_name?: string;
   cacheId?: string;
+  thumbnailUrl?: string; // small base64 preview for image assets (avoids re-fetch)
 }
 
 export interface GenerationSettings {

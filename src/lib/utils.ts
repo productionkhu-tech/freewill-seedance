@@ -5,12 +5,18 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// Shrink base64 image to tiny thumbnail for log storage (saves IndexedDB space)
-export function createThumbnail(dataUrl: string, size: number = 80): Promise<string> {
+// Shrink image to tiny thumbnail for log storage (saves IndexedDB space)
+// Accepts File (preferred for new flow) or data URL (legacy)
+export function createThumbnail(source: File | string, size: number = 80): Promise<string> {
   return new Promise((resolve) => {
-    if (!dataUrl.startsWith('data:image')) { resolve(dataUrl); return; }
+    const isFile = source instanceof File;
+    const objectUrl = isFile ? URL.createObjectURL(source) : null;
+    const src = isFile ? objectUrl! : source;
+    // For non-image-data-URL strings (e.g. http URLs), return as-is
+    if (!isFile && !source.startsWith('data:image')) { resolve(source); return; }
     const img = new Image();
     img.onload = () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
       const canvas = document.createElement('canvas');
       canvas.width = size;
       canvas.height = size;
@@ -21,8 +27,8 @@ export function createThumbnail(dataUrl: string, size: number = 80): Promise<str
       ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
       resolve(canvas.toDataURL('image/jpeg', 0.5));
     };
-    img.onerror = () => resolve('');
-    img.src = dataUrl;
+    img.onerror = () => { if (objectUrl) URL.revokeObjectURL(objectUrl); resolve(''); };
+    img.src = src;
   });
 }
 
@@ -59,10 +65,14 @@ export function validateImageFile(file: File): string | null {
 }
 
 // Validate image dimensions (async — needs to load the image)
-export function validateImageDimensions(dataUrl: string): Promise<string | null> {
+// Accepts File (preferred) or data URL string
+export function validateImageDimensions(source: File | string): Promise<string | null> {
   return new Promise((resolve) => {
+    const isFile = source instanceof File;
+    const objectUrl = isFile ? URL.createObjectURL(source) : null;
     const img = new Image();
     img.onload = () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
       const { width, height } = img;
       const { minPx, maxPx } = API_LIMITS.image;
       if (width < minPx || height < minPx) {
@@ -73,8 +83,8 @@ export function validateImageDimensions(dataUrl: string): Promise<string | null>
         resolve(null);
       }
     };
-    img.onerror = () => resolve(null); // skip check on error
-    img.src = dataUrl;
+    img.onerror = () => { if (objectUrl) URL.revokeObjectURL(objectUrl); resolve(null); };
+    img.src = isFile ? objectUrl! : source;
   });
 }
 
