@@ -4,7 +4,11 @@ import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, Chevr
 import { motion, AnimatePresence } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail } from '../lib/utils';
 
-const RESOLUTIONS = ['480p', '720p'];
+const RESOLUTIONS: { id: string; name: string }[] = [
+  { id: '480p', name: '480p' },
+  { id: '720p', name: '720p' },
+  { id: '1080p', name: '1080p (미출시)' },
+];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
 
 const MODES: { id: GenerationMode; name: string }[] = [
@@ -263,7 +267,7 @@ export function SettingsPanel() {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Resolution</label>
-              <CustomSelect value={settings.resolution} onChange={(val) => updateProjectSettings(project.id, { resolution: val })} options={RESOLUTIONS.map(r => ({ id: r, name: r }))} />
+              <CustomSelect value={settings.resolution} onChange={(val) => updateProjectSettings(project.id, { resolution: val })} options={RESOLUTIONS} />
             </div>
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Ratio</label>

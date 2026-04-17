@@ -301,7 +301,7 @@ export const useAppStore = create<AppState>()(
       onRehydrateStorage: () => {
         return () => {
           // Migrate: fill missing settings fields with defaults + clamp invalid values
-          const validResolutions = ['480p', '720p'];
+          const validResolutions = ['480p', '720p', '1080p'];
           const state = useAppStore.getState();
           const patched = state.projects.map(p => {
             const s = { ...defaultSettings, ...p.settings };
