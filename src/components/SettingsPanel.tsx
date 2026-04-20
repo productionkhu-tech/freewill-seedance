@@ -244,9 +244,23 @@ export function SettingsPanel() {
 
   return (
     <div className="w-80 bg-[#f5f5f7] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0">
-      <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 backdrop-blur-xl z-10">
-        <Settings size={18} className="text-gray-500" />
-        <h2 className="text-[21px] font-semibold text-[#1d1d1f] tracking-tight">Settings</h2>
+      <div className="p-4 border-b border-gray-200/60 flex items-center justify-between gap-2 sticky top-0 bg-[#f5f5f7]/80 backdrop-blur-xl z-10">
+        <div className="flex items-center gap-2">
+          <Settings size={18} className="text-gray-500" />
+          <h2 className="text-[21px] font-semibold text-[#1d1d1f] tracking-tight">Settings</h2>
+        </div>
+        <button
+          onClick={async () => {
+            const api = (window as any).electronAPI;
+            if (!api?.clearCache) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
+            const result = await api.clearCache();
+            alert(result.ok ? '영상 미리보기 캐시를 비웠습니다.' : `캐시 비우기 실패: ${result.error || ''}`);
+          }}
+          className="text-[10px] text-gray-400 hover:text-indigo-600 px-2 py-1 rounded-md hover:bg-indigo-50 transition-colors"
+          title="브라우저 미리보기 캐시 비우기 (다운로드 받은 mp4 파일은 안 지워짐)"
+        >
+          캐시 비우기
+        </button>
       </div>
 
       <div className="p-4 space-y-6">

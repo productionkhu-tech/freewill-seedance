@@ -9,6 +9,7 @@ directories:
 files:
   - "dist/**/*"
   - "electron/main.cjs"
+  - "electron/preload.cjs"
   - "electron/icon.png"
   - "public/**/*"
   - "node_modules/electron-updater/**/*"

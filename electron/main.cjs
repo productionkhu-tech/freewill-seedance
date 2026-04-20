@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, Notification, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, Notification, shell, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 
@@ -59,6 +59,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
     show: false,
   });
@@ -149,6 +150,17 @@ function setupAutoUpdater() {
 
   if (!isDev) autoUpdater.checkForUpdates().catch(() => {});
 }
+
+// ─── IPC: cache management ───
+ipcMain.handle('clear-cache', async () => {
+  if (!mainWindow) return { ok: false, error: 'window not ready' };
+  try {
+    await mainWindow.webContents.session.clearCache();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
 // ─── App Lifecycle ───
 app.on('ready', () => {
