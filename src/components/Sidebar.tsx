@@ -1,8 +1,16 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useAppStore } from '../store';
 import { cn } from '../lib/utils';
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return '...';
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`;
+}
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject } = useAppStore();
@@ -10,6 +18,29 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const [editName, setEditName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const [cacheSize, setCacheSize] = useState<number | null>(null);
+
+  useEffect(() => {
+    const refresh = async () => {
+      const api = (window as any).electronAPI;
+      if (!api?.getCacheSize) return;
+      try { const r = await api.getCacheSize(); setCacheSize(r.size ?? 0); } catch {}
+    };
+    refresh();
+    const interval = setInterval(refresh, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleClearCache = async () => {
+    const api = (window as any).electronAPI;
+    if (!api?.clearCache) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
+    const sizeText = formatBytes(cacheSize);
+    const ok = confirm(`영상 미리보기 캐시 ${sizeText}를 비울까요?\n\n• 갤러리/메시지의 영상 미리보기 데이터가 삭제됩니다.\n• 다음 재생 시 다시 다운로드됩니다.\n• 다운로드 받은 mp4 파일은 영향 없습니다.`);
+    if (!ok) return;
+    const result = await api.clearCache();
+    if (result.ok) { setCacheSize(0); alert('캐시를 비웠습니다.'); }
+    else alert(`캐시 비우기 실패: ${result.error || ''}`);
+  };
 
   useEffect(() => {
     if (editingId && inputRef.current) {
@@ -38,12 +69,18 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       className="bg-[#1d1d1f] border-r border-[#2a2a2d] flex flex-col h-full shrink-0 overflow-hidden"
     >
     {collapsed ? (
-      <div className="flex flex-col items-center py-3 gap-2">
+      <div className="flex flex-col items-center py-3 gap-2 h-full">
         <button onClick={onToggle} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="Expand sidebar">
           <PanelLeftOpen size={18} />
         </button>
         <button onClick={createProject} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="New Project">
           <Plus size={18} />
+        </button>
+        <div className="flex-1" />
+        <button onClick={handleClearCache}
+          className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors mb-2"
+          title={`캐시 정리 (${formatBytes(cacheSize)})`}>
+          <Sparkles size={18} />
         </button>
       </div>
     ) : (
@@ -112,6 +149,18 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             )}
           </div>
         ))}
+      </div>
+      {/* Footer: cache cleanup */}
+      <div className="p-3 border-t border-[#2a2a2d] shrink-0">
+        <button onClick={handleClearCache}
+          className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
+          title="영상 미리보기 캐시 정리 (다운로드된 mp4는 영향 없음)">
+          <div className="flex items-center gap-2">
+            <Sparkles size={14} />
+            <span className="font-medium">캐시 정리</span>
+          </div>
+          <span className="font-mono text-[11px] text-white/50">{formatBytes(cacheSize)}</span>
+        </button>
       </div>
       </>
     )}

@@ -82,33 +82,10 @@ export function getAssetNames(assets: Asset[]) {
   });
 }
 
-function formatBytes(bytes: number | null): string {
-  if (bytes === null) return '...';
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)}GB`;
-}
-
 export function SettingsPanel() {
   const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
-  const [cacheSize, setCacheSize] = useState<number | null>(null);
-
-  useEffect(() => {
-    const refresh = async () => {
-      const api = (window as any).electronAPI;
-      if (!api?.getCacheSize) return;
-      try {
-        const r = await api.getCacheSize();
-        setCacheSize(r.size ?? 0);
-      } catch {}
-    };
-    refresh();
-    const interval = setInterval(refresh, 15000);
-    return () => clearInterval(interval);
-  }, []);
 
   const project = projects.find((p) => p.id === currentProjectId);
 
@@ -267,31 +244,9 @@ export function SettingsPanel() {
 
   return (
     <div className="w-80 bg-[#f5f5f7] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0">
-      <div className="p-4 border-b border-gray-200/60 flex items-center justify-between gap-2 sticky top-0 bg-[#f5f5f7]/80 backdrop-blur-xl z-10">
-        <div className="flex items-center gap-2">
-          <Settings size={18} className="text-gray-500" />
-          <h2 className="text-[21px] font-semibold text-[#1d1d1f] tracking-tight">Settings</h2>
-        </div>
-        <button
-          onClick={async () => {
-            const api = (window as any).electronAPI;
-            if (!api?.clearCache) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
-            const sizeText = formatBytes(cacheSize);
-            const ok = confirm(`영상 미리보기 캐시 ${sizeText}를 비울까요?\n\n• 갤러리/메시지의 영상 미리보기 데이터가 삭제됩니다.\n• 다음 재생 시 다시 다운로드됩니다.\n• 다운로드 받은 mp4 파일은 영향 없습니다.`);
-            if (!ok) return;
-            const result = await api.clearCache();
-            if (result.ok) {
-              setCacheSize(0);
-              alert('캐시를 비웠습니다.');
-            } else {
-              alert(`캐시 비우기 실패: ${result.error || ''}`);
-            }
-          }}
-          className="text-[10px] text-gray-500 hover:text-indigo-600 px-2 py-1 rounded-md hover:bg-indigo-50 transition-colors font-mono"
-          title="브라우저 자체 LRU로 한도 도달 시 자동 정리됩니다. 즉시 비우려면 클릭."
-        >
-          캐시 {formatBytes(cacheSize)}
-        </button>
+      <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 backdrop-blur-xl z-10">
+        <Settings size={18} className="text-gray-500" />
+        <h2 className="text-[21px] font-semibold text-[#1d1d1f] tracking-tight">Settings</h2>
       </div>
 
       <div className="p-4 space-y-6">
