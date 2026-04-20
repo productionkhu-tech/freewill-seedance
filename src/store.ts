@@ -319,7 +319,8 @@ export const useAppStore = create<AppState>()(
             if (s.duration > 15) s.duration = 15;
             // Clamp resolution to supported values
             if (!validResolutions.includes(s.resolution)) s.resolution = '720p';
-            return { ...p, settings: s };
+            // Clear in-progress draft prompts on app restart (session-only persistence)
+            return { ...p, settings: s, draftPrompt: '' };
           });
           useAppStore.setState({ projects: patched, _hasHydrated: true });
         };

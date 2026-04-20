@@ -55,7 +55,7 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
           controls
           muted
           playsInline
-          preload={eager ? 'auto' : 'metadata'}
+          preload="auto"
           className="w-full h-full object-contain"
         />
       ) : (
