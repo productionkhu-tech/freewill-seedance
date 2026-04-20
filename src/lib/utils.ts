@@ -241,6 +241,10 @@ export function getBlobCacheStats() {
   return { count: blobCache.size, bytes: totalCacheBytes(), capBytes: MAX_CACHE_BYTES };
 }
 
+export function clearBlobCache() {
+  blobCache.clear();
+}
+
 export async function downloadViaProxy(remoteUrl: string, filename: string) {
   // Fast path: serve from in-memory blob (instant, no CDN round-trip)
   const cached = blobCache.get(remoteUrl);

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useAppStore } from '../store';
-import { cn } from '../lib/utils';
+import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return '...';
@@ -18,28 +18,37 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const [editName, setEditName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
-  const [cacheSize, setCacheSize] = useState<number | null>(null);
+  const [diskCacheSize, setDiskCacheSize] = useState<number | null>(null);
+  const [memCacheBytes, setMemCacheBytes] = useState<number>(0);
 
   useEffect(() => {
     const refresh = async () => {
       const api = (window as any).electronAPI;
-      if (!api?.getCacheSize) return;
-      try { const r = await api.getCacheSize(); setCacheSize(r.size ?? 0); } catch {}
+      if (api?.getCacheSize) {
+        try { const r = await api.getCacheSize(); setDiskCacheSize(r.size ?? 0); } catch {}
+      }
+      setMemCacheBytes(getBlobCacheStats().bytes);
     };
     refresh();
-    const interval = setInterval(refresh, 15000);
+    const interval = setInterval(refresh, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  const totalCacheBytes = (diskCacheSize ?? 0) + memCacheBytes;
 
   const handleClearCache = async () => {
     const api = (window as any).electronAPI;
     if (!api?.clearCache) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
-    const sizeText = formatBytes(cacheSize);
-    const ok = confirm(`영상 미리보기 캐시 ${sizeText}를 비울까요?\n\n• 갤러리/메시지의 영상 미리보기 데이터가 삭제됩니다.\n• 다음 재생 시 다시 다운로드됩니다.\n• 다운로드 받은 mp4 파일은 영향 없습니다.`);
+    const total = formatBytes(totalCacheBytes);
+    const disk = formatBytes(diskCacheSize ?? 0);
+    const mem = formatBytes(memCacheBytes);
+    const ok = confirm(`총 ${total} 캐시를 비울까요?\n\n• 디스크: ${disk} (브라우저 HTTP 캐시)\n• 메모리: ${mem} (영상 사전 다운로드 풀)\n\n다운로드 받은 mp4 파일은 영향 없습니다.`);
     if (!ok) return;
+    clearBlobCache();
+    setMemCacheBytes(0);
     const result = await api.clearCache();
-    if (result.ok) { setCacheSize(0); alert('캐시를 비웠습니다.'); }
-    else alert(`캐시 비우기 실패: ${result.error || ''}`);
+    if (result.ok) { setDiskCacheSize(0); alert('캐시를 비웠습니다.'); }
+    else alert(`디스크 캐시 비우기 실패: ${result.error || ''}\n메모리 캐시는 비웠습니다.`);
   };
 
   useEffect(() => {
@@ -79,7 +88,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         <div className="flex-1" />
         <button onClick={handleClearCache}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors mb-2"
-          title={`캐시 정리 (${formatBytes(cacheSize)})`}>
+          title={`캐시 정리 (${formatBytes(totalCacheBytes)})`}>
           <Sparkles size={18} />
         </button>
       </div>
@@ -159,7 +168,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             <Sparkles size={14} />
             <span className="font-medium">캐시 정리</span>
           </div>
-          <span className="font-mono text-[11px] text-white/50">{formatBytes(cacheSize)}</span>
+          <span className="font-mono text-[11px] text-white/50">{formatBytes(totalCacheBytes)}</span>
         </button>
       </div>
       </>
