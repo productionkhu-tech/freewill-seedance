@@ -21,11 +21,15 @@ function translateError(error: string): string {
   return error;
 }
 
-/* ─── Video player: lazy mount + active preload when near viewport ─── */
+/* ─── Video player: lazy mount + blob fetch (single GET → smooth playback over high-latency CDN) ─── */
 function VideoPlayer({ src, className, eager }: { src: string; className?: string; eager?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(eager === true);
+  const [blobSrc, setBlobSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const blobUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (eager) return; // eager mode: skip observer, mount immediately
@@ -35,7 +39,7 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          setMounted(true); // mount + preload when within 500px of viewport
+          setMounted(true);
         } else if (videoRef.current) {
           videoRef.current.pause();
         }
@@ -46,20 +50,52 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
     return () => observer.disconnect();
   }, [eager]);
 
+  // Fetch as blob — single GET avoids slow range-request chunking over high-latency Singapore CDN
+  useEffect(() => {
+    if (!mounted || !src) return;
+    let cancelled = false;
+    setLoading(true);
+    setFailed(false);
+    fetch(src)
+      .then(r => { if (!r.ok) throw new Error(`status ${r.status}`); return r.blob(); })
+      .then(b => {
+        if (cancelled) return;
+        const url = URL.createObjectURL(b);
+        blobUrlRef.current = url;
+        setBlobSrc(url);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoading(false);
+        setFailed(true); // fall back to direct src playback (range requests)
+      });
+    return () => {
+      cancelled = true;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+      setBlobSrc(null);
+    };
+  }, [src, mounted]);
+
   return (
-    <div ref={containerRef} className={`${className} aspect-video bg-black flex items-center justify-center`}>
-      {mounted ? (
+    <div ref={containerRef} className={`${className} aspect-video bg-black flex items-center justify-center relative`}>
+      {!mounted && <Play size={40} className="text-white/30" />}
+      {mounted && loading && !blobSrc && (
+        <Loader2 size={32} className="text-white/60 animate-spin" />
+      )}
+      {mounted && (blobSrc || failed) && (
         <video
           ref={videoRef}
-          src={src}
+          src={blobSrc || src}
           controls
           muted
           playsInline
-          preload={eager ? 'auto' : 'metadata'}
+          preload="auto"
           className="w-full h-full object-contain"
         />
-      ) : (
-        <Play size={40} className="text-white/30" />
       )}
     </div>
   );
