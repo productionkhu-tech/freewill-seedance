@@ -55,7 +55,7 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
           controls
           muted
           playsInline
-          preload="auto"
+          preload={eager ? 'auto' : 'metadata'}
           className="w-full h-full object-contain"
         />
       ) : (
@@ -154,6 +154,30 @@ export function ChatArea() {
   const previousProjectIdRef = useRef<string | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [promptHeight, setPromptHeight] = useState(44);
+  const [downloads, setDownloads] = useState<Record<string, { received: number; total: number; state: string }>>({});
+
+  // Listen to download events from Electron main process
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    if (!api?.onDownloadStarted) return;
+    api.onDownloadStarted(({ filename }: { filename: string }) => {
+      setDownloads(d => ({ ...d, [filename]: { received: 0, total: 0, state: 'progressing' } }));
+    });
+    api.onDownloadProgress(({ filename, received, total, state }: any) => {
+      setDownloads(d => ({ ...d, [filename]: { received, total, state } }));
+    });
+    api.onDownloadDone(({ filename, state }: any) => {
+      setDownloads(d => {
+        const next = { ...d };
+        if (state === 'completed') {
+          // Auto-dismiss completed downloads after 3s
+          setTimeout(() => setDownloads(curr => { const c = { ...curr }; delete c[filename]; return c; }), 3000);
+        }
+        next[filename] = { ...(next[filename] || { received: 0, total: 0 }), state };
+        return next;
+      });
+    });
+  }, []);
 
   // Save draft for previous project, load draft for new project
   useEffect(() => {
@@ -596,8 +620,41 @@ export function ChatArea() {
   };
 
   /* ─── Render ─── */
+  const downloadEntries = Object.entries(downloads);
   return (
     <div className="flex-1 flex flex-col bg-[#fafafa] h-full relative min-w-0" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+      {/* Download progress toasts (bottom-right) */}
+      {downloadEntries.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 max-w-sm">
+          {downloadEntries.map(([filename, info]) => {
+            const pct = info.total > 0 ? Math.round((info.received / info.total) * 100) : 0;
+            const mb = (info.received / 1024 / 1024).toFixed(1);
+            const totalMb = info.total > 0 ? (info.total / 1024 / 1024).toFixed(1) : '?';
+            const isDone = info.state === 'completed';
+            const isFailed = info.state === 'interrupted' || info.state === 'cancelled';
+            return (
+              <div key={filename} className={`bg-white rounded-xl shadow-lg border ${isFailed ? 'border-red-200' : isDone ? 'border-green-200' : 'border-indigo-200'} p-3 animate-slide-up`}>
+                <div className="flex items-center gap-2 mb-1">
+                  {isFailed ? <AlertCircle size={14} className="text-red-500 shrink-0" />
+                    : isDone ? <Download size={14} className="text-green-500 shrink-0" />
+                    : <Loader2 size={14} className="text-indigo-500 shrink-0 animate-spin" />}
+                  <span className="text-[12px] font-medium text-gray-700 truncate flex-1" title={filename}>{filename}</span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
+                  <span>{isDone ? '완료' : isFailed ? '실패' : `${mb}MB / ${totalMb}MB`}</span>
+                  <span>{!isDone && !isFailed && info.total > 0 ? `${pct}%` : ''}</span>
+                </div>
+                {!isDone && !isFailed && (
+                  <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
+                    <div className="h-full bg-indigo-500 transition-all duration-200" style={{ width: `${pct}%` }} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Drag overlay */}
       {isDragging && (
         <div className="absolute inset-0 z-50 bg-indigo-50/90 flex flex-col items-center justify-center border-4 border-dashed border-indigo-400 m-4 rounded-2xl animate-fade-in">

@@ -66,19 +66,41 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
-  // Auto-save downloads to Downloads folder (no dialog)
+  // Auto-save downloads to Downloads folder (no dialog) + visible progress notifications
   mainWindow.webContents.session.on('will-download', (event, item) => {
     const downloadsPath = app.getPath('downloads');
     const filename = item.getFilename();
     const savePath = path.join(downloadsPath, filename);
     item.setSavePath(savePath);
 
-    item.on('done', (e, state) => {
+    // Notify start
+    tray?.displayBalloon({
+      title: '다운로드 시작',
+      content: filename,
+      iconType: 'info',
+    });
+    // Notify renderer for in-app feedback
+    try { mainWindow?.webContents.send('download-started', { filename }); } catch {}
+
+    item.on('updated', (_e, state) => {
+      const received = item.getReceivedBytes();
+      const total = item.getTotalBytes();
+      try { mainWindow?.webContents.send('download-progress', { filename, received, total, state }); } catch {}
+    });
+
+    item.on('done', (_e, state) => {
+      try { mainWindow?.webContents.send('download-done', { filename, state }); } catch {}
       if (state === 'completed') {
         tray?.displayBalloon({
-          title: 'Download Complete',
+          title: '다운로드 완료',
           content: filename,
           iconType: 'info',
+        });
+      } else if (state === 'interrupted' || state === 'cancelled') {
+        tray?.displayBalloon({
+          title: '다운로드 실패',
+          content: `${filename} (${state})`,
+          iconType: 'warning',
         });
       }
     });
