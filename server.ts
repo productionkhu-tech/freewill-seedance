@@ -47,8 +47,9 @@ async function startServer() {
       } catch { return res.status(502).end(); }
     }
 
+    const upstreamController = new AbortController();
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: upstreamController.signal });
       if (!response.ok) return res.status(response.status).json({ error: response.statusText });
 
       res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
@@ -59,10 +60,26 @@ async function startServer() {
       if (!response.body) return res.status(500).end();
       // Use Node Readable.fromWeb + pipe → handles backpressure, no memory copy, much higher throughput
       const nodeStream = Readable.fromWeb(response.body as any);
-      nodeStream.on('error', () => { try { res.end(); } catch {} });
+
+      // Cancel upstream when client disconnects (avoids server holding zombie BytePlus fetches)
+      const onClientClose = () => {
+        if (!res.writableEnded) {
+          try { nodeStream.destroy(); } catch {}
+          try { upstreamController.abort(); } catch {}
+        }
+      };
+      res.on('close', onClientClose);
+
+      nodeStream.on('error', (err) => {
+        console.error('[Download] upstream error:', (err as Error).message);
+        if (!res.headersSent) { try { res.status(502).end(); } catch {} }
+        else { try { res.destroy(); } catch {} }
+      });
+
       nodeStream.pipe(res);
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      console.error('[Download] fetch error:', error.message);
+      if (!res.headersSent) res.status(500).json({ error: error.message });
     }
   });
 

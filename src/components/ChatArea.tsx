@@ -848,6 +848,15 @@ export function ChatArea() {
 
           {/* Input */}
           <div className="p-4 bg-white border-t border-gray-200/80 shrink-0 relative">
+            {/* Resize grabber — sits above the prompt box */}
+            <div className="max-w-4xl mx-auto flex justify-center mb-1.5">
+              <div
+                onMouseDown={handlePromptResize}
+                title="드래그해서 크기 조절"
+                className="h-1.5 w-14 rounded-full bg-gray-300 hover:bg-indigo-400 active:bg-indigo-500 cursor-ns-resize transition-colors"
+              />
+            </div>
+
             {mentionState.active && filteredMentionAssets.length > 0 && (
               <div className="absolute bottom-full mb-2 left-4 bg-white border border-gray-200 rounded-xl shadow-xl overflow-hidden z-50 min-w-[250px] animate-slide-up">
                 <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs font-semibold text-gray-500">에셋 선택</div>
@@ -864,9 +873,7 @@ export function ChatArea() {
               </div>
             )}
 
-            <div
-              onMouseDown={(e) => { if ((e.target as HTMLElement).dataset.resizeHandle) handlePromptResize(e); }}
-              className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white transition-all duration-200">
+            <div className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white transition-all duration-200">
               <AnimatePresence>
               {(project.settings.mode === 'image_to_video_first' || project.settings.mode === 'image_to_video_first_last') && (
                 <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2, ease: 'easeInOut' }} className="overflow-hidden">
@@ -913,9 +920,6 @@ export function ChatArea() {
                 </motion.div>
               )}
               </AnimatePresence>
-              {/* Resize handle — drag up to grow the prompt area */}
-              <div data-resize-handle="1" title="드래그해서 크기 조절"
-                className="h-1.5 mx-1 rounded-full bg-gray-200 hover:bg-indigo-300 active:bg-indigo-400 cursor-ns-resize transition-colors" />
               <div className="flex items-end gap-2 w-full">
                 <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown}
                   style={{ maxHeight: promptMaxHeight }}
