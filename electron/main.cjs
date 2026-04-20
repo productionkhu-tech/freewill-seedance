@@ -91,19 +91,6 @@ function createWindow() {
   };
   waitForServer();
 
-  // Clear browser cache on startup (BytePlus video URLs expire 24h, so cache from previous sessions is dead).
-  // Also schedule periodic clear every 24h for long-running sessions.
-  const clearCachePeriodically = async () => {
-    try {
-      await mainWindow.webContents.session.clearCache();
-      console.log('[Cache] Auto-cleared (24h lifetime)');
-    } catch (err) {
-      console.error('[Cache] Auto-clear failed:', err);
-    }
-  };
-  mainWindow.webContents.once('did-finish-load', () => setTimeout(clearCachePeriodically, 3000));
-  setInterval(clearCachePeriodically, 24 * 60 * 60 * 1000);
-
   mainWindow.on('close', (e) => {
     if (!app.isQuitting) {
       e.preventDefault();

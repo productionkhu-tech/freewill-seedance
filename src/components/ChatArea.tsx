@@ -153,7 +153,7 @@ export function ChatArea() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const previousProjectIdRef = useRef<string | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [promptMaxHeight, setPromptMaxHeight] = useState(128);
+  const [promptHeight, setPromptHeight] = useState(44);
 
   // Save draft for previous project, load draft for new project
   useEffect(() => {
@@ -425,11 +425,11 @@ export function ChatArea() {
   const handlePromptResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY;
-    const startH = promptMaxHeight;
+    const startH = promptHeight;
     const onMove = (ev: MouseEvent) => {
       const next = startH + (startY - ev.clientY); // drag up → grow
-      const clamped = Math.max(44, Math.min(window.innerHeight * 0.6, next));
-      setPromptMaxHeight(clamped);
+      const clamped = Math.max(44, Math.min(window.innerHeight * 0.7, next));
+      setPromptHeight(clamped);
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -922,8 +922,8 @@ export function ChatArea() {
               </AnimatePresence>
               <div className="flex items-end gap-2 w-full">
                 <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown}
-                  style={{ maxHeight: promptMaxHeight }}
-                  className="w-full min-h-[44px] overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
+                  style={{ minHeight: promptHeight, maxHeight: '70vh' }}
+                  className="w-full overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                   data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
                 <button onClick={handleSend} disabled={!hasText || isGenerating}
                   className="shrink-0 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all duration-200 mb-0.5 mr-0.5 active:scale-95">

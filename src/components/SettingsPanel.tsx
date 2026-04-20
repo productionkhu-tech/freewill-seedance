@@ -288,7 +288,7 @@ export function SettingsPanel() {
             }
           }}
           className="text-[10px] text-gray-500 hover:text-indigo-600 px-2 py-1 rounded-md hover:bg-indigo-50 transition-colors font-mono"
-          title="앱 시작 시 자동으로 비워집니다 (24시간 수명)"
+          title="브라우저 자체 LRU로 한도 도달 시 자동 정리됩니다. 즉시 비우려면 클릭."
         >
           캐시 {formatBytes(cacheSize)}
         </button>
