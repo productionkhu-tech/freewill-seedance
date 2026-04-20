@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { Readable } from 'stream';
 
 dotenv.config();
 
@@ -55,10 +56,11 @@ async function startServer() {
       const cl = response.headers.get('content-length');
       if (cl) res.setHeader('Content-Length', cl);
 
-      const reader = response.body?.getReader();
-      if (!reader) return res.status(500).end();
-      while (true) { const { done, value } = await reader.read(); if (done) break; res.write(Buffer.from(value)); }
-      res.end();
+      if (!response.body) return res.status(500).end();
+      // Use Node Readable.fromWeb + pipe → handles backpressure, no memory copy, much higher throughput
+      const nodeStream = Readable.fromWeb(response.body as any);
+      nodeStream.on('error', () => { try { res.end(); } catch {} });
+      nodeStream.pipe(res);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

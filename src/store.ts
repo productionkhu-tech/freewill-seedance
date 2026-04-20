@@ -71,6 +71,7 @@ export interface Project {
   settings: GenerationSettings;
   assets: Asset[];
   updatedAt: number;
+  draftPrompt?: string; // saved prompt HTML so users can switch projects without losing in-progress text
 }
 
 interface AppState {
@@ -85,6 +86,7 @@ interface AppState {
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
   removeAsset: (projectId: string, assetId: string) => void;
   clearAssets: (projectId: string) => void;
+  updateDraftPrompt: (projectId: string, draft: string) => void;
   addMessage: (projectId: string, message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
   updateMessage: (projectId: string, messageId: string, updates: Partial<ChatMessage>) => void;
   deleteMessage: (projectId: string, messageId: string) => void;
@@ -174,6 +176,13 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           projects: state.projects.map((p) =>
             p.id === projectId ? { ...p, assets: [], updatedAt: Date.now() } : p
+          ),
+        }));
+      },
+      updateDraftPrompt: (projectId, draft) => {
+        set((state) => ({
+          projects: state.projects.map((p) =>
+            p.id === projectId ? { ...p, draftPrompt: draft } : p
           ),
         }));
       },

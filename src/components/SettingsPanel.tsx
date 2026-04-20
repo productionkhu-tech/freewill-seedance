@@ -254,7 +254,7 @@ export function SettingsPanel() {
         <div className="bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">
           <div className="flex items-center justify-between border-b border-gray-100 pb-2">
             <h3 className="text-[14px] font-semibold text-[#1d1d1f] tracking-tight">Generation Settings</h3>
-            <button onClick={() => { updateProjectSettings(project.id, { ...defaultSettings, model: settings.model }); assets.forEach(a => removeAsset(project.id, a.id)); }} className="text-[11px] text-gray-400 hover:text-red-500 px-2 py-1 rounded-md hover:bg-red-50 active:scale-95 transition-all">
+            <button onClick={() => { updateProjectSettings(project.id, { ...defaultSettings, model: settings.model }); assets.forEach(a => removeAsset(project.id, a.id)); window.dispatchEvent(new CustomEvent('seedance:reset', { detail: { projectId: project.id } })); }} className="text-[11px] text-gray-400 hover:text-red-500 px-2 py-1 rounded-md hover:bg-red-50 active:scale-95 transition-all">
               초기화
             </button>
           </div>

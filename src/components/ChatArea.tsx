@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useAppStore, AssetRole, defaultSettings } from '../store';
+import { useAppStore, AssetRole } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
@@ -22,12 +22,13 @@ function translateError(error: string): string {
 }
 
 /* ─── Video player: lazy mount + active preload when near viewport ─── */
-function VideoPlayer({ src, className }: { src: string; className?: string }) {
+function VideoPlayer({ src, className, eager }: { src: string; className?: string; eager?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [mounted, setMounted] = useState(false);
+  const [mounted, setMounted] = useState(eager === true);
 
   useEffect(() => {
+    if (eager) return; // eager mode: skip observer, mount immediately
     const container = containerRef.current;
     if (!container) return;
 
@@ -43,7 +44,7 @@ function VideoPlayer({ src, className }: { src: string; className?: string }) {
     );
     observer.observe(container);
     return () => observer.disconnect();
-  }, []);
+  }, [eager]);
 
   return (
     <div ref={containerRef} className={`${className} aspect-video bg-black flex items-center justify-center`}>
@@ -150,16 +151,52 @@ export function ChatArea() {
   const contentEditableRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const previousProjectIdRef = useRef<string | null>(null);
+  const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [promptMaxHeight, setPromptMaxHeight] = useState(128);
 
-  // Clear prompt on project switch
+  // Save draft for previous project, load draft for new project
   useEffect(() => {
-    if (contentEditableRef.current) {
-      contentEditableRef.current.innerHTML = '';
-      setHasText(false);
+    const prevId = previousProjectIdRef.current;
+    if (prevId && prevId !== currentProjectId && contentEditableRef.current) {
+      // Flush any pending debounced save then commit current HTML to previous project
+      if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+      useAppStore.getState().updateDraftPrompt(prevId, contentEditableRef.current.innerHTML);
     }
+    if (contentEditableRef.current) {
+      const newProject = useAppStore.getState().projects.find(p => p.id === currentProjectId);
+      const draft = newProject?.draftPrompt || '';
+      contentEditableRef.current.innerHTML = draft;
+      setHasText(!!contentEditableRef.current.innerText.trim());
+    }
+    previousProjectIdRef.current = currentProjectId;
     setHeaderSearch('');
     setShowGallery(false);
     setPreviewItem(null);
+  }, [currentProjectId]);
+
+  // Persist draft on window close (cache before IndexedDB debounce window)
+  useEffect(() => {
+    const handler = () => {
+      if (currentProjectId && contentEditableRef.current) {
+        useAppStore.getState().updateDraftPrompt(currentProjectId, contentEditableRef.current.innerHTML);
+      }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [currentProjectId]);
+
+  // Listen for SettingsPanel reset → also clear prompt
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.projectId !== currentProjectId) return;
+      if (contentEditableRef.current) contentEditableRef.current.innerHTML = '';
+      setHasText(false);
+      if (currentProjectId) useAppStore.getState().updateDraftPrompt(currentProjectId, '');
+    };
+    window.addEventListener('seedance:reset', handler as EventListener);
+    return () => window.removeEventListener('seedance:reset', handler as EventListener);
   }, [currentProjectId]);
 
   // Track mention pills by asset UUID — remove deleted, renumber shifted
@@ -337,6 +374,13 @@ export function ChatArea() {
         else setMentionState(s => ({ ...s, active: false }));
       } else { setMentionState(s => ({ ...s, active: false })); }
     }
+    // Debounced draft save
+    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = setTimeout(() => {
+      if (contentEditableRef.current && currentProjectId) {
+        useAppStore.getState().updateDraftPrompt(currentProjectId, contentEditableRef.current.innerHTML);
+      }
+    }, 500);
   };
 
   const insertMention = (asset: any) => {
@@ -377,6 +421,23 @@ export function ChatArea() {
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
   const handleFrameDrop = (e: React.DragEvent<HTMLInputElement>, role: AssetRole) => { e.preventDefault(); e.stopPropagation(); setIsDragging(false); dragCounter.current = 0; const f = e.dataTransfer.files?.[0]; if (f) processFrameFile(f, role); };
+
+  const handlePromptResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = promptMaxHeight;
+    const onMove = (ev: MouseEvent) => {
+      const next = startH + (startY - ev.clientY); // drag up → grow
+      const clamped = Math.max(44, Math.min(window.innerHeight * 0.6, next));
+      setPromptMaxHeight(clamped);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (mentionState.active && filteredMentionAssets.length > 0) {
@@ -479,6 +540,8 @@ export function ChatArea() {
 
     // All checks passed — now clear input and create messages
     contentEditableRef.current.innerHTML = ''; setHasText(false);
+    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    useAppStore.getState().updateDraftPrompt(project.id, '');
 
     const outputCount = project.settings.output_count || 1;
     const systemMessageIds: string[] = [];
@@ -511,8 +574,7 @@ export function ChatArea() {
       };
       if (currentSettings.return_last_frame) payload.return_last_frame = true;
 
-      useAppStore.getState().clearAssets(project.id);
-      useAppStore.getState().updateProjectSettings(project.id, { ...defaultSettings, model: currentSettings.model });
+      // Settings + assets are preserved after send so user can iterate quickly with same setup
 
       await Promise.allSettled(systemMessageIds.map(async (sysMsgId) => {
         try {
@@ -573,7 +635,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer src={previewItem.videoUrl} className="w-full h-full" />
+              <VideoPlayer src={previewItem.videoUrl} className="w-full h-full" eager />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -802,7 +864,9 @@ export function ChatArea() {
               </div>
             )}
 
-            <div className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white transition-all duration-200">
+            <div
+              onMouseDown={(e) => { if ((e.target as HTMLElement).dataset.resizeHandle) handlePromptResize(e); }}
+              className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white transition-all duration-200">
               <AnimatePresence>
               {(project.settings.mode === 'image_to_video_first' || project.settings.mode === 'image_to_video_first_last') && (
                 <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2, ease: 'easeInOut' }} className="overflow-hidden">
@@ -849,9 +913,13 @@ export function ChatArea() {
                 </motion.div>
               )}
               </AnimatePresence>
+              {/* Resize handle — drag up to grow the prompt area */}
+              <div data-resize-handle="1" title="드래그해서 크기 조절"
+                className="h-1.5 mx-1 rounded-full bg-gray-200 hover:bg-indigo-300 active:bg-indigo-400 cursor-ns-resize transition-colors" />
               <div className="flex items-end gap-2 w-full">
                 <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown}
-                  className="w-full max-h-32 min-h-[44px] overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
+                  style={{ maxHeight: promptMaxHeight }}
+                  className="w-full min-h-[44px] overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                   data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
                 <button onClick={handleSend} disabled={!hasText || isGenerating}
                   className="shrink-0 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all duration-200 mb-0.5 mr-0.5 active:scale-95">
