@@ -7,7 +7,7 @@ import { validateImageFile, validateImageDimensions, validateVideoFile, validate
 const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
   { id: '720p', name: '720p' },
-  { id: '1080p', name: '1080p (미출시)' },
+  { id: '1080p', name: '1080p' },
 ];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
 
