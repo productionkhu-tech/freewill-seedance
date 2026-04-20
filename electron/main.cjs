@@ -66,47 +66,22 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
-  // Auto-save downloads to Downloads folder (no dialog) + visible progress notifications
+  // Auto-save downloads to Downloads folder. In-app toasts handle all UI feedback (no Windows balloons).
   mainWindow.webContents.session.on('will-download', (event, item) => {
     const downloadsPath = app.getPath('downloads');
     const url = item.getURL();
-    // Use custom filename if provided via IPC (preserves UI-side naming)
     const customName = pendingDownloads.get(url);
     if (customName) pendingDownloads.delete(url);
     const filename = customName || item.getFilename();
     const savePath = path.join(downloadsPath, filename);
     item.setSavePath(savePath);
 
-    // Notify start
-    tray?.displayBalloon({
-      title: '다운로드 시작',
-      content: filename,
-      iconType: 'info',
-    });
-    // Notify renderer for in-app feedback
     try { mainWindow?.webContents.send('download-started', { filename }); } catch {}
-
     item.on('updated', (_e, state) => {
-      const received = item.getReceivedBytes();
-      const total = item.getTotalBytes();
-      try { mainWindow?.webContents.send('download-progress', { filename, received, total, state }); } catch {}
+      try { mainWindow?.webContents.send('download-progress', { filename, received: item.getReceivedBytes(), total: item.getTotalBytes(), state }); } catch {}
     });
-
     item.on('done', (_e, state) => {
       try { mainWindow?.webContents.send('download-done', { filename, state }); } catch {}
-      if (state === 'completed') {
-        tray?.displayBalloon({
-          title: '다운로드 완료',
-          content: filename,
-          iconType: 'info',
-        });
-      } else if (state === 'interrupted' || state === 'cancelled') {
-        tray?.displayBalloon({
-          title: '다운로드 실패',
-          content: `${filename} (${state})`,
-          iconType: 'warning',
-        });
-      }
     });
   });
 
