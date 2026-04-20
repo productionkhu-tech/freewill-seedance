@@ -264,12 +264,12 @@ export const useAppStore = create<AppState>()(
               imageUrl: contentData?.last_frame_url,
               endTime: Date.now(),
             });
-            // Pre-warm CDN edge cache so the first download is fast (Range GET on signed URL — accepted by BytePlus)
+            // Full pre-fetch: populates browser HTTP cache so subsequent download/preview are instant (no CDN round-trip)
             if (contentData?.video_url) {
-              fetch(contentData.video_url, { headers: { Range: 'bytes=0-0' } }).catch(() => {});
+              fetch(contentData.video_url).then(r => r.blob()).catch(() => {});
             }
             if (contentData?.last_frame_url) {
-              fetch(contentData.last_frame_url, { headers: { Range: 'bytes=0-0' } }).catch(() => {});
+              fetch(contentData.last_frame_url).then(r => r.blob()).catch(() => {});
             }
             showNotification('영상 생성 완료', { body: '영상이 성공적으로 생성되었습니다.' });
           } else if (status === 'failed' || status === 'expired') {
