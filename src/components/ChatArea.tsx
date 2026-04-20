@@ -155,6 +155,7 @@ export function ChatArea() {
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [promptHeight, setPromptHeight] = useState(44);
   const [downloads, setDownloads] = useState<Record<string, { received: number; total: number; state: string }>>({});
+  const [downloadsCollapsed, setDownloadsCollapsed] = useState(false);
 
   // Listen to download events from Electron main process
   useEffect(() => {
@@ -621,38 +622,56 @@ export function ChatArea() {
 
   /* ─── Render ─── */
   const downloadEntries = Object.entries(downloads);
+  const activeCount = downloadEntries.filter(([, i]) => i.state !== 'completed' && i.state !== 'interrupted' && i.state !== 'cancelled').length;
+  const dismissDownload = (filename: string) => setDownloads(d => { const n = { ...d }; delete n[filename]; return n; });
+  const dismissAllDownloads = () => setDownloads({});
   return (
     <div className="flex-1 flex flex-col bg-[#fafafa] h-full relative min-w-0" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
-      {/* Download progress toasts (bottom-right) */}
+      {/* Download progress — collapsed pill or expanded list */}
       {downloadEntries.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 max-w-sm">
-          {downloadEntries.map(([filename, info]) => {
-            const pct = info.total > 0 ? Math.round((info.received / info.total) * 100) : 0;
-            const mb = (info.received / 1024 / 1024).toFixed(1);
-            const totalMb = info.total > 0 ? (info.total / 1024 / 1024).toFixed(1) : '?';
-            const isDone = info.state === 'completed';
-            const isFailed = info.state === 'interrupted' || info.state === 'cancelled';
-            return (
-              <div key={filename} className={`bg-white rounded-xl shadow-lg border ${isFailed ? 'border-red-200' : isDone ? 'border-green-200' : 'border-indigo-200'} p-3 animate-slide-up`}>
-                <div className="flex items-center gap-2 mb-1">
-                  {isFailed ? <AlertCircle size={14} className="text-red-500 shrink-0" />
-                    : isDone ? <Download size={14} className="text-green-500 shrink-0" />
-                    : <Loader2 size={14} className="text-indigo-500 shrink-0 animate-spin" />}
-                  <span className="text-[12px] font-medium text-gray-700 truncate flex-1" title={filename}>{filename}</span>
-                </div>
-                <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
-                  <span>{isDone ? '완료' : isFailed ? '실패' : `${mb}MB / ${totalMb}MB`}</span>
-                  <span>{!isDone && !isFailed && info.total > 0 ? `${pct}%` : ''}</span>
-                </div>
-                {!isDone && !isFailed && (
-                  <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
-                    <div className="h-full bg-indigo-500 transition-all duration-200" style={{ width: `${pct}%` }} />
+        downloadsCollapsed ? (
+          <button
+            onClick={() => setDownloadsCollapsed(false)}
+            className="fixed bottom-4 right-4 z-[60] flex items-center gap-1.5 bg-white border border-gray-200 shadow-lg rounded-full px-3 py-1.5 hover:border-indigo-300 transition-colors"
+          >
+            {activeCount > 0 ? <Loader2 size={12} className="text-indigo-500 animate-spin" /> : <Download size={12} className="text-green-500" />}
+            <span className="text-[11px] text-gray-700 font-medium">{activeCount > 0 ? `다운로드 ${activeCount}` : '완료'}</span>
+          </button>
+        ) : (
+          <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-1.5 max-w-xs">
+            <div className="flex items-center justify-end gap-1">
+              <button onClick={() => setDownloadsCollapsed(true)} className="text-[10px] text-gray-500 hover:text-indigo-600 px-2 py-0.5 bg-white border border-gray-200 rounded-full shadow" title="최소화">접기</button>
+              <button onClick={dismissAllDownloads} className="text-[10px] text-gray-500 hover:text-red-500 px-2 py-0.5 bg-white border border-gray-200 rounded-full shadow" title="전체 닫기">전체 닫기</button>
+            </div>
+            {downloadEntries.map(([filename, info]) => {
+              const pct = info.total > 0 ? Math.round((info.received / info.total) * 100) : 0;
+              const mb = (info.received / 1024 / 1024).toFixed(1);
+              const totalMb = info.total > 0 ? (info.total / 1024 / 1024).toFixed(1) : '?';
+              const isDone = info.state === 'completed';
+              const isFailed = info.state === 'interrupted' || info.state === 'cancelled';
+              return (
+                <div key={filename} className={`bg-white rounded-lg shadow border ${isFailed ? 'border-red-200' : isDone ? 'border-green-200' : 'border-indigo-200'} px-2.5 py-1.5`}>
+                  <div className="flex items-center gap-1.5">
+                    {isFailed ? <AlertCircle size={11} className="text-red-500 shrink-0" />
+                      : isDone ? <Download size={11} className="text-green-500 shrink-0" />
+                      : <Loader2 size={11} className="text-indigo-500 shrink-0 animate-spin" />}
+                    <span className="text-[10px] text-gray-700 truncate flex-1" title={filename}>{filename}</span>
+                    <button onClick={() => dismissDownload(filename)} className="text-gray-300 hover:text-gray-600 shrink-0" title="닫기"><X size={10} /></button>
                   </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+                  <div className="flex items-center gap-1.5 mt-0.5 text-[9px] text-gray-500">
+                    <span className="font-mono">{isDone ? '완료' : isFailed ? '실패' : `${mb}/${totalMb}MB`}</span>
+                    {!isDone && !isFailed && (
+                      <div className="flex-1 h-0.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-indigo-500 transition-all duration-200" style={{ width: `${pct}%` }} />
+                      </div>
+                    )}
+                    {!isDone && !isFailed && info.total > 0 && <span className="font-mono">{pct}%</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )
       )}
 
       {/* Drag overlay */}

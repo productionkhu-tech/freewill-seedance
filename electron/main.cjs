@@ -69,7 +69,11 @@ function createWindow() {
   // Auto-save downloads to Downloads folder (no dialog) + visible progress notifications
   mainWindow.webContents.session.on('will-download', (event, item) => {
     const downloadsPath = app.getPath('downloads');
-    const filename = item.getFilename();
+    const url = item.getURL();
+    // Use custom filename if provided via IPC (preserves UI-side naming)
+    const customName = pendingDownloads.get(url);
+    if (customName) pendingDownloads.delete(url);
+    const filename = customName || item.getFilename();
     const savePath = path.join(downloadsPath, filename);
     item.setSavePath(savePath);
 
@@ -172,6 +176,20 @@ function setupAutoUpdater() {
 
   if (!isDev) autoUpdater.checkForUpdates().catch(() => {});
 }
+
+// ─── IPC: direct downloads (bypass server proxy for speed) ───
+const pendingDownloads = new Map(); // url → custom filename
+ipcMain.handle('download', async (_e, { url, filename }) => {
+  if (!mainWindow) return { ok: false, error: 'window not ready' };
+  try {
+    pendingDownloads.set(url, filename);
+    mainWindow.webContents.downloadURL(url);
+    return { ok: true };
+  } catch (err) {
+    pendingDownloads.delete(url);
+    return { ok: false, error: err.message };
+  }
+});
 
 // ─── IPC: cache management ───
 ipcMain.handle('clear-cache', async () => {

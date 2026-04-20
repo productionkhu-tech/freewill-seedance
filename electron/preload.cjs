@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  download: (payload) => ipcRenderer.invoke('download', payload),
   clearCache: () => ipcRenderer.invoke('clear-cache'),
   getCacheSize: () => ipcRenderer.invoke('get-cache-size'),
   onDownloadStarted: (cb) => ipcRenderer.on('download-started', (_e, payload) => cb(payload)),
