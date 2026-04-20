@@ -3,7 +3,7 @@ import { useAppStore, AssetRole } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl, getCachedBlob, setCachedBlob } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -50,9 +50,21 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
     return () => observer.disconnect();
   }, [eager]);
 
-  // Fetch as blob — single GET avoids slow range-request chunking over high-latency Singapore CDN
+  // Use shared blob cache (populated by store on success). Fetch + cache if missing.
   useEffect(() => {
     if (!mounted || !src) return;
+    const cached = getCachedBlob(src);
+    if (cached) {
+      const url = URL.createObjectURL(cached);
+      blobUrlRef.current = url;
+      setBlobSrc(url);
+      setLoading(false);
+      setFailed(false);
+      return () => {
+        if (blobUrlRef.current) { URL.revokeObjectURL(blobUrlRef.current); blobUrlRef.current = null; }
+        setBlobSrc(null);
+      };
+    }
     let cancelled = false;
     setLoading(true);
     setFailed(false);
@@ -60,6 +72,7 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
       .then(r => { if (!r.ok) throw new Error(`status ${r.status}`); return r.blob(); })
       .then(b => {
         if (cancelled) return;
+        setCachedBlob(src, b); // share with download flow
         const url = URL.createObjectURL(b);
         blobUrlRef.current = url;
         setBlobSrc(url);
@@ -68,7 +81,7 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
       .catch(() => {
         if (cancelled) return;
         setLoading(false);
-        setFailed(true); // fall back to direct src playback (range requests)
+        setFailed(true);
       });
     return () => {
       cancelled = true;
@@ -196,24 +209,33 @@ export function ChatArea() {
   // Listen to download events from Electron main process
   useEffect(() => {
     const api = (window as any).electronAPI;
-    if (!api?.onDownloadStarted) return;
-    api.onDownloadStarted(({ filename }: { filename: string }) => {
-      setDownloads(d => ({ ...d, [filename]: { received: 0, total: 0, state: 'progressing' } }));
-    });
-    api.onDownloadProgress(({ filename, received, total, state }: any) => {
-      setDownloads(d => ({ ...d, [filename]: { received, total, state } }));
-    });
-    api.onDownloadDone(({ filename, state }: any) => {
-      setDownloads(d => {
-        const next = { ...d };
-        if (state === 'completed') {
-          // Auto-dismiss completed downloads after 3s
-          setTimeout(() => setDownloads(curr => { const c = { ...curr }; delete c[filename]; return c; }), 3000);
-        }
-        next[filename] = { ...(next[filename] || { received: 0, total: 0 }), state };
-        return next;
+    if (api?.onDownloadStarted) {
+      api.onDownloadStarted(({ filename }: { filename: string }) => {
+        setDownloads(d => ({ ...d, [filename]: { received: 0, total: 0, state: 'progressing' } }));
       });
-    });
+      api.onDownloadProgress(({ filename, received, total, state }: any) => {
+        setDownloads(d => ({ ...d, [filename]: { received, total, state } }));
+      });
+      api.onDownloadDone(({ filename, state }: any) => {
+        setDownloads(d => {
+          const next = { ...d };
+          if (state === 'completed') {
+            setTimeout(() => setDownloads(curr => { const c = { ...curr }; delete c[filename]; return c; }), 3000);
+          }
+          next[filename] = { ...(next[filename] || { received: 0, total: 0 }), state };
+          return next;
+        });
+      });
+    }
+
+    // Instant downloads served from in-memory blob cache (no Electron will-download fires)
+    const onInstant = (e: Event) => {
+      const { filename, size } = (e as CustomEvent).detail;
+      setDownloads(d => ({ ...d, [filename]: { received: size, total: size, state: 'completed' } }));
+      setTimeout(() => setDownloads(curr => { const c = { ...curr }; delete c[filename]; return c; }), 2000);
+    };
+    window.addEventListener('seedance:download-instant', onInstant);
+    return () => window.removeEventListener('seedance:download-instant', onInstant);
   }, []);
 
   // Save draft for previous project, load draft for new project

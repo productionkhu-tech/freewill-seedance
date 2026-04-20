@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist, StateStorage, createJSONStorage } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del } from 'idb-keyval';
-import { showNotification } from './lib/utils';
+import { showNotification, setCachedBlob, getCachedBlob } from './lib/utils';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -264,12 +264,14 @@ export const useAppStore = create<AppState>()(
               imageUrl: contentData?.last_frame_url,
               endTime: Date.now(),
             });
-            // Full pre-fetch: populates browser HTTP cache so subsequent download/preview are instant (no CDN round-trip)
-            if (contentData?.video_url) {
-              fetch(contentData.video_url).then(r => r.blob()).catch(() => {});
+            // Full pre-fetch into memory cache → subsequent download saves from RAM (zero CDN round-trip)
+            if (contentData?.video_url && !getCachedBlob(contentData.video_url)) {
+              const url = contentData.video_url;
+              fetch(url).then(r => r.blob()).then(b => setCachedBlob(url, b)).catch(() => {});
             }
-            if (contentData?.last_frame_url) {
-              fetch(contentData.last_frame_url).then(r => r.blob()).catch(() => {});
+            if (contentData?.last_frame_url && !getCachedBlob(contentData.last_frame_url)) {
+              const url = contentData.last_frame_url;
+              fetch(url).then(r => r.blob()).then(b => setCachedBlob(url, b)).catch(() => {});
             }
             showNotification('영상 생성 완료', { body: '영상이 성공적으로 생성되었습니다.' });
           } else if (status === 'failed' || status === 'expired') {

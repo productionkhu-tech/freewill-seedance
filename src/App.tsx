@@ -12,10 +12,6 @@ export default function App() {
     if (_hasHydrated && projects.length === 0) createProject();
   }, [_hasHydrated, projects.length, createProject]);
 
-  // Pre-warm BytePlus CDN connection so the first download skips DNS+TCP+TLS handshake (~500ms saved)
-  useEffect(() => {
-    fetch('https://ark-content-generation-ap-southeast-1.tos-ap-southeast-1.volces.com/', { mode: 'no-cors' }).catch(() => {});
-  }, []);
 
   // Single interval polls ALL active tasks every 10 seconds — no setTimeout chains
   useEffect(() => {
@@ -56,7 +52,7 @@ export default function App() {
       <ChatArea />
       <SettingsPanel />
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.4.2013
+        v26.4.2014
       </div>
     </div>
   );

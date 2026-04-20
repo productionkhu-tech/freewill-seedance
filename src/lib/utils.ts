@@ -198,14 +198,73 @@ export function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+// In-memory blob cache — pre-fetched on generation success, used by both preview and download.
+// LRU with 200MB cap so memory never balloons indefinitely.
+const blobCache = new Map<string, Blob>(); // insertion order = LRU recency
+const MAX_CACHE_BYTES = 200 * 1024 * 1024;
+
+function totalCacheBytes(): number {
+  let s = 0;
+  for (const b of blobCache.values()) s += b.size;
+  return s;
+}
+
+function evictUntilFits(needed: number) {
+  while (blobCache.size > 0 && totalCacheBytes() + needed > MAX_CACHE_BYTES) {
+    const oldestKey = blobCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    blobCache.delete(oldestKey);
+  }
+}
+
+export function setCachedBlob(url: string, blob: Blob) {
+  blobCache.delete(url); // remove if exists, so re-insert moves to end (most-recent)
+  if (blob.size <= MAX_CACHE_BYTES) {
+    evictUntilFits(blob.size);
+    blobCache.set(url, blob);
+  }
+  // Auto-cleanup after 24h (BytePlus signed URLs expire then anyway)
+  setTimeout(() => blobCache.delete(url), 24 * 60 * 60 * 1000);
+}
+
+export function getCachedBlob(url: string): Blob | null {
+  const blob = blobCache.get(url);
+  if (blob) {
+    // LRU touch: re-insert to move to most-recent
+    blobCache.delete(url);
+    blobCache.set(url, blob);
+  }
+  return blob || null;
+}
+
+export function getBlobCacheStats() {
+  return { count: blobCache.size, bytes: totalCacheBytes(), capBytes: MAX_CACHE_BYTES };
+}
+
 export async function downloadViaProxy(remoteUrl: string, filename: string) {
+  // Fast path: serve from in-memory blob (instant, no CDN round-trip)
+  const cached = blobCache.get(remoteUrl);
+  if (cached) {
+    const blobUrl = URL.createObjectURL(cached);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    // Notify ChatArea for instant-completion toast
+    window.dispatchEvent(new CustomEvent('seedance:download-instant', { detail: { filename, size: cached.size } }));
+    return;
+  }
+
+  // Slow path: Electron direct download from BytePlus CDN (cold cache → may be slow)
   const api = (window as any).electronAPI;
-  // Preferred path: Electron downloads BytePlus URL directly (no server proxy hop → faster)
   if (api?.download) {
     await api.download({ url: remoteUrl, filename });
     return;
   }
-  // Browser/dev fallback: go through local proxy via anchor click
+  // Browser/dev fallback
   const params = new URLSearchParams({ url: remoteUrl, filename });
   const a = document.createElement('a');
   a.href = `/api/download?${params.toString()}`;
