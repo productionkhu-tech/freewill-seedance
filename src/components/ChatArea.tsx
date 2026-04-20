@@ -621,10 +621,7 @@ export function ChatArea() {
       }
     }
 
-    // All checks passed — now clear input and create messages
-    contentEditableRef.current.innerHTML = ''; setHasText(false);
-    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
-    useAppStore.getState().updateDraftPrompt(project.id, '');
+    // All checks passed — keep prompt/settings/assets intact for fast iteration; user manually clears if needed
 
     const outputCount = project.settings.output_count || 1;
     const systemMessageIds: string[] = [];
@@ -852,20 +849,20 @@ export function ChatArea() {
                   <div className="p-3 space-y-2">
                     <p className="text-[11px] font-semibold text-indigo-500">{project.name}</p>
                     <p className="text-[13px] text-gray-700 line-clamp-2 leading-snug h-[2.5em]">{item.promptText || '프롬프트 없음'}</p>
-                    <div className="flex items-center gap-1.5 pt-1">
+                    <div className="flex items-center gap-1 pt-1 flex-wrap">
                       <button onClick={() => { if (item.videoUrl && item.taskId) downloadViaProxy(item.videoUrl, buildDownloadFilename(item.taskId)); }}
-                        className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-2 py-1 rounded-md hover:bg-indigo-50 transition-colors">
+                        className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
                         <Download size={12} /> 다운로드
                       </button>
                       <button onClick={() => setPreviewItem(item)}
-                        className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-2 py-1 rounded-md hover:bg-indigo-50 transition-colors">
+                        className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
                         <Eye size={12} /> 상세
                       </button>
                       <button onClick={() => scrollToMessage(item.id)}
-                        className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-2 py-1 rounded-md hover:bg-indigo-50 transition-colors">
+                        className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
                         <Search size={12} /> 찾기
                       </button>
-                      <span className="text-[10px] text-gray-400 ml-auto">{new Date(item.timestamp).toLocaleDateString()}</span>
+                      <span className="text-[10px] text-gray-400 ml-auto whitespace-nowrap shrink-0">{new Date(item.timestamp).toLocaleDateString()}</span>
                     </div>
                   </div>
                 </div>
@@ -971,18 +968,18 @@ export function ChatArea() {
                             <div className="flex items-center gap-2">
                               {msg.videoUrl && (
                                 <button onClick={() => downloadViaProxy(msg.videoUrl!, buildDownloadFilename(msg.taskId || 'unknown'))}
-                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all">
+                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
                                   <Download size={14} /> 영상 다운로드
                                 </button>
                               )}
                               {msg.imageUrl && (
                                 <button onClick={() => downloadViaProxy(msg.imageUrl!, buildDownloadFilename(msg.taskId || 'unknown', '.png'))}
-                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all">
+                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
                                   <Download size={14} /> 이미지
                                 </button>
                               )}
                             </div>
-                            <div className="text-[11px] text-gray-400">소요 시간: <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></div>
+                            <div className="text-[11px] text-gray-400 whitespace-nowrap shrink-0">소요 시간: <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></div>
                           </div>
                         </div>
                       ) : null}
