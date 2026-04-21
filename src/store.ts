@@ -242,9 +242,20 @@ export const useAppStore = create<AppState>()(
         if (pollingSet.has(taskId)) return;
         pollingSet.add(taskId);
 
+        // Hard timeout — without this, a hung fetch keeps the taskId stuck in the polling set
+        // forever and the UI freezes on "생성 중". 8s is well above normal RTT (sub-second).
+        const ac = new AbortController();
+        const timeoutId = setTimeout(() => ac.abort(), 8000);
+
         try {
           console.log(`[Poll] Checking ${taskId}...`);
-          const res = await fetch(`/api/byteplus/tasks/${taskId}`);
+          const res = await fetch(`/api/byteplus/tasks/${taskId}`, { signal: ac.signal });
+          if (!res.ok) {
+            // Transient HTTP error (5xx, 502, etc.) — leave status unchanged so the next
+            // interval retries. Only AbortError + JSON parse fall through to the catch.
+            console.warn(`[Poll] ${taskId} HTTP ${res.status} — will retry next cycle`);
+            return;
+          }
           const text = await res.text();
           console.log(`[Poll] ${taskId} raw response: ${text.substring(0, 200)}`);
 
@@ -264,14 +275,33 @@ export const useAppStore = create<AppState>()(
               imageUrl: contentData?.last_frame_url,
               endTime: Date.now(),
             });
-            // Full pre-fetch into memory cache → subsequent download saves from RAM (zero CDN round-trip)
+            // Full pre-fetch into memory cache → subsequent download saves from RAM (zero CDN round-trip).
+            // Validate response before caching: a 404/500 body would otherwise be served as a "video"
+            // resulting in blank playback and broken downloads.
+            const safePrefetch = (url: string, expectedTypePrefix: string) => {
+              const pAc = new AbortController();
+              const pTimer = setTimeout(() => pAc.abort(), 60000); // big videos can take a while
+              fetch(url, { signal: pAc.signal })
+                .then(r => {
+                  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                  return r.blob();
+                })
+                .then(b => {
+                  if (b.size < 1024) throw new Error(`blob too small (${b.size}B) — likely error response`);
+                  // BytePlus serves with content-type set; accept octet-stream or empty as fallback.
+                  if (b.type && !b.type.startsWith(expectedTypePrefix) && b.type !== 'application/octet-stream') {
+                    throw new Error(`unexpected blob type: ${b.type}`);
+                  }
+                  setCachedBlob(url, b);
+                })
+                .catch(err => console.warn(`[Cache] skip prefetch ${url.substring(0, 60)}…:`, err.message))
+                .finally(() => clearTimeout(pTimer));
+            };
             if (contentData?.video_url && !getCachedBlob(contentData.video_url)) {
-              const url = contentData.video_url;
-              fetch(url).then(r => r.blob()).then(b => setCachedBlob(url, b)).catch(() => {});
+              safePrefetch(contentData.video_url, 'video/');
             }
             if (contentData?.last_frame_url && !getCachedBlob(contentData.last_frame_url)) {
-              const url = contentData.last_frame_url;
-              fetch(url).then(r => r.blob()).then(b => setCachedBlob(url, b)).catch(() => {});
+              safePrefetch(contentData.last_frame_url, 'image/');
             }
             showNotification('영상 생성 완료', { body: '영상이 성공적으로 생성되었습니다.' });
           } else if (status === 'failed' || status === 'expired') {
@@ -290,8 +320,10 @@ export const useAppStore = create<AppState>()(
             });
           }
         } catch (error: any) {
-          console.error(`[Poll] ${taskId} fetch error:`, error.message);
+          if (error.name === 'AbortError') console.warn(`[Poll] ${taskId} timed out after 8s — will retry`);
+          else console.error(`[Poll] ${taskId} fetch error:`, error.message);
         } finally {
+          clearTimeout(timeoutId);
           pollingSet.delete(taskId);
         }
       },

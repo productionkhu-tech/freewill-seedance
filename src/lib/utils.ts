@@ -256,7 +256,10 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    // Revoke window must outlive the browser writing the blob to disk. 5s broke 50MB downloads
+    // on slower disks (file vanished mid-write). 5min covers any realistic case while still
+    // freeing the memory eventually.
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5 * 60 * 1000);
     // Notify ChatArea for instant-completion toast
     window.dispatchEvent(new CustomEvent('seedance:download-instant', { detail: { filename, size: cached.size } }));
     return;

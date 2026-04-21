@@ -101,10 +101,26 @@ async function startServer() {
   async function uploadToTmpFiles(fileBuffer: Buffer, filename: string): Promise<string> {
     const formData = new FormData();
     formData.append('file', new Blob([fileBuffer]), filename);
-    const response = await fetch('https://tmpfiles.org/api/v1/upload', { method: 'POST', body: formData });
-    const data = await response.json() as any;
-    if (data.status !== 'success' || !data.data?.url) throw new Error('Upload failed: ' + JSON.stringify(data));
-    return data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+    // Hard timeout — tmpfiles.org has gone unresponsive in the past, freezing the whole UI
+    // because the request never resolves. 60s is generous for ~50MB uploads on slow links.
+    const ac = new AbortController();
+    const timeoutId = setTimeout(() => ac.abort(), 60000);
+    try {
+      const response = await fetch('https://tmpfiles.org/api/v1/upload', {
+        method: 'POST',
+        body: formData,
+        signal: ac.signal,
+      });
+      if (!response.ok) throw new Error(`tmpfiles HTTP ${response.status}`);
+      const data = await response.json() as any;
+      if (data.status !== 'success' || !data.data?.url) throw new Error('Upload failed: ' + JSON.stringify(data));
+      return data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+    } catch (err: any) {
+      if (err.name === 'AbortError') throw new Error('tmpfiles 업로드 타임아웃 (60초) — 잠시 후 다시 시도하세요');
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   // Cache file locally (for image reuse) → returns { cacheId }
