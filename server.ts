@@ -123,6 +123,89 @@ async function startServer() {
     }
   }
 
+  // BytePlus Files API — upload video to BytePlus' own storage.
+  // Returns a signed download URL that BytePlus task-generation can fetch directly.
+  // Advantages over tmpfiles: no third-party dependency, longer lifetime, in-network to BytePlus.
+  // Images/audio still use tmpfiles — they're small enough and the payload size concerns differ.
+  const BYTEPLUS_API_BASE = 'https://ark.ap-southeast.bytepluses.com/api/v3';
+
+  async function uploadToBytePlusFiles(fileBuffer: Buffer, filename: string, mimeType: string): Promise<string> {
+    // Step 1: POST to /files to create the file record
+    const formData = new FormData();
+    formData.append('purpose', 'user_data');
+    formData.append('file', new Blob([fileBuffer], { type: mimeType }), filename);
+
+    const uploadAc = new AbortController();
+    const uploadTimer = setTimeout(() => uploadAc.abort(), 120000); // 2min for large videos
+    let fileId: string;
+    try {
+      const res = await fetch(`${BYTEPLUS_API_BASE}/files`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${API_KEY}` },
+        body: formData,
+        signal: uploadAc.signal,
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(`BytePlus Files API ${res.status}: ${errText.substring(0, 200)}`);
+      }
+      const data = await res.json() as any;
+      if (!data.id) throw new Error('BytePlus Files API returned no id: ' + JSON.stringify(data));
+      fileId = data.id;
+    } catch (err: any) {
+      if (err.name === 'AbortError') throw new Error('BytePlus Files 업로드 타임아웃 (120초)');
+      throw err;
+    } finally {
+      clearTimeout(uploadTimer);
+    }
+
+    // Step 2: GET /files/{id}/content with manual redirect → extract the signed download URL
+    // from the Location header so BytePlus task-generation can fetch it without our API key.
+    const urlAc = new AbortController();
+    const urlTimer = setTimeout(() => urlAc.abort(), 15000);
+    try {
+      const res = await fetch(`${BYTEPLUS_API_BASE}/files/${fileId}/content`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${API_KEY}` },
+        signal: urlAc.signal,
+        redirect: 'manual',
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get('location');
+        if (loc) return loc;
+      }
+      if (res.ok) {
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('json')) {
+          const data = await res.json().catch(() => ({})) as any;
+          const url = data.url || data.download_url;
+          if (url) return url;
+        }
+      }
+      // Fallback: if we can't resolve a signed URL, point BytePlus at the content endpoint
+      // directly. Works in-region but requires Authorization header — only use as last resort.
+      throw new Error(`Could not resolve signed URL from Files API (status ${res.status})`);
+    } catch (err: any) {
+      if (err.name === 'AbortError') throw new Error('BytePlus Files URL 조회 타임아웃 (15초)');
+      throw err;
+    } finally {
+      clearTimeout(urlTimer);
+    }
+  }
+
+  function isVideoExt(ext: string): boolean {
+    const v = ext.toLowerCase();
+    return v === '.mp4' || v === '.mov' || v === '.webm' || v === '.m4v';
+  }
+
+  function mimeFromExt(ext: string): string {
+    const v = ext.toLowerCase();
+    if (v === '.mp4' || v === '.m4v') return 'video/mp4';
+    if (v === '.mov') return 'video/quicktime';
+    if (v === '.webm') return 'video/webm';
+    return 'application/octet-stream';
+  }
+
   // Cache file locally (for image reuse) → returns { cacheId }
   app.post('/api/cache', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
     const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'file');
@@ -141,23 +224,29 @@ async function startServer() {
     res.sendFile(cachePath);
   });
 
-  // Upload video/audio → cache locally + upload to tmpfiles → returns { url, cacheId }
+  // Upload image/audio/video → cache locally + upload to public host → returns { url, cacheId }
+  // Routing: video goes to BytePlus Files API (direct to BytePlus, in-network, more reliable).
+  //          image/audio still go to tmpfiles (smaller files, avoids BytePlus storage costs).
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'upload.mp4');
     const ext = path.extname(filename) || '.mp4';
+    const contentType = (req.headers['content-type'] as string) || '';
+    const isVideo = contentType.startsWith('video/') || isVideoExt(ext);
     // Hash file content → same file = same cacheId (no duplicates)
     const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
     const cacheId = `${hash}${ext}`;
-    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash}`);
+    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash} video=${isVideo}`);
 
     try {
       // Save to local cache (skip if same file already cached)
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, req.body);
 
-      // Upload to public hosting
-      const publicUrl = await uploadToTmpFiles(req.body, filename);
-      console.log(`[Upload] OK → ${publicUrl} (cached: ${cacheId})`);
+      // Route video to BytePlus, everything else to tmpfiles
+      const publicUrl = isVideo
+        ? await uploadToBytePlusFiles(req.body, filename, contentType || mimeFromExt(ext))
+        : await uploadToTmpFiles(req.body, filename);
+      console.log(`[Upload] OK (${isVideo ? 'byteplus' : 'tmpfiles'}) → ${publicUrl.substring(0, 80)}... (cached: ${cacheId})`);
       res.json({ url: publicUrl, cacheId });
     } catch (error: any) {
       console.error('[Upload] Error:', error.message);
@@ -165,18 +254,23 @@ async function startServer() {
     }
   });
 
-  // Re-upload from cache → new public URL
+  // Re-upload from cache → new public URL. Routes video → BytePlus, others → tmpfiles
+  // based on the cacheId's file extension.
   app.post('/api/reupload/:cacheId', async (req, res) => {
     const cachePath = path.join(CACHE_DIR, req.params.cacheId);
-    console.log(`[Re-upload] ${req.params.cacheId}...`);
+    const ext = path.extname(req.params.cacheId) || '';
+    const isVideo = isVideoExt(ext);
+    console.log(`[Re-upload] ${req.params.cacheId} video=${isVideo}`);
 
     try {
       if (!fs.existsSync(cachePath)) {
         return res.status(404).json({ error: 'Cached file not found. Please re-attach the file.' });
       }
       const fileBuffer = fs.readFileSync(cachePath);
-      const publicUrl = await uploadToTmpFiles(fileBuffer, req.params.cacheId);
-      console.log(`[Re-upload] OK → ${publicUrl}`);
+      const publicUrl = isVideo
+        ? await uploadToBytePlusFiles(fileBuffer, req.params.cacheId, mimeFromExt(ext))
+        : await uploadToTmpFiles(fileBuffer, req.params.cacheId);
+      console.log(`[Re-upload] OK (${isVideo ? 'byteplus' : 'tmpfiles'}) → ${publicUrl.substring(0, 80)}...`);
       res.json({ url: publicUrl });
     } catch (error: any) {
       console.error('[Re-upload] Error:', error.message);

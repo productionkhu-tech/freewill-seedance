@@ -605,11 +605,13 @@ export function ChatArea() {
       return;
     }
 
-    // Re-upload assets if their public URLs may have expired (all types now use URLs)
+    // Re-upload assets we own (cacheId set) before sending — both tmpfiles (image/audio) and
+    // BytePlus Files (video) return ephemeral signed URLs that expire. User-pasted asset://
+    // URIs and raw public URLs have no cacheId, so they're passed through unchanged.
     setIsGenerating(true);
     for (let i = 0; i < currentAssets.length; i++) {
       const a = currentAssets[i];
-      if (a.cacheId && a.url.includes('tmpfiles.org')) {
+      if (a.cacheId) {
         try {
           const newUrl = await reuploadFromCache(a.cacheId);
           currentAssets[i] = { ...a, url: newUrl };
