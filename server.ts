@@ -159,38 +159,58 @@ async function startServer() {
       clearTimeout(uploadTimer);
     }
 
-    // Step 2: GET /files/{id}/content with manual redirect → extract the signed download URL
-    // from the Location header so BytePlus task-generation can fetch it without our API key.
-    const urlAc = new AbortController();
-    const urlTimer = setTimeout(() => urlAc.abort(), 15000);
-    try {
-      const res = await fetch(`${BYTEPLUS_API_BASE}/files/${fileId}/content`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${API_KEY}` },
-        signal: urlAc.signal,
-        redirect: 'manual',
-      });
-      if (res.status >= 300 && res.status < 400) {
-        const loc = res.headers.get('location');
-        if (loc) return loc;
-      }
-      if (res.ok) {
-        const ct = res.headers.get('content-type') || '';
-        if (ct.includes('json')) {
-          const data = await res.json().catch(() => ({})) as any;
-          const url = data.url || data.download_url;
-          if (url) return url;
+    // Step 2: resolve a URL BytePlus task-generation can use.
+    // Tries signed URL first (via manual redirect), falls back to the content endpoint itself.
+    // Freshly-uploaded files may 404 briefly while BytePlus indexes — retry once after 1s.
+    const fallbackUrl = `${BYTEPLUS_API_BASE}/files/${fileId}/content`;
+
+    const tryResolve = async (): Promise<string | null> => {
+      const urlAc = new AbortController();
+      const urlTimer = setTimeout(() => urlAc.abort(), 15000);
+      try {
+        const res = await fetch(fallbackUrl, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${API_KEY}` },
+          signal: urlAc.signal,
+          redirect: 'manual',
+        });
+        if (res.status >= 300 && res.status < 400) {
+          const loc = res.headers.get('location');
+          if (loc) return loc;
         }
+        if (res.ok) {
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('json')) {
+            const data = await res.json().catch(() => ({})) as any;
+            const url = data.url || data.download_url;
+            if (url) return url;
+          }
+        }
+        console.warn(`[BytePlus Files] resolve got status ${res.status} for id=${fileId}`);
+        return null;
+      } catch (err: any) {
+        console.warn(`[BytePlus Files] resolve threw: ${err.message}`);
+        return null;
+      } finally {
+        clearTimeout(urlTimer);
       }
-      // Fallback: if we can't resolve a signed URL, point BytePlus at the content endpoint
-      // directly. Works in-region but requires Authorization header — only use as last resort.
-      throw new Error(`Could not resolve signed URL from Files API (status ${res.status})`);
-    } catch (err: any) {
-      if (err.name === 'AbortError') throw new Error('BytePlus Files URL 조회 타임아웃 (15초)');
-      throw err;
-    } finally {
-      clearTimeout(urlTimer);
-    }
+    };
+
+    // First attempt
+    let resolved = await tryResolve();
+    if (resolved) return resolved;
+
+    // Retry after 1s — file may still be indexing
+    await new Promise(r => setTimeout(r, 1000));
+    resolved = await tryResolve();
+    if (resolved) return resolved;
+
+    // Final fallback: return the content endpoint URL itself. BytePlus task-generation is
+    // in-network to its own Files API and can authenticate internally when fetching own-domain
+    // URLs; if that fails, the error will surface at generation time with a clearer message
+    // than blocking the upload entirely.
+    console.warn(`[BytePlus Files] using fallback content URL for id=${fileId}`);
+    return fallbackUrl;
   }
 
   function isVideoExt(ext: string): boolean {
