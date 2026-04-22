@@ -244,29 +244,26 @@ async function startServer() {
     res.sendFile(cachePath);
   });
 
-  // Upload image/audio/video → cache locally + upload to public host → returns { url, cacheId }
-  // Routing: video goes to BytePlus Files API (direct to BytePlus, in-network, more reliable).
-  //          image/audio still go to tmpfiles (smaller files, avoids BytePlus storage costs).
+  // Upload image/audio/video → cache locally + upload to tmpfiles → returns { url, cacheId }
+  // NOTE: v26.4.2201/2202 tried routing video through BytePlus Files API, but the /files/{id}/content
+  // endpoint either 404'd during indexing or the URL wasn't fetchable by BytePlus task-generation
+  // (got "resource download failed" at generate time). Reverted to tmpfiles for all types in 2203.
+  // The uploadToBytePlusFiles helper is kept around for future debugging but is not called.
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'upload.mp4');
     const ext = path.extname(filename) || '.mp4';
-    const contentType = (req.headers['content-type'] as string) || '';
-    const isVideo = contentType.startsWith('video/') || isVideoExt(ext);
     // Hash file content → same file = same cacheId (no duplicates)
     const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
     const cacheId = `${hash}${ext}`;
-    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash} video=${isVideo}`);
+    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash}`);
 
     try {
       // Save to local cache (skip if same file already cached)
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, req.body);
 
-      // Route video to BytePlus, everything else to tmpfiles
-      const publicUrl = isVideo
-        ? await uploadToBytePlusFiles(req.body, filename, contentType || mimeFromExt(ext))
-        : await uploadToTmpFiles(req.body, filename);
-      console.log(`[Upload] OK (${isVideo ? 'byteplus' : 'tmpfiles'}) → ${publicUrl.substring(0, 80)}... (cached: ${cacheId})`);
+      const publicUrl = await uploadToTmpFiles(req.body, filename);
+      console.log(`[Upload] OK → ${publicUrl} (cached: ${cacheId})`);
       res.json({ url: publicUrl, cacheId });
     } catch (error: any) {
       console.error('[Upload] Error:', error.message);
@@ -274,23 +271,18 @@ async function startServer() {
     }
   });
 
-  // Re-upload from cache → new public URL. Routes video → BytePlus, others → tmpfiles
-  // based on the cacheId's file extension.
+  // Re-upload from cache → new public URL (tmpfiles for all types)
   app.post('/api/reupload/:cacheId', async (req, res) => {
     const cachePath = path.join(CACHE_DIR, req.params.cacheId);
-    const ext = path.extname(req.params.cacheId) || '';
-    const isVideo = isVideoExt(ext);
-    console.log(`[Re-upload] ${req.params.cacheId} video=${isVideo}`);
+    console.log(`[Re-upload] ${req.params.cacheId}...`);
 
     try {
       if (!fs.existsSync(cachePath)) {
         return res.status(404).json({ error: 'Cached file not found. Please re-attach the file.' });
       }
       const fileBuffer = fs.readFileSync(cachePath);
-      const publicUrl = isVideo
-        ? await uploadToBytePlusFiles(fileBuffer, req.params.cacheId, mimeFromExt(ext))
-        : await uploadToTmpFiles(fileBuffer, req.params.cacheId);
-      console.log(`[Re-upload] OK (${isVideo ? 'byteplus' : 'tmpfiles'}) → ${publicUrl.substring(0, 80)}...`);
+      const publicUrl = await uploadToTmpFiles(fileBuffer, req.params.cacheId);
+      console.log(`[Re-upload] OK → ${publicUrl}`);
       res.json({ url: publicUrl });
     } catch (error: any) {
       console.error('[Re-upload] Error:', error.message);
