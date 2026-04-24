@@ -50,8 +50,8 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
     return () => observer.disconnect();
   }, [eager]);
 
-  // Hover-to-play with sound. Leaving the card pauses the video and rewinds it to 0
-  // so the next hover starts fresh — feels more like a preview than a stalled player.
+  // Hover-to-play with sound. Leaving the card just pauses — we keep the current
+  // playback position so the next hover resumes from where the user was watching.
   const handleMouseEnter = () => {
     const v = videoRef.current;
     if (!v) return;
@@ -67,10 +67,7 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
     });
   };
   const handleMouseLeave = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.pause();
-    try { v.currentTime = 0; } catch { /* some codecs reject reset before metadata loads */ }
+    videoRef.current?.pause();
   };
 
   // Use shared blob cache (populated by store on success). Fetch + cache if missing.
