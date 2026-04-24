@@ -202,7 +202,7 @@ export function ChatArea() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const previousProjectIdRef = useRef<string | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [promptHeight, setPromptHeight] = useState(44);
+  const [promptHeight, setPromptHeight] = useState(160);
   const [downloads, setDownloads] = useState<Record<string, { received: number; total: number; state: string }>>({});
   const [downloadsCollapsed, setDownloadsCollapsed] = useState(false);
 
@@ -1113,7 +1113,7 @@ export function ChatArea() {
               </AnimatePresence>
               <div className="flex items-end gap-2 w-full">
                 <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown}
-                  style={{ minHeight: promptHeight, maxHeight: '70vh' }}
+                  style={{ minHeight: 44, maxHeight: `min(${promptHeight}px, 70vh)` }}
                   className="w-full overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                   data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
                 <button onClick={handleSend} disabled={!hasText || isGenerating}
