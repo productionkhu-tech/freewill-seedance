@@ -50,6 +50,29 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
     return () => observer.disconnect();
   }, [eager]);
 
+  // Hover-to-play with sound. Leaving the card pauses the video and rewinds it to 0
+  // so the next hover starts fresh — feels more like a preview than a stalled player.
+  const handleMouseEnter = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = false;
+    v.play().catch(() => {
+      // Browser autoplay policy may block unmuted playback without an explicit click.
+      // Fall back to muted playback so the user at least sees motion; they can click
+      // the volume control to unmute manually.
+      if (videoRef.current) {
+        videoRef.current.muted = true;
+        videoRef.current.play().catch(() => {});
+      }
+    });
+  };
+  const handleMouseLeave = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.pause();
+    try { v.currentTime = 0; } catch { /* some codecs reject reset before metadata loads */ }
+  };
+
   // Use shared blob cache (populated by store on success). Fetch + cache if missing.
   useEffect(() => {
     if (!mounted || !src) return;
@@ -94,7 +117,12 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
   }, [src, mounted]);
 
   return (
-    <div ref={containerRef} className={`${className} aspect-video bg-black flex items-center justify-center relative`}>
+    <div
+      ref={containerRef}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      className={`${className} aspect-video bg-black flex items-center justify-center relative`}
+    >
       {!mounted && <Play size={40} className="text-white/30" />}
       {mounted && loading && !blobSrc && (
         <Loader2 size={32} className="text-white/60 animate-spin" />
@@ -104,7 +132,6 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
           ref={videoRef}
           src={blobSrc || src}
           controls
-          muted
           playsInline
           preload="auto"
           className="w-full h-full object-contain"
