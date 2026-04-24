@@ -457,6 +457,40 @@ export function ChatArea() {
         else setMentionState(s => ({ ...s, active: false }));
       } else { setMentionState(s => ({ ...s, active: false })); }
     }
+
+    // Auto-scroll caret into view. contentEditable does NOT do this natively
+    // (unlike <textarea>/<input>), so long prompts or paste-in-long-text hide
+    // the cursor below the visible area and users can't see what they're typing.
+    // Run in rAF so layout is finalized before measuring.
+    requestAnimationFrame(() => {
+      const container = contentEditableRef.current;
+      const s = window.getSelection();
+      if (!container || !s?.rangeCount) return;
+      const r = s.getRangeAt(0).cloneRange();
+      r.collapse(true);
+      let rect = r.getBoundingClientRect();
+      // Collapsed range at an element boundary can return a zero-rect; insert
+      // a zero-width marker to get a real position, then immediately remove it.
+      if (rect.top === 0 && rect.bottom === 0 && rect.left === 0) {
+        const marker = document.createElement('span');
+        marker.textContent = '\u200B';
+        try {
+          r.insertNode(marker);
+          rect = marker.getBoundingClientRect();
+        } finally {
+          marker.remove();
+        }
+      }
+      if (rect.bottom === 0 && rect.top === 0) return;
+      const cRect = container.getBoundingClientRect();
+      const pad = 8;
+      if (rect.bottom > cRect.bottom - pad) {
+        container.scrollTop += rect.bottom - cRect.bottom + pad * 2;
+      } else if (rect.top < cRect.top + pad) {
+        container.scrollTop -= cRect.top - rect.top + pad * 2;
+      }
+    });
+
     // Debounced draft save
     if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
     draftSaveTimerRef.current = setTimeout(() => {
