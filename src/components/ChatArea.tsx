@@ -989,7 +989,7 @@ export function ChatArea() {
                             </div>
                           )}
                           <div className="flex-1 min-w-0">
-                            <div className="text-[14px] text-gray-800 font-medium whitespace-pre-wrap leading-relaxed">{msg.promptText ? renderMessageContent(msg.promptText, namedAssets) : '프롬프트 없음'}</div>
+                            <div className="text-[14px] text-gray-800 font-medium whitespace-pre-wrap leading-relaxed">{msg.promptText ? renderMessageContent(msg.promptText, msg.usedAssets ? getAssetNames(msg.usedAssets as any) : namedAssets) : '프롬프트 없음'}</div>
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
                                 {[msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, `${msg.usedSettings.duration}s`].map((tag, i) => (
