@@ -629,26 +629,30 @@ export function ChatArea() {
       // Old approach (clearAssets + N×addAsset across awaits) could interleave
       // with re-renders or any double-invocation pattern and produce duplicates.
       const restored: any[] = [];
-      const needReattach: string[] = [];
+      const failures: string[] = [];
       for (const a of msg.usedAssets) {
-        if (a.cacheId) {
-          try {
-            const newUrl = await reuploadFromCache(a.cacheId);
-            // Strip the snapshot id so replaceAllAssets assigns fresh ones,
-            // and avoid pulling the snapshot's url (it's the thumbnail for
-            // images, not the original — reupload returns the new public URL).
-            const { id, ...rest } = a;
-            restored.push({ ...rest, url: newUrl });
-          } catch {
-            needReattach.push(a.file_name || a.type.replace('_url', ''));
-          }
-        } else {
-          needReattach.push(a.file_name || a.type.replace('_url', ''));
+        if (!a.cacheId) {
+          failures.push(`${a.file_name || a.type.replace('_url', '')}: 캐시 정보 없음 (구버전에서 첨부됨)`);
+          continue;
+        }
+        try {
+          const newUrl = await reuploadFromCache(a.cacheId);
+          // Strip the snapshot id so replaceAllAssets assigns fresh ones,
+          // and avoid pulling the snapshot's url (it's the thumbnail for
+          // images, not the original — reupload returns the new public URL).
+          const { id, ...rest } = a;
+          restored.push({ ...rest, url: newUrl });
+        } catch (err: any) {
+          // Surface the actual server-side reason instead of the generic
+          // "다시 첨부해주세요" — common cases are "Cached file not found"
+          // (cache wiped by an old auto-update) or tmpfiles timeout.
+          const msg = (err?.message || '').replace(/^Error:\s*/, '');
+          failures.push(`${a.file_name || a.type.replace('_url', '')}${msg ? ' — ' + msg : ''}`);
         }
       }
       useAppStore.getState().replaceAllAssets(project.id, restored);
-      if (needReattach.length > 0) {
-        alert(`일부 래퍼런스 복원 실패: ${needReattach.join(', ')}\n파일을 다시 첨부해주세요.`);
+      if (failures.length > 0) {
+        alert(`일부 래퍼런스 복원 실패:\n\n${failures.join('\n')}\n\n파일을 다시 첨부해주세요.`);
       }
     }
     if (msg.promptText && contentEditableRef.current) {

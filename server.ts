@@ -115,9 +115,12 @@ async function startServer() {
     }
   });
 
-  // Media cache directory for video/audio reuse
-  const CACHE_DIR = path.join(process.cwd(), 'media-cache');
+  // Media cache directory for video/audio reuse. In Electron production, main.cjs
+  // injects MEDIA_CACHE_DIR pointing at app.getPath('userData')/media-cache so the
+  // cache survives auto-updates. In dev or other runtimes we fall back to cwd.
+  const CACHE_DIR = process.env.MEDIA_CACHE_DIR || path.join(process.cwd(), 'media-cache');
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+  console.log(`[Cache] Using ${CACHE_DIR}`);
 
   // Cleanup files older than 30 days
   const CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;

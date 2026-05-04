@@ -36,9 +36,14 @@ function startServer() {
     // Production: require server directly (no spawn, no external Node.js)
     process.chdir(process.resourcesPath);
     process.env.NODE_ENV = 'production';
+    // Pin the media cache to userData so it survives auto-updates. The default
+    // (process.cwd()/media-cache) lives inside resources/, which electron-updater
+    // wipes on every install — that broke prompt-reuse for any reference older
+    // than the most recent update.
+    process.env.MEDIA_CACHE_DIR = path.join(app.getPath('userData'), 'media-cache');
     try {
       require(path.join(process.resourcesPath, 'server.cjs'));
-      console.log('[Server] Started in production mode');
+      console.log('[Server] Started in production mode, cache at', process.env.MEDIA_CACHE_DIR);
     } catch (err) {
       console.error('[Server] Failed to start:', err);
       dialog.showErrorBox('Server Error', err.message);
