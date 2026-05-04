@@ -625,22 +625,28 @@ export function ChatArea() {
   const handleReuse = async (msg: any) => {
     if (msg.usedSettings) useAppStore.getState().updateProjectSettings(project.id, msg.usedSettings);
     if (msg.usedAssets) {
-      useAppStore.getState().clearAssets(project.id);
-      let needReattach: string[] = [];
+      // Build the full restored list FIRST, then commit in one atomic store call.
+      // Old approach (clearAssets + N×addAsset across awaits) could interleave
+      // with re-renders or any double-invocation pattern and produce duplicates.
+      const restored: any[] = [];
+      const needReattach: string[] = [];
       for (const a of msg.usedAssets) {
         if (a.cacheId) {
           try {
-            // Re-upload original bytes from server cache → new public URL (works for image/video/audio)
             const newUrl = await reuploadFromCache(a.cacheId);
-            useAppStore.getState().addAsset(project.id, { ...a, id: crypto.randomUUID(), url: newUrl });
+            // Strip the snapshot id so replaceAllAssets assigns fresh ones,
+            // and avoid pulling the snapshot's url (it's the thumbnail for
+            // images, not the original — reupload returns the new public URL).
+            const { id, ...rest } = a;
+            restored.push({ ...rest, url: newUrl });
           } catch {
             needReattach.push(a.file_name || a.type.replace('_url', ''));
           }
         } else {
-          // No cache → can't restore
           needReattach.push(a.file_name || a.type.replace('_url', ''));
         }
       }
+      useAppStore.getState().replaceAllAssets(project.id, restored);
       if (needReattach.length > 0) {
         alert(`일부 래퍼런스 복원 실패: ${needReattach.join(', ')}\n파일을 다시 첨부해주세요.`);
       }

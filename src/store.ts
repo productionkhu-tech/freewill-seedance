@@ -86,6 +86,7 @@ interface AppState {
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
   removeAsset: (projectId: string, assetId: string) => void;
   replaceAsset: (projectId: string, assetId: string, updates: Partial<Omit<Asset, 'id'>>) => void;
+  replaceAllAssets: (projectId: string, assets: Omit<Asset, 'id'>[]) => void;
   clearAssets: (projectId: string) => void;
   updateDraftPrompt: (projectId: string, draft: string) => void;
   addMessage: (projectId: string, message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
@@ -169,6 +170,19 @@ export const useAppStore = create<AppState>()(
           projects: state.projects.map((p) =>
             p.id === projectId
               ? { ...p, assets: p.assets.filter((a) => a.id !== assetId), updatedAt: Date.now() }
+              : p
+          ),
+        }));
+      },
+      // Atomically swap the entire asset list for a project. Used by reuse
+      // (clearAssets + N addAssets used to be sequential set() calls; if
+      // anything double-invoked an updater along the way the list would
+      // double up). Single set() = no possible interleaving.
+      replaceAllAssets: (projectId, assets) => {
+        set((state) => ({
+          projects: state.projects.map((p) =>
+            p.id === projectId
+              ? { ...p, assets: assets.map(a => ({ ...a, id: uuidv4() })), updatedAt: Date.now() }
               : p
           ),
         }));
