@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useAppStore } from '../store';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
@@ -35,6 +35,14 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   }, []);
 
   const totalCacheBytes = (diskCacheSize ?? 0) + memCacheBytes;
+
+  const DASHBOARD_URL = 'https://script.google.com/macros/s/AKfycbyC53V4K-CHJnP86qIbBP0WmXZ4cDD9D3CFVmd8otL4ZThzpQ7RKhnCeIXgDu4y7CFrnQ/exec';
+
+  const openDashboard = () => {
+    const api = (window as any).electronAPI;
+    if (api?.openExternal) api.openExternal(DASHBOARD_URL);
+    else window.open(DASHBOARD_URL, '_blank');
+  };
 
   const handleClearCache = async () => {
     const api = (window as any).electronAPI;
@@ -86,6 +94,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <Plus size={18} />
         </button>
         <div className="flex-1" />
+        <button onClick={openDashboard}
+          className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
+          title="크레딧 대시보드 열기">
+          <BarChart3 size={18} />
+        </button>
         <button onClick={handleClearCache}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors mb-2"
           title={`캐시 정리 (${formatBytes(totalCacheBytes)})`}>
@@ -159,8 +172,14 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           </div>
         ))}
       </div>
-      {/* Footer: cache cleanup */}
-      <div className="p-3 border-t border-[#2a2a2d] shrink-0">
+      {/* Footer: dashboard link + cache cleanup */}
+      <div className="p-3 border-t border-[#2a2a2d] shrink-0 space-y-2">
+        <button onClick={openDashboard}
+          className="w-full flex items-center gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
+          title="크레딧 사용량 대시보드 열기 (외부 브라우저)">
+          <BarChart3 size={14} />
+          <span className="font-medium">📊 크레딧 대시보드</span>
+        </button>
         <button onClick={handleClearCache}
           className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
           title="영상 미리보기 캐시 정리 (다운로드된 mp4는 영향 없음)">

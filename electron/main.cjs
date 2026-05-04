@@ -187,6 +187,19 @@ ipcMain.handle('get-cache-size', async () => {
   }
 });
 
+// ─── IPC: open external URL in the system default browser ───
+// Used for the credit dashboard button so the GAS web app opens in Chrome/Edge,
+// not in a new Electron window. Validates http/https only to prevent abuse.
+ipcMain.handle('open-external', async (_event, url) => {
+  if (typeof url !== 'string' || !/^https?:\/\//.test(url)) return { ok: false, error: 'invalid url' };
+  try {
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 // ─── App Lifecycle ───
 app.on('ready', () => {
   startServer();

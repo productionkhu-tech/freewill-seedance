@@ -10,6 +10,38 @@ dotenv.config();
 
 const API_KEY = process.env.SEEDANCE_API_KEY;
 
+// Credit tracker integration — POSTs token usage to a Google Apps Script endpoint
+// when a task succeeds. The team name is derived from the SEEDANCE_API_KEY env var
+// each user already has set via their team's .bat file: we hash the configured key
+// and look it up against a baked-in SHA-256 map of the 13 official team keys.
+//
+// Why hashes and not the keys themselves? An EXE installed on one team member's PC
+// would otherwise expose every other team's API key in the bundled server.cjs. With
+// hashes only, the bundle reveals nothing useful — SHA-256 is one-way.
+const TRACKER_URL = 'https://script.google.com/macros/s/AKfycbyC53V4K-CHJnP86qIbBP0WmXZ4cDD9D3CFVmd8otL4ZThzpQ7RKhnCeIXgDu4y7CFrnQ/exec';
+const TEAM_KEY_HASHES: Record<string, string> = {
+  '75a2bbd0f6a59fabc34712d4d1b70428156930f0a09f15089af5b7f4beff307a': '1팀',
+  '276647adf6ebf0cd833aa34d849d15b3284ed620c32db93db8856042cdc110d8': '2팀',
+  '75844d45e148d73c3a0688137b00362c6687c7c27bbad3e5edb8a3ebd93f81fe': '3팀',
+  'c50dadbb9122af437fc4055818ed8adfaaedf95798f0e49844f975e637219f8a': '4팀',
+  '7f386ec974cddc1275fc958610f8f87d89d2545708cafb2c5e7747c2ac09d236': '5팀',
+  '46f44ffe5b2d1250afdc432a290090b458d74ba4660bd5ee056b5fe50e166ae9': '6팀',
+  'c1b0d1e162f0581baab701c6f3c42d8c22fe4a66cd677d819e84fbf87b167e26': '7팀',
+  '2f44415f419f831b005409e2ad102bce3ec02d67a9ace1b0b9f754143a2b5595': '8팀',
+  'a363ada0a1c1d39f02ebd47a8e0364ab0de46e127a643dc305d9de3b1701170b': '9팀',
+  'a4eccba638ecf60e0bab44575e0ff433938d3290d913b3ad13b2cc0fceccae17': '10팀',
+  'a0f79d7874f2e5aabe1db15fc93acdb80512a30326f2fcb9914ae1ee2e9319bb': 'AFX팀',
+  'bd0900883cc308becf0fe4e8d629130acea5a59e26b4667bef6f9a861a0e6bbb': '2D팀',
+  '724cf3b6d22b122d01b371eb8e550ffe4053b5eef4731becd3684f5c72bf4d4d': 'Special팀',
+};
+const TEAM_NAME = (() => {
+  if (!API_KEY) return 'UNKNOWN';
+  const h = crypto.createHash('sha256').update(API_KEY).digest('hex');
+  return TEAM_KEY_HASHES[h] || 'UNKNOWN';
+})();
+console.log(`[Tracker] Resolved team: ${TEAM_NAME}`);
+const reportedTasks = new Set<string>();
+
 async function startServer() {
   if (!API_KEY) {
     console.error('\n  [ERROR] 환경변수 SEEDANCE_API_KEY가 설정되지 않았습니다.');
@@ -321,7 +353,28 @@ async function startServer() {
       const response = await fetch(`https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/${req.params.id}`, {
         headers: { 'Authorization': `Bearer ${API_KEY}` }
       });
-      const data = await response.json();
+      const data = await response.json() as any;
+
+      // Fire-and-forget report to the credit tracker. Only fires once per task
+      // (reportedTasks dedupes), only on success with valid usage data, and any
+      // failure here is swallowed so the polling response to the frontend is
+      // never delayed or corrupted.
+      if (data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(req.params.id)) {
+        reportedTasks.add(req.params.id);
+        fetch(TRACKER_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            team: TEAM_NAME,
+            task_id: req.params.id,
+            total_tokens: data.usage.total_tokens,
+            completion_tokens: data.usage.completion_tokens,
+            source: 'app',
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+      }
+
       res.status(response.status).json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
