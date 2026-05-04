@@ -718,11 +718,22 @@ export function ChatArea() {
     const outputCount = project.settings.output_count || 1;
     const systemMessageIds: string[] = [];
 
-    // Pre-computed thumbnail (image upload time) used as-is; for legacy/non-image just pass through
-    const thumbAssets = await Promise.all(currentAssets.map(async a => ({
-      ...a,
-      url: a.thumbnailUrl || (await createThumbnail(a.url)) || a.url,
-    })));
+    // Build a snapshot of the assets at send time. Used by past message cards
+    // to render the prompt mention pills + side thumbnails *frozen* — replacing
+    // an asset later (replaceAsset keeps id stable) must NOT mutate any past
+    // message. Keeps id/type/role/file_name/cacheId/thumbnailUrl as-is.
+    //
+    // For images we additionally bake the thumbnail into url so that the side
+    // thumbnail keeps rendering after the original tmpfiles URL expires (~24h).
+    // For videos we KEEP the original url — overwriting it with the base64
+    // thumbnail (added in 2404) made <video src=…> render a broken element.
+    const thumbAssets = await Promise.all(currentAssets.map(async a => {
+      const out: any = { ...a };
+      if (a.type === 'image_url') {
+        out.url = a.thumbnailUrl || (await createThumbnail(a.url)) || a.url;
+      }
+      return out;
+    }));
 
     for (let i = 0; i < outputCount; i++) {
       const id = crypto.randomUUID();
@@ -895,7 +906,13 @@ export function ChatArea() {
                   <div className="flex gap-2 flex-wrap">
                     {previewItem.usedAssets.map((a: any, i: number) => (
                       <div key={i} className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
-                        {a.type === 'image_url' ? <img src={a.url} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-gray-400"><Video size={20} /></div>}
+                        {a.type === 'image_url' ? (
+                          <img src={a.url} className="w-full h-full object-cover" />
+                        ) : a.type === 'video_url' && a.thumbnailUrl ? (
+                          <img src={a.thumbnailUrl} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-400">{a.type === 'audio_url' ? <Music size={20} /> : <Video size={20} />}</div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -982,14 +999,22 @@ export function ChatArea() {
                             <div className="flex items-center gap-1.5 shrink-0">
                               {msg.usedAssets.map((asset: any, i: number) => (
                                 <div key={asset.id || i} className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white relative group shrink-0">
-                                  {asset.type.startsWith('video') ? <video src={asset.url} className="w-full h-full object-cover" /> : asset.type.startsWith('audio') ? <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-400"><Music size={14} /></div> : <img src={asset.url} alt="" className="w-full h-full object-cover" />}
+                                  {asset.type.startsWith('video') ? (
+                                    asset.thumbnailUrl
+                                      ? <img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover" />
+                                      : <div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400"><Video size={14} /></div>
+                                  ) : asset.type.startsWith('audio') ? (
+                                    <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-400"><Music size={14} /></div>
+                                  ) : (
+                                    <img src={asset.url} alt="" className="w-full h-full object-cover" />
+                                  )}
                                   <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">{asset.role?.replace('_', ' ')}</div>
                                 </div>
                               ))}
                             </div>
                           )}
                           <div className="flex-1 min-w-0">
-                            <div className="text-[14px] text-gray-800 font-medium whitespace-pre-wrap leading-relaxed">{msg.promptText ? renderMessageContent(msg.promptText, msg.usedAssets ? getAssetNames(msg.usedAssets as any) : namedAssets) : '프롬프트 없음'}</div>
+                            <div className="text-[14px] text-gray-800 font-medium whitespace-pre-wrap leading-relaxed">{msg.promptText ? renderMessageContent(msg.promptText, getAssetNames((msg.usedAssets as any) || [])) : '프롬프트 없음'}</div>
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
                                 {[msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, `${msg.usedSettings.duration}s`].map((tag, i) => (
