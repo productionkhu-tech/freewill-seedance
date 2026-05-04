@@ -5,6 +5,56 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// Capture a small JPEG thumbnail from the first frame of a video file.
+// Used so video assets show a real preview in the asset list and mention pills
+// instead of a generic Video icon. Returns '' on any failure (codec, decode,
+// canvas) — callers should fall back to the icon when empty.
+export function createVideoThumbnail(file: File, size: number = 80): Promise<string> {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    (video as any).playsInline = true;
+    let settled = false;
+    const finish = (val: string) => {
+      if (settled) return;
+      settled = true;
+      try { URL.revokeObjectURL(objectUrl); } catch {}
+      resolve(val);
+    };
+    video.onloadedmetadata = () => {
+      // Seek slightly past 0 — many codecs return a black frame at exactly 0.
+      try {
+        video.currentTime = Math.min(0.1, (video.duration || 1) * 0.1);
+      } catch {
+        finish('');
+      }
+    };
+    video.onseeked = () => {
+      try {
+        const w = video.videoWidth, h = video.videoHeight;
+        if (!w || !h) return finish('');
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return finish('');
+        const scale = Math.max(size / w, size / h);
+        const sw = w * scale, sh = h * scale;
+        ctx.drawImage(video, (size - sw) / 2, (size - sh) / 2, sw, sh);
+        finish(canvas.toDataURL('image/jpeg', 0.6));
+      } catch {
+        finish('');
+      }
+    };
+    video.onerror = () => finish('');
+    // Safety net: some codecs never fire seeked; cap at 4s.
+    setTimeout(() => finish(''), 4000);
+    video.src = objectUrl;
+  });
+}
+
 // Shrink image to tiny thumbnail for log storage (saves IndexedDB space)
 // Accepts File (preferred for new flow) or data URL (legacy)
 export function createThumbnail(source: File | string, size: number = 80): Promise<string> {

@@ -3,7 +3,7 @@ import { useAppStore, AssetRole } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, reuploadFromCache, uploadToPublicUrl, getCachedBlob, setCachedBlob } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, uploadToPublicUrl, getCachedBlob, setCachedBlob } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -162,9 +162,9 @@ const textToHtml = (text: string, assets: any[]) => {
       const name = part.slice(1, -1);
       const asset = assets.find(a => a.name === name);
       if (asset) {
-        const imgSrc = asset.type === 'image_url' ? (asset.thumbnailUrl || asset.url) : '';
-        const iconHtml = asset.type === 'image_url'
-          ? `<img src="${imgSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px;" />`
+        const thumbSrc = (asset.type === 'image_url' || asset.type === 'video_url') ? (asset.thumbnailUrl || (asset.type === 'image_url' ? asset.url : '')) : '';
+        const iconHtml = thumbSrc
+          ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px;" />`
           : `<span style="display:inline-block;width:16px;height:16px;background:#f0f0f5;border-radius:2px;vertical-align:middle;margin-right:4px;text-align:center;line-height:16px;font-size:10px;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
         return `<span contenteditable="false" class="mention-pill" data-name="${asset.name}" data-asset-id="${asset.id}" style="display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;">${iconHtml}<span style="font-weight:500;">[${asset.name}]</span></span>&nbsp;`;
       }
@@ -196,7 +196,7 @@ const renderMessageContent = (content: string, namedAssets: any[]) => {
       if (asset) {
         return (
           <span key={i} className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px]">
-            {asset.type === 'image_url' ? <img src={asset.url} className="w-4 h-4 object-cover rounded-sm" alt="" /> : asset.type === 'video_url' ? <Video size={12} /> : <Music size={12} />}
+            {asset.type === 'image_url' ? <img src={asset.thumbnailUrl || asset.url} className="w-4 h-4 object-cover rounded-sm" alt="" /> : asset.type === 'video_url' && asset.thumbnailUrl ? <img src={asset.thumbnailUrl} className="w-4 h-4 object-cover rounded-sm" alt="" /> : asset.type === 'video_url' ? <Video size={12} /> : <Music size={12} />}
             <span className="font-medium">[{asset.name}]</span>
           </span>
         );
@@ -329,11 +329,13 @@ export function ChatArea() {
           if (textSpan) textSpan.textContent = `[${asset.name}]`;
           changed = true;
         }
-        if (asset.type === 'image_url') {
-          // Refresh thumbnail src so a replaced image shows the new bytes
-          // immediately in any pill that references it.
+        if (asset.type === 'image_url' || asset.type === 'video_url') {
+          // Refresh thumbnail src so a replaced image/video shows the new
+          // bytes immediately in any pill that references it. Video pills
+          // only have an <img> when a thumbnail was successfully captured;
+          // otherwise they show the 🎥 emoji span and we skip.
           const img = pill.querySelector('img') as HTMLImageElement | null;
-          const newSrc = (asset as any).thumbnailUrl || asset.url;
+          const newSrc = (asset as any).thumbnailUrl || (asset.type === 'image_url' ? asset.url : '');
           if (img && newSrc && img.getAttribute('src') !== newSrc) {
             img.setAttribute('src', newSrc);
             changed = true;
@@ -440,14 +442,30 @@ export function ChatArea() {
           if (mode === 'image_to_video_first' || mode === 'image_to_video_first_last') {
             rejected.push(`${file.name}: 이 모드는 이미지만 받습니다.`); continue;
           }
-          const vidCount = assets.filter(a => a.type === 'video_url').length;
+          const existingVideos = assets.filter(a => a.type === 'video_url');
+          const vidCount = existingVideos.length;
           const maxVid = mode === 'extend_video' ? 3 : mode === 'edit_video' ? 1 : mode === 'multimodal_reference' ? 3 : 0;
-          if (vidCount >= maxVid) { rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue; }
+          // edit_video has a 1-video cap. When the user drops a new video while one
+          // is already attached, treat it as a replace (preserve asset id so any
+          // "@[Video 1]" mention keeps pointing to the same slot) rather than
+          // rejecting with the over-limit alert.
+          const shouldReplace = mode === 'edit_video' && vidCount >= 1;
+          if (!shouldReplace && vidCount >= maxVid) {
+            rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue;
+          }
           const vidErr = await validateVideoFile(file);
           if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
           try {
+            const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
             const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type: 'video_url', url: result.url, role: 'reference_video', file_name: file.name, cacheId: result.cacheId });
+            if (shouldReplace) {
+              const existing = existingVideos[0];
+              useAppStore.getState().replaceAsset(project.id, existing.id, {
+                url: result.url, file_name: file.name, cacheId: result.cacheId, thumbnailUrl,
+              });
+            } else {
+              addAsset(project.id, { type: 'video_url', url: result.url, role: 'reference_video', file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
+            }
           } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
 
         } else if (file.type.startsWith('audio/')) {
@@ -550,9 +568,9 @@ export function ChatArea() {
     const pill = document.createElement('span');
     pill.contentEditable = 'false'; pill.className = 'mention-pill'; pill.dataset.name = asset.name; pill.dataset.assetId = asset.id;
     pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
-    const imgSrc = asset.type === 'image_url' ? (asset.thumbnailUrl || asset.url) : '';
-    const iconHtml = asset.type === 'image_url'
-      ? `<img src="${imgSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
+    const thumbSrc = (asset.type === 'image_url' || asset.type === 'video_url') ? (asset.thumbnailUrl || (asset.type === 'image_url' ? asset.url : '')) : '';
+    const iconHtml = thumbSrc
+      ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
       : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
     pill.innerHTML = `${iconHtml}<span style="font-weight:500;">[${asset.name}]</span>`;
     const space = document.createTextNode('\u00A0');

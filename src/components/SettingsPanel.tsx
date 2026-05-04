@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail } from '../lib/utils';
+import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail, createVideoThumbnail } from '../lib/utils';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
@@ -205,8 +205,9 @@ export function SettingsPanel() {
           } else {
             const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
+            const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
             const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId });
+            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, ...(thumbnailUrl ? { thumbnailUrl } : {}) });
           }
         } catch (e: any) {
           console.error('Failed to process file:', e);
@@ -236,6 +237,9 @@ export function SettingsPanel() {
       } else {
         const vErr = existing.type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
         if (vErr) { alert(vErr); return; }
+        if (existing.type === 'video_url') {
+          updates.thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+        }
         const result = await uploadToPublicUrl(file);
         updates.url = result.url;
         updates.cacheId = result.cacheId;
@@ -381,7 +385,13 @@ export function SettingsPanel() {
                       <ImageIcon size={14} className="text-blue-500 shrink-0" />
                     )
                   )}
-                  {asset.type === 'video_url' && <Video size={14} className="text-purple-500 shrink-0" />}
+                  {asset.type === 'video_url' && (
+                    (asset as any).thumbnailUrl ? (
+                      <img src={(asset as any).thumbnailUrl} alt="video" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
+                    ) : (
+                      <Video size={14} className="text-purple-500 shrink-0" />
+                    )
+                  )}
                   {asset.type === 'audio_url' && <Music size={14} className="text-green-500 shrink-0" />}
                   <div className="flex flex-col overflow-hidden">
                     <span className="text-xs font-medium text-gray-800">[{asset.name}] {asset.file_name && <span className="text-gray-500 font-normal ml-1 truncate">{asset.file_name}</span>}</span>
