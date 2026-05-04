@@ -85,6 +85,7 @@ interface AppState {
   updateProjectSettings: (projectId: string, settings: Partial<GenerationSettings>) => void;
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
   removeAsset: (projectId: string, assetId: string) => void;
+  replaceAsset: (projectId: string, assetId: string, updates: Partial<Omit<Asset, 'id'>>) => void;
   clearAssets: (projectId: string) => void;
   updateDraftPrompt: (projectId: string, draft: string) => void;
   addMessage: (projectId: string, message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
@@ -168,6 +169,25 @@ export const useAppStore = create<AppState>()(
           projects: state.projects.map((p) =>
             p.id === projectId
               ? { ...p, assets: p.assets.filter((a) => a.id !== assetId), updatedAt: Date.now() }
+              : p
+          ),
+        }));
+      },
+      // Replace an asset's content while keeping its id stable. This preserves
+      // any mention pills in the prompt (their data-asset-id stays valid) and
+      // keeps the asset's display position/numbering — so "@[Video 1]" still
+      // refers to the same slot, just pointing at new bytes.
+      replaceAsset: (projectId, assetId, updates) => {
+        set((state) => ({
+          projects: state.projects.map((p) =>
+            p.id === projectId
+              ? {
+                  ...p,
+                  assets: p.assets.map((a) =>
+                    a.id === assetId ? { ...a, ...updates, id: a.id } : a
+                  ),
+                  updatedAt: Date.now(),
+                }
               : p
           ),
         }));

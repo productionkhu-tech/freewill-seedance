@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
-import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown } from 'lucide-react';
+import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail } from '../lib/utils';
 
@@ -83,7 +83,7 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
 
@@ -216,6 +216,58 @@ export function SettingsPanel() {
       if (rejected.length > 0) alert(`일부 파일이 추가되지 않았습니다:\n\n${rejected.join('\n')}`);
     })();
     e.target.value = '';
+  };
+
+  // Replaces an existing asset's bytes while preserving its id (so mention pills
+  // referencing it stay attached). Used in modes with single-slot assets like
+  // edit_video's video, so users can swap the source without deleting+re-adding.
+  const handleReplaceFile = async (existing: Asset, file: File) => {
+    try {
+      const updates: Partial<Asset> = { file_name: file.name };
+      if (existing.type === 'image_url') {
+        const sizeErr = validateImageFile(file);
+        if (sizeErr) { alert(sizeErr); return; }
+        const dimErr = await validateImageDimensions(file);
+        if (dimErr) { alert(dimErr); return; }
+        updates.thumbnailUrl = await createThumbnail(file);
+        const result = await uploadToPublicUrl(file);
+        updates.url = result.url;
+        updates.cacheId = result.cacheId;
+      } else {
+        const vErr = existing.type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+        if (vErr) { alert(vErr); return; }
+        const result = await uploadToPublicUrl(file);
+        updates.url = result.url;
+        updates.cacheId = result.cacheId;
+      }
+      replaceAsset(project.id, existing.id, updates);
+    } catch (e: any) {
+      alert(`교체 실패: ${e.message || ''}`);
+    }
+  };
+
+  const renderReplaceButton = (label: string, existing: Asset, accept: string) => {
+    const handleDrop = (e: React.DragEvent<HTMLLabelElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const f = e.dataTransfer.files?.[0];
+      if (f) handleReplaceFile(existing, f);
+    };
+    return (
+      <label
+        className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-[11px] text-[14px] font-medium transition-colors border-[3px] bg-[#fafafc] hover:bg-[#f0f0f2] text-[#1d1d1f] border-black/5 cursor-pointer"
+        onDrop={handleDrop}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      >
+        <RefreshCw size={16} /> {label}
+        <input type="file" accept={accept} className="hidden" onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) handleReplaceFile(existing, f);
+          e.target.value = '';
+        }} />
+      </label>
+    );
   };
 
   const renderUploadButton = (label: string, role: AssetRole, type: 'image_url' | 'video_url' | 'audio_url', accept: string, multiple: boolean = false, disabled: boolean = false) => {
@@ -377,7 +429,12 @@ export function SettingsPanel() {
               {settings.mode === 'edit_video' && (
                 <div className="space-y-2">
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
-                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, assets.filter(a => a.type === 'video_url').length >= 1)}
+                  {(() => {
+                    const existingVideo = assets.find(a => a.type === 'video_url');
+                    return existingVideo
+                      ? renderReplaceButton('비디오 교체', existingVideo, 'video/mp4,video/quicktime')
+                      : renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, false);
+                  })()}
                   {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= 3)}
                 </div>
               )}

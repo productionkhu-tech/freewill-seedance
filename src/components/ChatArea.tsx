@@ -306,7 +306,9 @@ export function ChatArea() {
     return () => window.removeEventListener('seedance:reset', handler as EventListener);
   }, [currentProjectId]);
 
-  // Track mention pills by asset UUID — remove deleted, renumber shifted
+  // Track mention pills by asset UUID — remove deleted, renumber shifted, and
+  // refresh embedded thumbnails when an image asset is replaced (replaceAsset
+  // keeps the id stable but swaps url/thumbnailUrl).
   useEffect(() => {
     if (!contentEditableRef.current || !project) return;
     const named = getAssetNames(project.assets);
@@ -318,12 +320,24 @@ export function ChatArea() {
         if (!asset) {
           // Asset was deleted → remove the pill
           pill.remove(); changed = true;
-        } else if (asset.name !== pill.getAttribute('data-name')) {
-          // Asset was renumbered (e.g. Image 3 → Image 2) → update pill
+          return;
+        }
+        if (asset.name !== pill.getAttribute('data-name')) {
+          // Asset was renumbered (e.g. Image 3 → Image 2) → update pill text
           pill.setAttribute('data-name', asset.name);
           const textSpan = pill.querySelector('span[style*="font-weight"]');
           if (textSpan) textSpan.textContent = `[${asset.name}]`;
           changed = true;
+        }
+        if (asset.type === 'image_url') {
+          // Refresh thumbnail src so a replaced image shows the new bytes
+          // immediately in any pill that references it.
+          const img = pill.querySelector('img') as HTMLImageElement | null;
+          const newSrc = (asset as any).thumbnailUrl || asset.url;
+          if (img && newSrc && img.getAttribute('src') !== newSrc) {
+            img.setAttribute('src', newSrc);
+            changed = true;
+          }
         }
       } else {
         // No asset ID (legacy pill) — fallback to name matching
