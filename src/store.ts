@@ -33,6 +33,9 @@ export interface Asset {
   file_name?: string;
   cacheId?: string;
   thumbnailUrl?: string; // small base64 preview for image assets (avoids re-fetch)
+  originalPath?: string; // Electron absolute path of the source file — last-resort
+                         // recovery when both the server media-cache entry and the
+                         // tmpfiles URL are gone (e.g. attached on a pre-2408 build).
 }
 
 export interface GenerationSettings {

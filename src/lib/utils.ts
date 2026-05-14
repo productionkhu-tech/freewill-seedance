@@ -238,6 +238,32 @@ export async function reuploadFromCache(cacheId: string): Promise<string> {
   return data.url;
 }
 
+// Last-resort recovery: re-read the original source file from disk by its
+// absolute path. Used when the server media-cache entry is gone. Re-caches
+// server-side, so returns a fresh { url, cacheId } the caller should persist.
+export async function reuploadFromPath(originalPath: string): Promise<{ url: string; cacheId: string }> {
+  const res = await fetch('/api/reupload-from-path', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ originalPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Re-upload from path failed');
+  }
+  return await res.json();
+}
+
+// Resolve a File object's absolute on-disk path via the Electron preload bridge.
+// Returns '' in non-Electron contexts or if the bridge is unavailable.
+export function getFilePath(file: File): string {
+  try {
+    return (window as any).electronAPI?.getPathForFile?.(file) || '';
+  } catch {
+    return '';
+  }
+}
+
 // Read file as base64 data URL — lossless, no compression, no server upload
 export function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail, createVideoThumbnail } from '../lib/utils';
+import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail, createVideoThumbnail, getFilePath } from '../lib/utils';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
@@ -194,6 +194,7 @@ export function SettingsPanel() {
       const rejected = [...skipped];
       for (const file of files) {
         try {
+          const originalPath = getFilePath(file);
           if (type === 'image_url') {
             const sizeErr = validateImageFile(file);
             if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
@@ -201,13 +202,13 @@ export function SettingsPanel() {
             if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
             const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
+            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } else {
             const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
             const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
             const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, ...(thumbnailUrl ? { thumbnailUrl } : {}) });
+            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, ...(thumbnailUrl ? { thumbnailUrl } : {}), ...(originalPath ? { originalPath } : {}) });
           }
         } catch (e: any) {
           console.error('Failed to process file:', e);
@@ -225,6 +226,8 @@ export function SettingsPanel() {
   const handleReplaceFile = async (existing: Asset, file: File) => {
     try {
       const updates: Partial<Asset> = { file_name: file.name };
+      const originalPath = getFilePath(file);
+      if (originalPath) updates.originalPath = originalPath;
       if (existing.type === 'image_url') {
         const sizeErr = validateImageFile(file);
         if (sizeErr) { alert(sizeErr); return; }

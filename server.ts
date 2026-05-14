@@ -325,6 +325,38 @@ async function startServer() {
     }
   });
 
+  // Last-resort recovery: re-read the original source file from its on-disk path
+  // and re-cache + re-upload it. Used when the media-cache entry is gone (wiped by
+  // a pre-2408 auto-update, or aged past the 30-day cleanup). Only works while the
+  // user hasn't moved/renamed/deleted the original file. Re-populates media-cache
+  // so subsequent reuses hit the fast path again.
+  app.post('/api/reupload-from-path', async (req, res) => {
+    const originalPath = (req.body && req.body.originalPath) as string | undefined;
+    if (!originalPath || typeof originalPath !== 'string') {
+      return res.status(400).json({ error: 'originalPath required' });
+    }
+    console.log(`[Re-upload from path] ${originalPath}`);
+    try {
+      if (!fs.existsSync(originalPath)) {
+        return res.status(404).json({ error: '원본 파일을 찾을 수 없습니다 (이동/삭제/이름변경됨)' });
+      }
+      const fileBuffer = fs.readFileSync(originalPath);
+      const filename = path.basename(originalPath);
+      const ext = path.extname(filename) || '';
+      // Re-cache under a content hash so future reuses use the fast cache path.
+      const hash = crypto.createHash('md5').update(fileBuffer).digest('hex').slice(0, 12);
+      const cacheId = `${hash}${ext}`;
+      const cachePath = path.join(CACHE_DIR, cacheId);
+      if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
+      const publicUrl = await uploadToTmpFiles(fileBuffer, filename);
+      console.log(`[Re-upload from path] OK → ${publicUrl} (re-cached: ${cacheId})`);
+      res.json({ url: publicUrl, cacheId });
+    } catch (error: any) {
+      console.error('[Re-upload from path] Error:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // BytePlus API — Create Task
   app.post('/api/byteplus/tasks', async (req, res) => {
     console.log('[BytePlus API] Creating task...');

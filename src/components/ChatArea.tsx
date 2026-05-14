@@ -3,7 +3,7 @@ import { useAppStore, AssetRole } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, uploadToPublicUrl, getCachedBlob, setCachedBlob } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, uploadToPublicUrl, getCachedBlob, setCachedBlob } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -434,8 +434,9 @@ export function ChatArea() {
             const dimErr = await validateImageDimensions(file);
             if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
+            const originalPath = getFilePath(file);
             const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
+            addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
 
         } else if (file.type.startsWith('video/')) {
@@ -457,14 +458,16 @@ export function ChatArea() {
           if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
           try {
             const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+            const originalPath = getFilePath(file);
             const result = await uploadToPublicUrl(file);
             if (shouldReplace) {
               const existing = existingVideos[0];
               useAppStore.getState().replaceAsset(project.id, existing.id, {
                 url: result.url, file_name: file.name, cacheId: result.cacheId, thumbnailUrl,
+                ...(originalPath ? { originalPath } : {}),
               });
             } else {
-              addAsset(project.id, { type: 'video_url', url: result.url, role: 'reference_video', file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
+              addAsset(project.id, { type: 'video_url', url: result.url, role: 'reference_video', file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
             }
           } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
 
@@ -478,8 +481,9 @@ export function ChatArea() {
           const audErr = await validateAudioFile(file);
           if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
           try {
+            const originalPath = getFilePath(file);
             const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId });
+            addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
         } else {
           rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
@@ -588,8 +592,9 @@ export function ChatArea() {
       const dimErr = await validateImageDimensions(file);
       if (dimErr) { alert(dimErr); return; }
       const thumbnailUrl = await createThumbnail(file);
+      const originalPath = getFilePath(file);
       const result = await uploadToPublicUrl(file);
-      addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl });
+      addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
     } catch (e) { alert(`이미지 업로드 실패: ${file.name}`); }
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
@@ -631,23 +636,41 @@ export function ChatArea() {
       const restored: any[] = [];
       const failures: string[] = [];
       for (const a of msg.usedAssets) {
-        if (!a.cacheId) {
-          failures.push(`${a.file_name || a.type.replace('_url', '')}: 캐시 정보 없음 (구버전에서 첨부됨)`);
-          continue;
+        const label = a.file_name || a.type.replace('_url', '');
+        // strip snapshot id — replaceAllAssets assigns fresh ones
+        const { id, ...rest } = a;
+        let recovered = false;
+
+        // Fast path: server media-cache (works if attached on 2408+ and within 30d)
+        if (a.cacheId) {
+          try {
+            const newUrl = await reuploadFromCache(a.cacheId);
+            restored.push({ ...rest, url: newUrl });
+            recovered = true;
+          } catch { /* fall through to originalPath */ }
         }
-        try {
-          const newUrl = await reuploadFromCache(a.cacheId);
-          // Strip the snapshot id so replaceAllAssets assigns fresh ones,
-          // and avoid pulling the snapshot's url (it's the thumbnail for
-          // images, not the original — reupload returns the new public URL).
-          const { id, ...rest } = a;
-          restored.push({ ...rest, url: newUrl });
-        } catch (err: any) {
-          // Surface the actual server-side reason instead of the generic
-          // "다시 첨부해주세요" — common cases are "Cached file not found"
-          // (cache wiped by an old auto-update) or tmpfiles timeout.
-          const msg = (err?.message || '').replace(/^Error:\s*/, '');
-          failures.push(`${a.file_name || a.type.replace('_url', '')}${msg ? ' — ' + msg : ''}`);
+
+        // Fallback: re-read the original source file from disk. Recovers refs
+        // whose media-cache entry is gone (pre-2408 wipe / 30d cleanup), as long
+        // as the user hasn't moved/renamed/deleted the file. Re-caches server-side.
+        if (!recovered && a.originalPath) {
+          try {
+            const result = await reuploadFromPath(a.originalPath);
+            restored.push({ ...rest, url: result.url, cacheId: result.cacheId });
+            recovered = true;
+          } catch (err: any) {
+            const m = (err?.message || '').replace(/^Error:\s*/, '');
+            failures.push(`${label}${m ? ' — ' + m : ''}`);
+          }
+        }
+
+        if (!recovered && !a.originalPath) {
+          failures.push(`${label}: 캐시 없음 + 원본 경로 정보 없음 (구버전에서 첨부됨)`);
+        } else if (!recovered && a.cacheId && a.originalPath) {
+          // both attempts failed but we already pushed a failure message in the
+          // originalPath catch — nothing to add here
+        } else if (!recovered) {
+          failures.push(`${label}: 복원 실패`);
         }
       }
       useAppStore.getState().replaceAllAssets(project.id, restored);
@@ -705,18 +728,31 @@ export function ChatArea() {
       return;
     }
 
-    // Re-upload assets we own (cacheId set) before sending — both tmpfiles (image/audio) and
-    // BytePlus Files (video) return ephemeral signed URLs that expire. User-pasted asset://
+    // Re-upload assets we own (cacheId set) before sending — tmpfiles URLs are
+    // ephemeral and expire. If the media-cache entry is gone, fall back to
+    // re-reading the original file from disk (originalPath). User-pasted asset://
     // URIs and raw public URLs have no cacheId, so they're passed through unchanged.
     setIsGenerating(true);
     for (let i = 0; i < currentAssets.length; i++) {
       const a = currentAssets[i];
-      if (a.cacheId) {
-        try {
-          const newUrl = await reuploadFromCache(a.cacheId);
-          currentAssets[i] = { ...a, url: newUrl };
-        } catch {
-          alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n파일을 다시 첨부해주세요.`);
+      if (a.cacheId || a.originalPath) {
+        let done = false;
+        if (a.cacheId) {
+          try {
+            const newUrl = await reuploadFromCache(a.cacheId);
+            currentAssets[i] = { ...a, url: newUrl };
+            done = true;
+          } catch { /* fall through to originalPath */ }
+        }
+        if (!done && a.originalPath) {
+          try {
+            const result = await reuploadFromPath(a.originalPath);
+            currentAssets[i] = { ...a, url: result.url, cacheId: result.cacheId };
+            done = true;
+          } catch { /* handled below */ }
+        }
+        if (!done) {
+          alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n원본 파일이 이동/삭제됐을 수 있습니다. 다시 첨부해주세요.`);
           setIsGenerating(false);
           return;
         }
