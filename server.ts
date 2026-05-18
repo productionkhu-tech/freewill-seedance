@@ -214,9 +214,22 @@ async function startServer() {
 
   function mimeFromExt(ext: string): string {
     const v = ext.toLowerCase();
+    // video
     if (v === '.mp4' || v === '.m4v') return 'video/mp4';
     if (v === '.mov') return 'video/quicktime';
     if (v === '.webm') return 'video/webm';
+    // image
+    if (v === '.jpg' || v === '.jpeg') return 'image/jpeg';
+    if (v === '.png') return 'image/png';
+    if (v === '.webp') return 'image/webp';
+    if (v === '.gif') return 'image/gif';
+    if (v === '.bmp') return 'image/bmp';
+    if (v === '.tif' || v === '.tiff') return 'image/tiff';
+    // audio
+    if (v === '.wav') return 'audio/wav';
+    if (v === '.mp3') return 'audio/mpeg';
+    if (v === '.m4a') return 'audio/mp4';
+    if (v === '.ogg') return 'audio/ogg';
     return 'application/octet-stream';
   }
 
@@ -265,8 +278,10 @@ async function startServer() {
     res.sendFile(cachePath);
   });
 
-  // Upload video → cache locally + upload to R2 → returns { url, cacheId }.
-  // Now video-only: image and audio go base64 via /api/cache + client-side data URLs.
+  // Upload any media (image / video / audio) → cache locally + upload to R2 → { url, cacheId }.
+  // All three types go through R2 now so a single payload-size ceiling is gone
+  // (R2 URLs are tiny strings) and the BytePlus 64MB body limit is no longer a
+  // practical constraint.
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'upload.mp4');
     const ext = path.extname(filename) || '.mp4';
@@ -289,7 +304,7 @@ async function startServer() {
     }
   });
 
-  // Re-upload from cache → fresh R2 presigned URL (video-only path)
+  // Re-upload from cache → fresh R2 presigned URL (all media types)
   app.post('/api/reupload/:cacheId', async (req, res) => {
     const cachePath = path.join(CACHE_DIR, req.params.cacheId);
     console.log(`[Re-upload] ${req.params.cacheId}...`);
@@ -341,7 +356,7 @@ async function startServer() {
   // and re-cache + re-upload to R2. Used when the media-cache entry is gone (wiped
   // by a pre-2408 auto-update, or aged past the 30-day cleanup). Only works while
   // the user hasn't moved/renamed/deleted the original file. Re-populates the cache
-  // so subsequent reuses hit the fast path again. Video-only.
+  // so subsequent reuses hit the fast path again. Works for any media type.
   app.post('/api/reupload-from-path', async (req, res) => {
     const originalPath = (req.body && req.body.originalPath) as string | undefined;
     if (!originalPath || typeof originalPath !== 'string') {
@@ -386,13 +401,16 @@ async function startServer() {
       }
 
       // Map task → R2 keys used by this submission so we can clean up on terminal
-      // status. Walk req.body.content, pick out video_url items whose URL is on our
-      // R2 host, extract the path-style key. extend_video can have up to 3.
+      // status. All three media types (image_url / video_url / audio_url) now go
+      // through R2; walk req.body.content, pick out items whose URL is on our R2
+      // host, extract the path-style key. extend_video can have up to 3 videos,
+      // multimodal_reference up to 9 images + 3 audio + 3 video.
       if (response.ok && data?.id && Array.isArray(req.body?.content)) {
         const keys: string[] = [];
         for (const item of req.body.content) {
-          if (item?.type === 'video_url') {
-            const url = item?.video_url?.url;
+          const t = item?.type;
+          if (t === 'video_url' || t === 'image_url' || t === 'audio_url') {
+            const url = item?.[t]?.url;
             if (typeof url === 'string' && isR2Url(url)) {
               const key = extractR2Key(url);
               if (key) keys.push(key);

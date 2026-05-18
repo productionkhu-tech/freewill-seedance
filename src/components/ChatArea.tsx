@@ -435,10 +435,9 @@ export function ChatArea() {
             if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
             const originalPath = getFilePath(file);
-            // Image → base64 data URL + media-cache (no R2)
-            const dataUrl = await readFileAsDataUrl(file);
-            const cacheId = await cacheFile(file);
-            addAsset(project.id, { type: 'image_url', url: dataUrl, role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+            // Image → R2 (unified with video/audio path)
+            const result = await uploadToPublicUrl(file);
+            addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
 
         } else if (file.type.startsWith('video/')) {
@@ -484,10 +483,9 @@ export function ChatArea() {
           if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
           try {
             const originalPath = getFilePath(file);
-            // Audio → base64 data URL + media-cache (no R2, no tmpfiles)
-            const dataUrl = await readFileAsDataUrl(file);
-            const cacheId = await cacheFile(file);
-            addAsset(project.id, { type: 'audio_url', url: dataUrl, role: 'reference_audio', file_name: file.name, cacheId, ...(originalPath ? { originalPath } : {}) });
+            // Audio → R2 (unified with image/video path)
+            const result = await uploadToPublicUrl(file);
+            addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
         } else {
           rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
@@ -597,10 +595,9 @@ export function ChatArea() {
       if (dimErr) { alert(dimErr); return; }
       const thumbnailUrl = await createThumbnail(file);
       const originalPath = getFilePath(file);
-      // Image (first/last frame) → base64 data URL + media-cache (no R2)
-      const dataUrl = await readFileAsDataUrl(file);
-      const cacheId = await cacheFile(file);
-      addAsset(project.id, { type: 'image_url', url: dataUrl, role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+      // Image (first/last frame) → R2
+      const result = await uploadToPublicUrl(file);
+      addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
     } catch (e) { alert(`이미지 업로드 실패: ${file.name}`); }
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
@@ -647,50 +644,24 @@ export function ChatArea() {
         const { id, ...rest } = a;
         let recovered = false;
 
-        if (a.type === 'video_url') {
-          // Video: must be re-uploaded to R2 every time (presigned URL expires + per-task uniqueness)
-          if (a.cacheId) {
-            try {
-              const newUrl = await reuploadFromCache(a.cacheId);
-              restored.push({ ...rest, url: newUrl });
-              recovered = true;
-            } catch { /* fall through to originalPath */ }
-          }
-          if (!recovered && a.originalPath) {
-            try {
-              const result = await reuploadFromPath(a.originalPath);
-              restored.push({ ...rest, url: result.url, cacheId: result.cacheId });
-              recovered = true;
-            } catch (err: any) {
-              const m = (err?.message || '').replace(/^Error:\s*/, '');
-              failures.push(`${label}${m ? ' — ' + m : ''}`);
-            }
-          }
-        } else {
-          // Image / audio: base64 data URL inline — never goes through R2.
-          // If the snapshot already has a data: URL we reuse it as-is. Otherwise
-          // rebuild from media-cache; last-resort disk fallback via cacheFromPath.
-          if (typeof a.url === 'string' && a.url.startsWith('data:')) {
-            restored.push({ ...rest });
+        // All media types now go through R2 → same recovery path:
+        //  1) cacheId hit → fresh presigned URL
+        //  2) originalPath fallback → re-read from disk + re-cache + re-upload
+        if (a.cacheId) {
+          try {
+            const newUrl = await reuploadFromCache(a.cacheId);
+            restored.push({ ...rest, url: newUrl });
             recovered = true;
-          }
-          if (!recovered && a.cacheId) {
-            try {
-              const dataUrl = await readCacheAsDataUrl(a.cacheId);
-              restored.push({ ...rest, url: dataUrl });
-              recovered = true;
-            } catch { /* fall through to originalPath */ }
-          }
-          if (!recovered && a.originalPath) {
-            try {
-              const cacheId = await cacheFromPath(a.originalPath);
-              const dataUrl = await readCacheAsDataUrl(cacheId);
-              restored.push({ ...rest, url: dataUrl, cacheId });
-              recovered = true;
-            } catch (err: any) {
-              const m = (err?.message || '').replace(/^Error:\s*/, '');
-              failures.push(`${label}${m ? ' — ' + m : ''}`);
-            }
+          } catch { /* fall through to originalPath */ }
+        }
+        if (!recovered && a.originalPath) {
+          try {
+            const result = await reuploadFromPath(a.originalPath);
+            restored.push({ ...rest, url: result.url, cacheId: result.cacheId });
+            recovered = true;
+          } catch (err: any) {
+            const m = (err?.message || '').replace(/^Error:\s*/, '');
+            failures.push(`${label}${m ? ' — ' + m : ''}`);
           }
         }
 
@@ -757,52 +728,29 @@ export function ChatArea() {
       return;
     }
 
-    // Refresh each reference before sending:
-    //  - Video → re-upload to R2 (presigned URL expires + uniqueness per task)
-    //  - Image / audio → ensure url is a base64 data URL (rebuild from cache if not)
-    // User-pasted asset:// URIs and raw public URLs have no cacheId, so they're
-    // passed through unchanged.
+    // Refresh each reference before sending — all media types go through R2 now,
+    // so a single recovery path: cacheId hit → fresh presigned URL, then
+    // originalPath fallback (re-read from disk). User-pasted asset:// URIs and
+    // raw public URLs have no cacheId, so they're passed through unchanged.
     setIsGenerating(true);
     for (let i = 0; i < currentAssets.length; i++) {
       const a = currentAssets[i];
       if (!a.cacheId && !a.originalPath) continue;
 
       let done = false;
-      if (a.type === 'video_url') {
-        if (a.cacheId) {
-          try {
-            const newUrl = await reuploadFromCache(a.cacheId);
-            currentAssets[i] = { ...a, url: newUrl };
-            done = true;
-          } catch { /* fall through to originalPath */ }
-        }
-        if (!done && a.originalPath) {
-          try {
-            const result = await reuploadFromPath(a.originalPath);
-            currentAssets[i] = { ...a, url: result.url, cacheId: result.cacheId };
-            done = true;
-          } catch { /* handled below */ }
-        }
-      } else {
-        // Image / audio: stay base64. If url is already a data URL, no work needed.
-        if (typeof a.url === 'string' && a.url.startsWith('data:')) {
+      if (a.cacheId) {
+        try {
+          const newUrl = await reuploadFromCache(a.cacheId);
+          currentAssets[i] = { ...a, url: newUrl };
           done = true;
-        }
-        if (!done && a.cacheId) {
-          try {
-            const dataUrl = await readCacheAsDataUrl(a.cacheId);
-            currentAssets[i] = { ...a, url: dataUrl };
-            done = true;
-          } catch { /* fall through */ }
-        }
-        if (!done && a.originalPath) {
-          try {
-            const cacheId = await cacheFromPath(a.originalPath);
-            const dataUrl = await readCacheAsDataUrl(cacheId);
-            currentAssets[i] = { ...a, url: dataUrl, cacheId };
-            done = true;
-          } catch { /* handled below */ }
-        }
+        } catch { /* fall through to originalPath */ }
+      }
+      if (!done && a.originalPath) {
+        try {
+          const result = await reuploadFromPath(a.originalPath);
+          currentAssets[i] = { ...a, url: result.url, cacheId: result.cacheId };
+          done = true;
+        } catch { /* handled below */ }
       }
 
       if (!done) {
