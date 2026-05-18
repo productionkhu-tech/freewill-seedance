@@ -8,13 +8,50 @@ import { showNotification, setCachedBlob, getCachedBlob } from './lib/utils';
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 const DEBOUNCE_MS = 1500;
 
+// External backup mirror to Documents/Freewill Seedance Backup/seedance-backup.json.
+// Survives any userData loss (app-name rename, uninstall+reinstall, AppData cleanup).
+// Longer debounce than IDB so we don't churn the disk during heavy editing.
+let backupTimer: ReturnType<typeof setTimeout> | null = null;
+const BACKUP_DEBOUNCE_MS = 5 * 60 * 1000;
+
 const idbStorage: StateStorage = {
   getItem: async (name: string): Promise<string | null> => {
-    return (await get(name)) || null;
+    const fromIdb = await get(name);
+    if (fromIdb) return fromIdb;
+    // IDB empty — likely fresh install OR userData was wiped. Try external backup.
+    try {
+      const api = (window as any).electronAPI;
+      if (api?.backupLoad) {
+        const result = await api.backupLoad();
+        if (result?.ok && result.content) {
+          // Seed IDB so subsequent reads hit the fast path and the next setItem
+          // doesn't race the restored state.
+          await set(name, result.content);
+          console.log(`[Backup] Restored ${(result.bytes / 1024).toFixed(1)}KB from ${result.path}`);
+          return result.content;
+        }
+      }
+    } catch (err) {
+      console.warn('[Backup] Load failed:', err);
+    }
+    return null;
   },
   setItem: async (name: string, value: string): Promise<void> => {
     if (writeTimer) clearTimeout(writeTimer);
     writeTimer = setTimeout(() => set(name, value), DEBOUNCE_MS);
+
+    // Mirror to external backup file (long debounce — 5 min)
+    if (backupTimer) clearTimeout(backupTimer);
+    backupTimer = setTimeout(() => {
+      const api = (window as any).electronAPI;
+      if (!api?.backupSave) return;
+      api.backupSave(value)
+        .then((r: any) => {
+          if (r?.ok) console.log(`[Backup] Saved ${(r.bytes / 1024 / 1024).toFixed(2)}MB → ${r.path}`);
+          else console.warn('[Backup] Save failed:', r?.error);
+        })
+        .catch((err: any) => console.warn('[Backup] Save error:', err?.message || err));
+    }, BACKUP_DEBOUNCE_MS);
   },
   removeItem: async (name: string): Promise<void> => {
     await del(name);

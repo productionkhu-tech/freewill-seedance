@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, Notification, shell, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
+const fs = require('fs');
 
 // ─── Single Instance Lock ───
 const gotTheLock = app.requestSingleInstanceLock();
@@ -189,6 +190,49 @@ ipcMain.handle('get-cache-size', async () => {
     return { size };
   } catch (err) {
     return { size: 0, error: err.message };
+  }
+});
+
+// ─── IPC: store backup to user's Documents folder ───
+// IndexedDB lives in userData/, which has historically vanished in edge cases
+// (rename of app `name`, uninstall+reinstall, AppData cleaners). Mirror the
+// entire persisted state to Documents/ — outside userData — so it survives any
+// of those. Restore on app start if IDB is empty.
+const BACKUP_DIR = path.join(app.getPath('documents'), 'Freewill Seedance Backup');
+const BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-backup.json');
+
+ipcMain.handle('backup-save', async (_e, content) => {
+  try {
+    if (typeof content !== 'string' || content.length === 0) return { ok: false, error: 'empty content' };
+    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    // Atomic write: temp file then rename, so a power-cut mid-write doesn't
+    // corrupt the existing backup.
+    const tmp = BACKUP_PATH + '.tmp';
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, BACKUP_PATH);
+    return { ok: true, path: BACKUP_PATH, bytes: content.length };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('backup-load', async () => {
+  try {
+    if (!fs.existsSync(BACKUP_PATH)) return { ok: true, content: null };
+    const content = fs.readFileSync(BACKUP_PATH, 'utf8');
+    return { ok: true, content, path: BACKUP_PATH, bytes: content.length };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('backup-info', async () => {
+  try {
+    if (!fs.existsSync(BACKUP_PATH)) return { exists: false, path: BACKUP_PATH };
+    const stat = fs.statSync(BACKUP_PATH);
+    return { exists: true, path: BACKUP_PATH, bytes: stat.size, mtime: stat.mtimeMs };
+  } catch (err) {
+    return { exists: false, error: err.message };
   }
 });
 

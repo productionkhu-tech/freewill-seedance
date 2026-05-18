@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail, createVideoThumbnail, getFilePath } from '../lib/utils';
+import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, uploadToPublicUrl, createThumbnail, createVideoThumbnail, getFilePath, readFileAsDataUrl, cacheFile } from '../lib/utils';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
@@ -201,14 +201,24 @@ export function SettingsPanel() {
             const dimErr = await validateImageDimensions(file);
             if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
-            const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-          } else {
-            const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+            // Image → base64 data URL + media-cache (no R2)
+            const dataUrl = await readFileAsDataUrl(file);
+            const cacheId = await cacheFile(file);
+            addAsset(project.id, { type, url: dataUrl, role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+          } else if (type === 'video_url') {
+            const vErr = await validateVideoFile(file);
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
-            const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
+            const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+            // Video → R2 presigned URL via /api/upload-public
             const result = await uploadToPublicUrl(file);
             addAsset(project.id, { type, url: result.url, role, file_name: file.name, cacheId: result.cacheId, ...(thumbnailUrl ? { thumbnailUrl } : {}), ...(originalPath ? { originalPath } : {}) });
+          } else {
+            // Audio → base64 data URL + media-cache (no R2, no tmpfiles)
+            const vErr = await validateAudioFile(file);
+            if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
+            const dataUrl = await readFileAsDataUrl(file);
+            const cacheId = await cacheFile(file);
+            addAsset(project.id, { type, url: dataUrl, role, file_name: file.name, cacheId, ...(originalPath ? { originalPath } : {}) });
           }
         } catch (e: any) {
           console.error('Failed to process file:', e);
@@ -234,18 +244,23 @@ export function SettingsPanel() {
         const dimErr = await validateImageDimensions(file);
         if (dimErr) { alert(dimErr); return; }
         updates.thumbnailUrl = await createThumbnail(file);
+        // Image → base64 + media-cache
+        updates.url = await readFileAsDataUrl(file);
+        updates.cacheId = await cacheFile(file);
+      } else if (existing.type === 'video_url') {
+        const vErr = await validateVideoFile(file);
+        if (vErr) { alert(vErr); return; }
+        updates.thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+        // Video → R2
         const result = await uploadToPublicUrl(file);
         updates.url = result.url;
         updates.cacheId = result.cacheId;
       } else {
-        const vErr = existing.type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+        // Audio → base64 + media-cache
+        const vErr = await validateAudioFile(file);
         if (vErr) { alert(vErr); return; }
-        if (existing.type === 'video_url') {
-          updates.thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
-        }
-        const result = await uploadToPublicUrl(file);
-        updates.url = result.url;
-        updates.cacheId = result.cacheId;
+        updates.url = await readFileAsDataUrl(file);
+        updates.cacheId = await cacheFile(file);
       }
       replaceAsset(project.id, existing.id, updates);
     } catch (e: any) {

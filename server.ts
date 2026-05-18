@@ -5,10 +5,21 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { Readable } from 'stream';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 dotenv.config();
 
 const API_KEY = process.env.SEEDANCE_API_KEY;
+const R2_ENDPOINT = process.env.R2_ENDPOINT;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET = process.env.R2_BUCKET;
 
 // Credit tracker integration — POSTs token usage to a Google Apps Script endpoint
 // when a task succeeds. The team name is derived from the SEEDANCE_API_KEY env var
@@ -42,6 +53,19 @@ const TEAM_NAME = (() => {
 console.log(`[Tracker] Resolved team: ${TEAM_NAME}`);
 const reportedTasks = new Set<string>();
 
+// Map: BytePlus task id → R2 object keys uploaded for this task.
+// extend_video can carry up to 3 videos, so this is string[] not string.
+// Cleared on any terminal status (succeeded/failed/expired) or user cancel.
+// The 1-day R2 lifecycle rule is the backstop if something slips through.
+const taskToR2Keys = new Map<string, string[]>();
+
+// Reference count per R2 key. output_count >= 2 sends the SAME R2 URL across N
+// parallel tasks; if task A finishes first and we delete the object, tasks B/C
+// can still be in BytePlus's internal fetch window and would fail. Each
+// taskToR2Keys.set() bumps the count, each terminal-status delete decrements;
+// the actual DeleteObject only fires when the count hits 0.
+const r2KeyRefCount = new Map<string, number>();
+
 async function startServer() {
   if (!API_KEY) {
     console.error('\n  [ERROR] 환경변수 SEEDANCE_API_KEY가 설정되지 않았습니다.');
@@ -50,9 +74,64 @@ async function startServer() {
     console.error('    변수 값:   (발급받은 API 키)\n');
     process.exit(1);
   }
+  if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET) {
+    console.error('\n  [ERROR] R2_* 환경변수가 설정되지 않았습니다.');
+    console.error('  F:\\api key\\R2.bat 을 한 번 실행하세요.');
+    console.error('  필요한 변수: R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET\n');
+    process.exit(1);
+  }
+
+  // R2 (S3-compatible) client. forcePathStyle: true so presigned URLs come out as
+  // https://{account}.r2.cloudflarestorage.com/{bucket}/{key}?... — predictable for
+  // extractR2Key below and the format Cloudflare recommends.
+  const r2 = new S3Client({
+    region: 'auto',
+    endpoint: R2_ENDPOINT,
+    credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+    forcePathStyle: true,
+  });
+
+  const r2Hostname = (() => {
+    try { return new URL(R2_ENDPOINT).hostname; } catch { return ''; }
+  })();
+
+  function isR2Url(url: string): boolean {
+    try { return new URL(url).hostname === r2Hostname; } catch { return false; }
+  }
+
+  // Pulls the object key from a path-style R2 URL.
+  // Returns null for anything that isn't a /{bucket}/{key} layout.
+  function extractR2Key(url: string): string | null {
+    try {
+      const u = new URL(url);
+      const prefix = `/${R2_BUCKET}/`;
+      if (u.pathname.startsWith(prefix)) {
+        return decodeURIComponent(u.pathname.slice(prefix.length));
+      }
+      return null;
+    } catch { return null; }
+  }
+
+  function scheduleR2Delete(taskId: string) {
+    const keys = taskToR2Keys.get(taskId);
+    if (!keys || keys.length === 0) return;
+    taskToR2Keys.delete(taskId);
+    for (const key of keys) {
+      const remaining = (r2KeyRefCount.get(key) || 1) - 1;
+      if (remaining > 0) {
+        r2KeyRefCount.set(key, remaining);
+        console.log(`[R2] keep ${key} (still ref'd by ${remaining} task(s))`);
+        continue;
+      }
+      r2KeyRefCount.delete(key);
+      r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET!, Key: key }))
+        .then(() => console.log(`[R2] deleted ${key}`))
+        .catch(err => console.warn(`[R2] delete failed for ${key}:`, err.message));
+    }
+  }
 
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(cors());
   app.use(express.json({ limit: '200mb' }));
@@ -133,126 +212,6 @@ async function startServer() {
     }
   } catch {};
 
-  async function uploadToTmpFiles(fileBuffer: Buffer, filename: string): Promise<string> {
-    const formData = new FormData();
-    formData.append('file', new Blob([fileBuffer]), filename);
-    // Hard timeout — tmpfiles.org has gone unresponsive in the past, freezing the whole UI
-    // because the request never resolves. 60s is generous for ~50MB uploads on slow links.
-    const ac = new AbortController();
-    const timeoutId = setTimeout(() => ac.abort(), 60000);
-    try {
-      const response = await fetch('https://tmpfiles.org/api/v1/upload', {
-        method: 'POST',
-        body: formData,
-        signal: ac.signal,
-      });
-      if (!response.ok) throw new Error(`tmpfiles HTTP ${response.status}`);
-      const data = await response.json() as any;
-      if (data.status !== 'success' || !data.data?.url) throw new Error('Upload failed: ' + JSON.stringify(data));
-      return data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-    } catch (err: any) {
-      if (err.name === 'AbortError') throw new Error('tmpfiles 업로드 타임아웃 (60초) — 잠시 후 다시 시도하세요');
-      throw err;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  // BytePlus Files API — upload video to BytePlus' own storage.
-  // Returns a signed download URL that BytePlus task-generation can fetch directly.
-  // Advantages over tmpfiles: no third-party dependency, longer lifetime, in-network to BytePlus.
-  // Images/audio still use tmpfiles — they're small enough and the payload size concerns differ.
-  const BYTEPLUS_API_BASE = 'https://ark.ap-southeast.bytepluses.com/api/v3';
-
-  async function uploadToBytePlusFiles(fileBuffer: Buffer, filename: string, mimeType: string): Promise<string> {
-    // Step 1: POST to /files to create the file record
-    const formData = new FormData();
-    formData.append('purpose', 'user_data');
-    formData.append('file', new Blob([fileBuffer], { type: mimeType }), filename);
-
-    const uploadAc = new AbortController();
-    const uploadTimer = setTimeout(() => uploadAc.abort(), 120000); // 2min for large videos
-    let fileId: string;
-    try {
-      const res = await fetch(`${BYTEPLUS_API_BASE}/files`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${API_KEY}` },
-        body: formData,
-        signal: uploadAc.signal,
-      });
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        throw new Error(`BytePlus Files API ${res.status}: ${errText.substring(0, 200)}`);
-      }
-      const data = await res.json() as any;
-      if (!data.id) throw new Error('BytePlus Files API returned no id: ' + JSON.stringify(data));
-      fileId = data.id;
-    } catch (err: any) {
-      if (err.name === 'AbortError') throw new Error('BytePlus Files 업로드 타임아웃 (120초)');
-      throw err;
-    } finally {
-      clearTimeout(uploadTimer);
-    }
-
-    // Step 2: resolve a URL BytePlus task-generation can use.
-    // Tries signed URL first (via manual redirect), falls back to the content endpoint itself.
-    // Freshly-uploaded files may 404 briefly while BytePlus indexes — retry once after 1s.
-    const fallbackUrl = `${BYTEPLUS_API_BASE}/files/${fileId}/content`;
-
-    const tryResolve = async (): Promise<string | null> => {
-      const urlAc = new AbortController();
-      const urlTimer = setTimeout(() => urlAc.abort(), 15000);
-      try {
-        const res = await fetch(fallbackUrl, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${API_KEY}` },
-          signal: urlAc.signal,
-          redirect: 'manual',
-        });
-        if (res.status >= 300 && res.status < 400) {
-          const loc = res.headers.get('location');
-          if (loc) return loc;
-        }
-        if (res.ok) {
-          const ct = res.headers.get('content-type') || '';
-          if (ct.includes('json')) {
-            const data = await res.json().catch(() => ({})) as any;
-            const url = data.url || data.download_url;
-            if (url) return url;
-          }
-        }
-        console.warn(`[BytePlus Files] resolve got status ${res.status} for id=${fileId}`);
-        return null;
-      } catch (err: any) {
-        console.warn(`[BytePlus Files] resolve threw: ${err.message}`);
-        return null;
-      } finally {
-        clearTimeout(urlTimer);
-      }
-    };
-
-    // First attempt
-    let resolved = await tryResolve();
-    if (resolved) return resolved;
-
-    // Retry after 1s — file may still be indexing
-    await new Promise(r => setTimeout(r, 1000));
-    resolved = await tryResolve();
-    if (resolved) return resolved;
-
-    // Final fallback: return the content endpoint URL itself. BytePlus task-generation is
-    // in-network to its own Files API and can authenticate internally when fetching own-domain
-    // URLs; if that fails, the error will surface at generation time with a clearer message
-    // than blocking the upload entirely.
-    console.warn(`[BytePlus Files] using fallback content URL for id=${fileId}`);
-    return fallbackUrl;
-  }
-
-  function isVideoExt(ext: string): boolean {
-    const v = ext.toLowerCase();
-    return v === '.mp4' || v === '.mov' || v === '.webm' || v === '.m4v';
-  }
-
   function mimeFromExt(ext: string): string {
     const v = ext.toLowerCase();
     if (v === '.mp4' || v === '.m4v') return 'video/mp4';
@@ -261,7 +220,34 @@ async function startServer() {
     return 'application/octet-stream';
   }
 
-  // Cache file locally (for image reuse) → returns { cacheId }
+  // Upload to R2 → returns a presigned GET URL (12h) BytePlus can fetch directly.
+  // Key is unique-per-upload: same source video reused across tasks gets fresh keys,
+  // so deleting task A's object never breaks task B that hasn't fetched yet.
+  async function uploadToR2(fileBuffer: Buffer, filename: string): Promise<string> {
+    const ext = path.extname(filename) || '.mp4';
+    const safeBase = path
+      .basename(filename, ext)
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 40) || 'file';
+    const hash = crypto.createHash('md5').update(fileBuffer).digest('hex').slice(0, 8);
+    const key = `${safeBase}-${hash}-${Date.now()}${ext}`;
+
+    await r2.send(new PutObjectCommand({
+      Bucket: R2_BUCKET!,
+      Key: key,
+      Body: fileBuffer,
+      ContentType: mimeFromExt(ext),
+    }));
+
+    const url = await getSignedUrl(
+      r2,
+      new GetObjectCommand({ Bucket: R2_BUCKET!, Key: key }),
+      { expiresIn: 12 * 60 * 60 }, // 12h — covers any realistic generation wait
+    );
+    return url;
+  }
+
+  // Cache file locally (for image/audio reuse) → returns { cacheId }
   app.post('/api/cache', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
     const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'file');
     const ext = path.extname(filename) || '';
@@ -279,26 +265,23 @@ async function startServer() {
     res.sendFile(cachePath);
   });
 
-  // Upload image/audio/video → cache locally + upload to tmpfiles → returns { url, cacheId }
-  // NOTE: v26.4.2201/2202 tried routing video through BytePlus Files API, but the /files/{id}/content
-  // endpoint either 404'd during indexing or the URL wasn't fetchable by BytePlus task-generation
-  // (got "resource download failed" at generate time). Reverted to tmpfiles for all types in 2203.
-  // The uploadToBytePlusFiles helper is kept around for future debugging but is not called.
+  // Upload video → cache locally + upload to R2 → returns { url, cacheId }.
+  // Now video-only: image and audio go base64 via /api/cache + client-side data URLs.
   app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'upload.mp4');
     const ext = path.extname(filename) || '.mp4';
-    // Hash file content → same file = same cacheId (no duplicates)
+    // Hash file content → same file = same cacheId (no local duplicates).
+    // R2 key is still per-upload unique inside uploadToR2.
     const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
     const cacheId = `${hash}${ext}`;
     console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash}`);
 
     try {
-      // Save to local cache (skip if same file already cached)
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, req.body);
 
-      const publicUrl = await uploadToTmpFiles(req.body, filename);
-      console.log(`[Upload] OK → ${publicUrl} (cached: ${cacheId})`);
+      const publicUrl = await uploadToR2(req.body, filename);
+      console.log(`[Upload] R2 OK → ${publicUrl.substring(0, 80)}... (cached: ${cacheId})`);
       res.json({ url: publicUrl, cacheId });
     } catch (error: any) {
       console.error('[Upload] Error:', error.message);
@@ -306,7 +289,7 @@ async function startServer() {
     }
   });
 
-  // Re-upload from cache → new public URL (tmpfiles for all types)
+  // Re-upload from cache → fresh R2 presigned URL (video-only path)
   app.post('/api/reupload/:cacheId', async (req, res) => {
     const cachePath = path.join(CACHE_DIR, req.params.cacheId);
     console.log(`[Re-upload] ${req.params.cacheId}...`);
@@ -316,8 +299,8 @@ async function startServer() {
         return res.status(404).json({ error: 'Cached file not found. Please re-attach the file.' });
       }
       const fileBuffer = fs.readFileSync(cachePath);
-      const publicUrl = await uploadToTmpFiles(fileBuffer, req.params.cacheId);
-      console.log(`[Re-upload] OK → ${publicUrl}`);
+      const publicUrl = await uploadToR2(fileBuffer, req.params.cacheId);
+      console.log(`[Re-upload] R2 OK → ${publicUrl.substring(0, 80)}...`);
       res.json({ url: publicUrl });
     } catch (error: any) {
       console.error('[Re-upload] Error:', error.message);
@@ -325,11 +308,40 @@ async function startServer() {
     }
   });
 
+  // Re-cache an image/audio from its on-disk original path WITHOUT touching R2.
+  // The image/audio path is base64-inline to BytePlus, so R2 must not be involved
+  // for these — that's the whole point of the brief's audio/image separation. The
+  // caller then re-reads via /api/cache/:cacheId to build the base64 data URL.
+  app.post('/api/cache-from-path', async (req, res) => {
+    const originalPath = (req.body && req.body.originalPath) as string | undefined;
+    if (!originalPath || typeof originalPath !== 'string') {
+      return res.status(400).json({ error: 'originalPath required' });
+    }
+    console.log(`[Cache from path] ${originalPath}`);
+    try {
+      if (!fs.existsSync(originalPath)) {
+        return res.status(404).json({ error: '원본 파일을 찾을 수 없습니다 (이동/삭제/이름변경됨)' });
+      }
+      const fileBuffer = fs.readFileSync(originalPath);
+      const filename = path.basename(originalPath);
+      const ext = path.extname(filename) || '';
+      const hash = crypto.createHash('md5').update(fileBuffer).digest('hex').slice(0, 12);
+      const cacheId = `${hash}${ext}`;
+      const cachePath = path.join(CACHE_DIR, cacheId);
+      if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
+      console.log(`[Cache from path] OK → ${cacheId}`);
+      res.json({ cacheId });
+    } catch (error: any) {
+      console.error('[Cache from path] Error:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Last-resort recovery: re-read the original source file from its on-disk path
-  // and re-cache + re-upload it. Used when the media-cache entry is gone (wiped by
-  // a pre-2408 auto-update, or aged past the 30-day cleanup). Only works while the
-  // user hasn't moved/renamed/deleted the original file. Re-populates media-cache
-  // so subsequent reuses hit the fast path again.
+  // and re-cache + re-upload to R2. Used when the media-cache entry is gone (wiped
+  // by a pre-2408 auto-update, or aged past the 30-day cleanup). Only works while
+  // the user hasn't moved/renamed/deleted the original file. Re-populates the cache
+  // so subsequent reuses hit the fast path again. Video-only.
   app.post('/api/reupload-from-path', async (req, res) => {
     const originalPath = (req.body && req.body.originalPath) as string | undefined;
     if (!originalPath || typeof originalPath !== 'string') {
@@ -343,13 +355,12 @@ async function startServer() {
       const fileBuffer = fs.readFileSync(originalPath);
       const filename = path.basename(originalPath);
       const ext = path.extname(filename) || '';
-      // Re-cache under a content hash so future reuses use the fast cache path.
       const hash = crypto.createHash('md5').update(fileBuffer).digest('hex').slice(0, 12);
       const cacheId = `${hash}${ext}`;
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
-      const publicUrl = await uploadToTmpFiles(fileBuffer, filename);
-      console.log(`[Re-upload from path] OK → ${publicUrl} (re-cached: ${cacheId})`);
+      const publicUrl = await uploadToR2(fileBuffer, filename);
+      console.log(`[Re-upload from path] R2 OK → ${publicUrl.substring(0, 80)}... (re-cached: ${cacheId})`);
       res.json({ url: publicUrl, cacheId });
     } catch (error: any) {
       console.error('[Re-upload from path] Error:', error.message);
@@ -372,6 +383,29 @@ async function startServer() {
       let data;
       try { data = JSON.parse(text); } catch {
         return res.status(response.status).json({ error: `BytePlus API invalid response (${response.status})` });
+      }
+
+      // Map task → R2 keys used by this submission so we can clean up on terminal
+      // status. Walk req.body.content, pick out video_url items whose URL is on our
+      // R2 host, extract the path-style key. extend_video can have up to 3.
+      if (response.ok && data?.id && Array.isArray(req.body?.content)) {
+        const keys: string[] = [];
+        for (const item of req.body.content) {
+          if (item?.type === 'video_url') {
+            const url = item?.video_url?.url;
+            if (typeof url === 'string' && isR2Url(url)) {
+              const key = extractR2Key(url);
+              if (key) keys.push(key);
+            }
+          }
+        }
+        if (keys.length) {
+          taskToR2Keys.set(data.id, keys);
+          for (const key of keys) {
+            r2KeyRefCount.set(key, (r2KeyRefCount.get(key) || 0) + 1);
+          }
+          console.log(`[R2] task ${data.id} → ${keys.length} key(s) tracked`);
+        }
       }
 
       console.log(`[BytePlus API] Create (${response.status}):`, JSON.stringify(data).substring(0, 500));
@@ -410,6 +444,14 @@ async function startServer() {
         }).catch(() => {});
       }
 
+      // Terminal status → clean up R2 inputs we tracked at submit time.
+      // Idempotent: the Map entry is deleted on first hit so repeated polling
+      // (the 10s interval may see the same terminal status twice before the
+      // client stops asking) doesn't fire duplicate DeleteObjects.
+      if (data?.status === 'succeeded' || data?.status === 'failed' || data?.status === 'expired') {
+        scheduleR2Delete(req.params.id);
+      }
+
       res.status(response.status).json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -424,10 +466,17 @@ async function startServer() {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${API_KEY}` }
       });
+      // Clean up R2 inputs whether or not the upstream cancel succeeded — by the time
+      // a user clicks cancel they don't want the bytes lingering, and the 1-day
+      // lifecycle rule would catch it anyway.
+      scheduleR2Delete(req.params.id);
+
       if (response.status === 204) return res.status(204).end();
       const data = await response.json();
       res.status(response.status).json(data);
     } catch (error: any) {
+      // Still try to clean up R2 even if the cancel call itself blew up
+      scheduleR2Delete(req.params.id);
       res.status(500).json({ error: error.message });
     }
   });

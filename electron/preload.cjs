@@ -14,4 +14,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onDownloadStarted: (cb) => ipcRenderer.on('download-started', (_e, payload) => cb(payload)),
   onDownloadProgress: (cb) => ipcRenderer.on('download-progress', (_e, payload) => cb(payload)),
   onDownloadDone: (cb) => ipcRenderer.on('download-done', (_e, payload) => cb(payload)),
+  // External backup mirror — Documents/Freewill Seedance Backup/seedance-backup.json
+  backupSave: (content) => ipcRenderer.invoke('backup-save', content),
+  backupLoad: () => ipcRenderer.invoke('backup-load'),
+  backupInfo: () => ipcRenderer.invoke('backup-info'),
 });

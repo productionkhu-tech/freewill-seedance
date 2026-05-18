@@ -12,7 +12,7 @@ echo.
 
 set "INSTALLER=%~dp0FreewillSeedanceSetup.exe"
 
-powershell -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try { $r=Invoke-RestMethod -Uri 'https://api.github.com/repos/productionkhu-tech/freewill-seedance/releases/latest'; $exe=$r.assets | Where-Object { $_.name -like '*.exe' -and $_.name -notlike '*blockmap*' } | Select-Object -First 1; if($exe){ Write-Host ('        Version: '+$r.tag_name); Invoke-WebRequest -Uri $exe.browser_download_url -OutFile '%INSTALLER%'; Write-Host '        Download complete!' } else { Write-Host '        No EXE found in release'; exit 1 } } catch { Write-Host ('        Error: '+$_.Exception.Message); exit 1 }"
+powershell -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try { $r=Invoke-RestMethod -Uri 'https://api.github.com/repos/productionkhu-tech/freewill-seedance/releases/latest' -Headers @{'User-Agent'='freewill-seedance-installer'}; $exe=$r.assets | Where-Object { $_.name -like '*.exe' -and $_.name -notlike '*blockmap*' } | Select-Object -First 1; if($exe){ Write-Host ('        Version: '+$r.tag_name); Invoke-WebRequest -Uri $exe.url -Headers @{Accept='application/octet-stream'; 'User-Agent'='freewill-seedance-installer'} -OutFile '%INSTALLER%'; Write-Host '        Download complete!' } else { Write-Host '        No EXE found in release'; exit 1 } } catch { Write-Host ('        Error: '+$_.Exception.Message); exit 1 }"
 
 if not exist "%INSTALLER%" (
     echo.

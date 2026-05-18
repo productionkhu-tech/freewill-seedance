@@ -238,9 +238,27 @@ export async function reuploadFromCache(cacheId: string): Promise<string> {
   return data.url;
 }
 
+// Image/audio counterpart to reuploadFromPath — re-reads the original file
+// from disk and re-populates media-cache, but skips R2. Caller then uses
+// readCacheAsDataUrl(cacheId) to get the base64 data URL.
+export async function cacheFromPath(originalPath: string): Promise<string> {
+  const res = await fetch('/api/cache-from-path', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ originalPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Cache from path failed');
+  }
+  const data = await res.json();
+  return data.cacheId;
+}
+
 // Last-resort recovery: re-read the original source file from disk by its
 // absolute path. Used when the server media-cache entry is gone. Re-caches
 // server-side, so returns a fresh { url, cacheId } the caller should persist.
+// VIDEO-ONLY — image/audio uses cacheFromPath (no R2 round-trip).
 export async function reuploadFromPath(originalPath: string): Promise<{ url: string; cacheId: string }> {
   const res = await fetch('/api/reupload-from-path', {
     method: 'POST',

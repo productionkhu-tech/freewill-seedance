@@ -8,3 +8,6 @@ release/
 *.log
 .env*
 !.env.example
+.aider*
+.claude/
+FreewillSeedanceSetup.exe

@@ -1,7 +1,7 @@
 {
   "name": "freewill-seedance",
   "private": true,
-  "version": "26.5.1301",
+  "version": "26.5.1803",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -12,6 +12,8 @@
     "start": "node dist-server/server.cjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1048.0",
+    "@aws-sdk/s3-request-presigner": "^3.1048.0",
     "@radix-ui/react-label": "^2.1.8",
     "@radix-ui/react-scroll-area": "^1.2.10",
     "@radix-ui/react-select": "^2.2.6",

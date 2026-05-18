@@ -3,7 +3,7 @@ import { useAppStore, AssetRole } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, uploadToPublicUrl, getCachedBlob, setCachedBlob } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, uploadToPublicUrl, getCachedBlob, setCachedBlob, readFileAsDataUrl, cacheFile, readCacheAsDataUrl, cacheFromPath } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -435,8 +435,10 @@ export function ChatArea() {
             if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
             const originalPath = getFilePath(file);
-            const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+            // Image → base64 data URL + media-cache (no R2)
+            const dataUrl = await readFileAsDataUrl(file);
+            const cacheId = await cacheFile(file);
+            addAsset(project.id, { type: 'image_url', url: dataUrl, role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
 
         } else if (file.type.startsWith('video/')) {
@@ -482,8 +484,10 @@ export function ChatArea() {
           if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
           try {
             const originalPath = getFilePath(file);
-            const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId, ...(originalPath ? { originalPath } : {}) });
+            // Audio → base64 data URL + media-cache (no R2, no tmpfiles)
+            const dataUrl = await readFileAsDataUrl(file);
+            const cacheId = await cacheFile(file);
+            addAsset(project.id, { type: 'audio_url', url: dataUrl, role: 'reference_audio', file_name: file.name, cacheId, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
         } else {
           rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
@@ -593,8 +597,10 @@ export function ChatArea() {
       if (dimErr) { alert(dimErr); return; }
       const thumbnailUrl = await createThumbnail(file);
       const originalPath = getFilePath(file);
-      const result = await uploadToPublicUrl(file);
-      addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+      // Image (first/last frame) → base64 data URL + media-cache (no R2)
+      const dataUrl = await readFileAsDataUrl(file);
+      const cacheId = await cacheFile(file);
+      addAsset(project.id, { type: 'image_url', url: dataUrl, role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
     } catch (e) { alert(`이미지 업로드 실패: ${file.name}`); }
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
@@ -641,34 +647,57 @@ export function ChatArea() {
         const { id, ...rest } = a;
         let recovered = false;
 
-        // Fast path: server media-cache (works if attached on 2408+ and within 30d)
-        if (a.cacheId) {
-          try {
-            const newUrl = await reuploadFromCache(a.cacheId);
-            restored.push({ ...rest, url: newUrl });
+        if (a.type === 'video_url') {
+          // Video: must be re-uploaded to R2 every time (presigned URL expires + per-task uniqueness)
+          if (a.cacheId) {
+            try {
+              const newUrl = await reuploadFromCache(a.cacheId);
+              restored.push({ ...rest, url: newUrl });
+              recovered = true;
+            } catch { /* fall through to originalPath */ }
+          }
+          if (!recovered && a.originalPath) {
+            try {
+              const result = await reuploadFromPath(a.originalPath);
+              restored.push({ ...rest, url: result.url, cacheId: result.cacheId });
+              recovered = true;
+            } catch (err: any) {
+              const m = (err?.message || '').replace(/^Error:\s*/, '');
+              failures.push(`${label}${m ? ' — ' + m : ''}`);
+            }
+          }
+        } else {
+          // Image / audio: base64 data URL inline — never goes through R2.
+          // If the snapshot already has a data: URL we reuse it as-is. Otherwise
+          // rebuild from media-cache; last-resort disk fallback via cacheFromPath.
+          if (typeof a.url === 'string' && a.url.startsWith('data:')) {
+            restored.push({ ...rest });
             recovered = true;
-          } catch { /* fall through to originalPath */ }
-        }
-
-        // Fallback: re-read the original source file from disk. Recovers refs
-        // whose media-cache entry is gone (pre-2408 wipe / 30d cleanup), as long
-        // as the user hasn't moved/renamed/deleted the file. Re-caches server-side.
-        if (!recovered && a.originalPath) {
-          try {
-            const result = await reuploadFromPath(a.originalPath);
-            restored.push({ ...rest, url: result.url, cacheId: result.cacheId });
-            recovered = true;
-          } catch (err: any) {
-            const m = (err?.message || '').replace(/^Error:\s*/, '');
-            failures.push(`${label}${m ? ' — ' + m : ''}`);
+          }
+          if (!recovered && a.cacheId) {
+            try {
+              const dataUrl = await readCacheAsDataUrl(a.cacheId);
+              restored.push({ ...rest, url: dataUrl });
+              recovered = true;
+            } catch { /* fall through to originalPath */ }
+          }
+          if (!recovered && a.originalPath) {
+            try {
+              const cacheId = await cacheFromPath(a.originalPath);
+              const dataUrl = await readCacheAsDataUrl(cacheId);
+              restored.push({ ...rest, url: dataUrl, cacheId });
+              recovered = true;
+            } catch (err: any) {
+              const m = (err?.message || '').replace(/^Error:\s*/, '');
+              failures.push(`${label}${m ? ' — ' + m : ''}`);
+            }
           }
         }
 
-        if (!recovered && !a.originalPath) {
+        if (!recovered && !a.originalPath && !a.cacheId) {
           failures.push(`${label}: 캐시 없음 + 원본 경로 정보 없음 (구버전에서 첨부됨)`);
-        } else if (!recovered && a.cacheId && a.originalPath) {
-          // both attempts failed but we already pushed a failure message in the
-          // originalPath catch — nothing to add here
+        } else if (!recovered && a.originalPath) {
+          // catch above already pushed the failure
         } else if (!recovered) {
           failures.push(`${label}: 복원 실패`);
         }
@@ -728,15 +757,18 @@ export function ChatArea() {
       return;
     }
 
-    // Re-upload assets we own (cacheId set) before sending — tmpfiles URLs are
-    // ephemeral and expire. If the media-cache entry is gone, fall back to
-    // re-reading the original file from disk (originalPath). User-pasted asset://
-    // URIs and raw public URLs have no cacheId, so they're passed through unchanged.
+    // Refresh each reference before sending:
+    //  - Video → re-upload to R2 (presigned URL expires + uniqueness per task)
+    //  - Image / audio → ensure url is a base64 data URL (rebuild from cache if not)
+    // User-pasted asset:// URIs and raw public URLs have no cacheId, so they're
+    // passed through unchanged.
     setIsGenerating(true);
     for (let i = 0; i < currentAssets.length; i++) {
       const a = currentAssets[i];
-      if (a.cacheId || a.originalPath) {
-        let done = false;
+      if (!a.cacheId && !a.originalPath) continue;
+
+      let done = false;
+      if (a.type === 'video_url') {
         if (a.cacheId) {
           try {
             const newUrl = await reuploadFromCache(a.cacheId);
@@ -751,11 +783,32 @@ export function ChatArea() {
             done = true;
           } catch { /* handled below */ }
         }
-        if (!done) {
-          alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n원본 파일이 이동/삭제됐을 수 있습니다. 다시 첨부해주세요.`);
-          setIsGenerating(false);
-          return;
+      } else {
+        // Image / audio: stay base64. If url is already a data URL, no work needed.
+        if (typeof a.url === 'string' && a.url.startsWith('data:')) {
+          done = true;
         }
+        if (!done && a.cacheId) {
+          try {
+            const dataUrl = await readCacheAsDataUrl(a.cacheId);
+            currentAssets[i] = { ...a, url: dataUrl };
+            done = true;
+          } catch { /* fall through */ }
+        }
+        if (!done && a.originalPath) {
+          try {
+            const cacheId = await cacheFromPath(a.originalPath);
+            const dataUrl = await readCacheAsDataUrl(cacheId);
+            currentAssets[i] = { ...a, url: dataUrl, cacheId };
+            done = true;
+          } catch { /* handled below */ }
+        }
+      }
+
+      if (!done) {
+        alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n원본 파일이 이동/삭제됐을 수 있습니다. 다시 첨부해주세요.`);
+        setIsGenerating(false);
+        return;
       }
     }
 
