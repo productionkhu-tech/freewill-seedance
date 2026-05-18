@@ -3,7 +3,7 @@ import { useAppStore, AssetRole } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, uploadToPublicUrl, getCachedBlob, setCachedBlob, readFileAsDataUrl, cacheFile, readCacheAsDataUrl, cacheFromPath } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -435,9 +435,10 @@ export function ChatArea() {
             if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
             const thumbnailUrl = await createThumbnail(file);
             const originalPath = getFilePath(file);
-            // Image → R2 (unified with video/audio path)
-            const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+            // Attach → media-cache only. R2 upload happens at send time so
+            // every R2 object is born with a task to be tied to.
+            const cacheId = await cacheFile(file);
+            addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
 
         } else if (file.type.startsWith('video/')) {
@@ -460,17 +461,18 @@ export function ChatArea() {
           try {
             const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
             const originalPath = getFilePath(file);
-            const result = await uploadToPublicUrl(file);
+            // Attach → media-cache only (R2 upload deferred to send time)
+            const cacheId = await cacheFile(file);
             if (shouldReplace) {
               const existing = existingVideos[0];
               useAppStore.getState().replaceAsset(project.id, existing.id, {
-                url: result.url, file_name: file.name, cacheId: result.cacheId, thumbnailUrl,
+                url: '', file_name: file.name, cacheId, thumbnailUrl,
                 ...(originalPath ? { originalPath } : {}),
               });
             } else {
-              addAsset(project.id, { type: 'video_url', url: result.url, role: 'reference_video', file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+              addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
             }
-          } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
+          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
 
         } else if (file.type.startsWith('audio/')) {
           if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
@@ -483,10 +485,10 @@ export function ChatArea() {
           if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
           try {
             const originalPath = getFilePath(file);
-            // Audio → R2 (unified with image/video path)
-            const result = await uploadToPublicUrl(file);
-            addAsset(project.id, { type: 'audio_url', url: result.url, role: 'reference_audio', file_name: file.name, cacheId: result.cacheId, ...(originalPath ? { originalPath } : {}) });
-          } catch (e: any) { rejected.push(`${file.name}: 업로드 실패 — ${e.message}`); }
+            // Attach → media-cache only (R2 upload deferred to send time)
+            const cacheId = await cacheFile(file);
+            addAsset(project.id, { type: 'audio_url', url: '', role: 'reference_audio', file_name: file.name, cacheId, ...(originalPath ? { originalPath } : {}) });
+          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
         } else {
           rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
         }
@@ -595,10 +597,10 @@ export function ChatArea() {
       if (dimErr) { alert(dimErr); return; }
       const thumbnailUrl = await createThumbnail(file);
       const originalPath = getFilePath(file);
-      // Image (first/last frame) → R2
-      const result = await uploadToPublicUrl(file);
-      addAsset(project.id, { type: 'image_url', url: result.url, role, file_name: file.name, cacheId: result.cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-    } catch (e) { alert(`이미지 업로드 실패: ${file.name}`); }
+      // Attach → media-cache only (R2 upload deferred to send time)
+      const cacheId = await cacheFile(file);
+      addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+    } catch (e) { alert(`이미지 캐싱 실패: ${file.name}`); }
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
   const handleFrameDrop = (e: React.DragEvent<HTMLInputElement>, role: AssetRole) => { e.preventDefault(); e.stopPropagation(); setIsDragging(false); dragCounter.current = 0; const f = e.dataTransfer.files?.[0]; if (f) processFrameFile(f, role); };
@@ -644,20 +646,26 @@ export function ChatArea() {
         const { id, ...rest } = a;
         let recovered = false;
 
-        // All media types now go through R2 → same recovery path:
-        //  1) cacheId hit → fresh presigned URL
-        //  2) originalPath fallback → re-read from disk + re-cache + re-upload
+        // Reuse must NOT trigger R2 upload — that's send-time territory. Only
+        // verify the asset is reachable (cache hit, or disk re-cache via
+        // originalPath) so the next send finds it. Keep url cleared so the
+        // send loop unconditionally re-uploads to R2 with a fresh per-task key.
         if (a.cacheId) {
+          // Confirm cache is still present; cheap HEAD via cache fetch (404 → fall through)
           try {
-            const newUrl = await reuploadFromCache(a.cacheId);
-            restored.push({ ...rest, url: newUrl });
-            recovered = true;
+            const probe = await fetch(`/api/cache/${a.cacheId}`, { method: 'GET' });
+            if (probe.ok) {
+              probe.body?.cancel?.(); // don't hold the bytes in memory
+              restored.push({ ...rest, url: '' });
+              recovered = true;
+            }
           } catch { /* fall through to originalPath */ }
         }
         if (!recovered && a.originalPath) {
           try {
-            const result = await reuploadFromPath(a.originalPath);
-            restored.push({ ...rest, url: result.url, cacheId: result.cacheId });
+            // Disk fallback: re-cache the file (NOT R2) so the next send hits cache
+            const cacheId = await cacheFromPath(a.originalPath);
+            restored.push({ ...rest, url: '', cacheId });
             recovered = true;
           } catch (err: any) {
             const m = (err?.message || '').replace(/^Error:\s*/, '');

@@ -10,8 +10,6 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
-  DeleteObjectsCommand,
-  ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -113,68 +111,6 @@ async function startServer() {
       return null;
     } catch { return null; }
   }
-
-  // Periodic cleanup of R2 objects older than 1 hour that are NOT referenced
-  // by any active task. Belt-and-suspenders for cases the per-task delete can't
-  // cover: app crashed mid-task, user quit the app while polling, etc. The
-  // r2KeyRefCount check protects every key the in-process Map still owns, so
-  // active references are never collateral damage. R2's own lifecycle rule
-  // (1 day) remains the final backstop for anything that slips past this loop
-  // (e.g. user never re-opens the app).
-  async function r2CleanupOldObjects() {
-    try {
-      const cutoffMs = 60 * 60 * 1000; // 1 hour
-      const now = Date.now();
-      let continuationToken: string | undefined;
-      const toDelete: { Key: string }[] = [];
-      let scanned = 0;
-
-      do {
-        const res = await r2.send(new ListObjectsV2Command({
-          Bucket: R2_BUCKET!,
-          ContinuationToken: continuationToken,
-        }));
-        for (const o of res.Contents || []) {
-          scanned++;
-          if (!o.Key || !o.LastModified) continue;
-          const age = now - new Date(o.LastModified).getTime();
-          if (age < cutoffMs) continue;            // <1h, leave it
-          if (r2KeyRefCount.has(o.Key)) continue;  // active task ref, leave it
-          toDelete.push({ Key: o.Key });
-        }
-        continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
-      } while (continuationToken);
-
-      if (toDelete.length === 0) {
-        console.log(`[R2 cleanup] scanned ${scanned}, nothing to delete (no orphans >1h)`);
-        return;
-      }
-
-      let deleted = 0;
-      for (let i = 0; i < toDelete.length; i += 1000) {
-        const chunk = toDelete.slice(i, i + 1000);
-        const res = await r2.send(new DeleteObjectsCommand({
-          Bucket: R2_BUCKET!,
-          Delete: { Objects: chunk, Quiet: false },
-        }));
-        deleted += (res.Deleted || []).length;
-        for (const err of (res.Errors || [])) {
-          console.warn(`[R2 cleanup] delete failed for ${err.Key}: ${err.Message}`);
-        }
-      }
-      console.log(`[R2 cleanup] scanned ${scanned}, deleted ${deleted} orphan(s) >1h old`);
-    } catch (err: any) {
-      console.warn(`[R2 cleanup] sweep failed: ${err.message}`);
-    }
-  }
-
-  // First sweep 30s after boot (avoid startup contention), then every hour.
-  // 30s gives the user a moment to actually start a task — if their click
-  // happens to overlap the boot, the new R2 object is far younger than 1h
-  // and won't be touched anyway, but waiting also avoids a sweep race during
-  // hot reload.
-  setTimeout(r2CleanupOldObjects, 30 * 1000);
-  setInterval(r2CleanupOldObjects, 60 * 60 * 1000);
 
   function scheduleR2Delete(taskId: string) {
     const keys = taskToR2Keys.get(taskId);
@@ -342,33 +278,21 @@ async function startServer() {
     res.sendFile(cachePath);
   });
 
-  // Upload any media (image / video / audio) → cache locally + upload to R2 → { url, cacheId }.
-  // All three types go through R2 now so a single payload-size ceiling is gone
-  // (R2 URLs are tiny strings) and the BytePlus 64MB body limit is no longer a
-  // practical constraint.
-  app.post('/api/upload-public', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
-    const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'upload.mp4');
-    const ext = path.extname(filename) || '.mp4';
-    // Hash file content → same file = same cacheId (no local duplicates).
-    // R2 key is still per-upload unique inside uploadToR2.
-    const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);
-    const cacheId = `${hash}${ext}`;
-    console.log(`[Upload] ${filename} (${(req.body.length / 1024 / 1024).toFixed(1)}MB) hash=${hash}`);
+  // NOTE: There is intentionally no "upload + R2 in one step" endpoint anymore.
+  // Attaching a file goes only to media-cache (/api/cache). R2 upload happens
+  // ONLY at send time via /api/reupload/:cacheId — so every R2 object is born
+  // with a known task ID it will be tied to, and is deletable on terminal
+  // status. This eliminates the "attach orphan" class: in the old design every
+  // attach put bytes in R2 with no owner, leaving permanent orphans behind.
+  //
+  // Critical for the shared R2 bucket too: a hypothetical cross-machine
+  // cleanup sweep can't safely "garbage collect" attach-time orphans because
+  // each app's in-memory ref map only knows its own user's active keys.
+  // Solution: don't create those orphans in the first place.
 
-    try {
-      const cachePath = path.join(CACHE_DIR, cacheId);
-      if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, req.body);
-
-      const publicUrl = await uploadToR2(req.body, filename);
-      console.log(`[Upload] R2 OK → ${publicUrl.substring(0, 80)}... (cached: ${cacheId})`);
-      res.json({ url: publicUrl, cacheId });
-    } catch (error: any) {
-      console.error('[Upload] Error:', error.message);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Re-upload from cache → fresh R2 presigned URL (all media types)
+  // Re-upload from cache → fresh R2 presigned URL (all media types).
+  // Called at send time (handleSend / handleReuse). Each call produces a
+  // unique R2 key, mapped to its task in POST /api/byteplus/tasks below.
   app.post('/api/reupload/:cacheId', async (req, res) => {
     const cachePath = path.join(CACHE_DIR, req.params.cacheId);
     console.log(`[Re-upload] ${req.params.cacheId}...`);
