@@ -10,6 +10,8 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -111,6 +113,68 @@ async function startServer() {
       return null;
     } catch { return null; }
   }
+
+  // Periodic cleanup of R2 objects older than 1 hour that are NOT referenced
+  // by any active task. Belt-and-suspenders for cases the per-task delete can't
+  // cover: app crashed mid-task, user quit the app while polling, etc. The
+  // r2KeyRefCount check protects every key the in-process Map still owns, so
+  // active references are never collateral damage. R2's own lifecycle rule
+  // (1 day) remains the final backstop for anything that slips past this loop
+  // (e.g. user never re-opens the app).
+  async function r2CleanupOldObjects() {
+    try {
+      const cutoffMs = 60 * 60 * 1000; // 1 hour
+      const now = Date.now();
+      let continuationToken: string | undefined;
+      const toDelete: { Key: string }[] = [];
+      let scanned = 0;
+
+      do {
+        const res = await r2.send(new ListObjectsV2Command({
+          Bucket: R2_BUCKET!,
+          ContinuationToken: continuationToken,
+        }));
+        for (const o of res.Contents || []) {
+          scanned++;
+          if (!o.Key || !o.LastModified) continue;
+          const age = now - new Date(o.LastModified).getTime();
+          if (age < cutoffMs) continue;            // <1h, leave it
+          if (r2KeyRefCount.has(o.Key)) continue;  // active task ref, leave it
+          toDelete.push({ Key: o.Key });
+        }
+        continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+      } while (continuationToken);
+
+      if (toDelete.length === 0) {
+        console.log(`[R2 cleanup] scanned ${scanned}, nothing to delete (no orphans >1h)`);
+        return;
+      }
+
+      let deleted = 0;
+      for (let i = 0; i < toDelete.length; i += 1000) {
+        const chunk = toDelete.slice(i, i + 1000);
+        const res = await r2.send(new DeleteObjectsCommand({
+          Bucket: R2_BUCKET!,
+          Delete: { Objects: chunk, Quiet: false },
+        }));
+        deleted += (res.Deleted || []).length;
+        for (const err of (res.Errors || [])) {
+          console.warn(`[R2 cleanup] delete failed for ${err.Key}: ${err.Message}`);
+        }
+      }
+      console.log(`[R2 cleanup] scanned ${scanned}, deleted ${deleted} orphan(s) >1h old`);
+    } catch (err: any) {
+      console.warn(`[R2 cleanup] sweep failed: ${err.message}`);
+    }
+  }
+
+  // First sweep 30s after boot (avoid startup contention), then every hour.
+  // 30s gives the user a moment to actually start a task — if their click
+  // happens to overlap the boot, the new R2 object is far younger than 1h
+  // and won't be touched anyway, but waiting also avoids a sweep race during
+  // hot reload.
+  setTimeout(r2CleanupOldObjects, 30 * 1000);
+  setInterval(r2CleanupOldObjects, 60 * 60 * 1000);
 
   function scheduleR2Delete(taskId: string) {
     const keys = taskToR2Keys.get(taskId);
