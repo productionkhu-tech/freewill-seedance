@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3 } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useAppStore } from '../store';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
@@ -20,6 +20,9 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const inputRef = useRef<HTMLInputElement>(null);
   const [diskCacheSize, setDiskCacheSize] = useState<number | null>(null);
   const [memCacheBytes, setMemCacheBytes] = useState<number>(0);
+  // Download folder — session-only. Resets to OS Downloads on every app restart.
+  const [downloadDir, setDownloadDir] = useState<string>('');
+  const [isDefaultDir, setIsDefaultDir] = useState(true);
 
   useEffect(() => {
     const refresh = async () => {
@@ -33,6 +36,23 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     const interval = setInterval(refresh, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // Load the current (default on startup) download folder once.
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    if (api?.getDownloadDir) {
+      api.getDownloadDir()
+        .then((r: any) => { if (r?.dir) { setDownloadDir(r.dir); setIsDefaultDir(!!r.isDefault); } })
+        .catch(() => {});
+    }
+  }, []);
+
+  const pickDownloadFolder = async () => {
+    const api = (window as any).electronAPI;
+    if (!api?.pickDownloadDir) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
+    const r = await api.pickDownloadDir();
+    if (r?.ok && r.dir) { setDownloadDir(r.dir); setIsDefaultDir(false); }
+  };
 
   const totalCacheBytes = (diskCacheSize ?? 0) + memCacheBytes;
 
@@ -94,6 +114,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <Plus size={18} />
         </button>
         <div className="flex-1" />
+        <button onClick={pickDownloadFolder}
+          className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
+          title={`다운로드 폴더 선택${isDefaultDir ? ' (현재: 기본 Downloads)' : `\n현재: ${downloadDir}`}`}>
+          <FolderDown size={18} />
+        </button>
         <button onClick={openDashboard}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
           title="크레딧 대시보드 열기">
@@ -172,8 +197,24 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           </div>
         ))}
       </div>
-      {/* Footer: dashboard link + cache cleanup */}
+      {/* Footer: download folder + dashboard link + cache cleanup */}
       <div className="p-3 border-t border-[#2a2a2d] shrink-0 space-y-2">
+        {/* Download folder — session-only, resets to Downloads on restart */}
+        <div className="px-3 py-2 bg-[#2a2a2d]/60 rounded-[8px] space-y-1.5">
+          <div className="flex items-center gap-2 text-white/70 text-[12px]">
+            <FolderDown size={14} />
+            <span className="font-medium">다운로드 폴더</span>
+            {isDefaultDir && <span className="text-white/35 text-[10px]">(기본)</span>}
+          </div>
+          <div className="text-[11px] text-white/45 font-mono break-all leading-snug" title={downloadDir}>
+            {downloadDir || '...'}
+          </div>
+          <button onClick={pickDownloadFolder}
+            className="w-full px-2 py-1 bg-[#3a3a3d] hover:bg-[#4a4a4d] text-white/80 hover:text-white rounded-[6px] text-[11px] font-medium transition-colors"
+            title="다운로드 폴더 선택 (앱 재시작 시 기본 폴더로 초기화)">
+            폴더 선택
+          </button>
+        </div>
         <button onClick={openDashboard}
           className="w-full flex items-center gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
           title="크레딧 사용량 대시보드 열기 (외부 브라우저)">

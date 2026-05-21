@@ -18,4 +18,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   backupSave: (content) => ipcRenderer.invoke('backup-save', content),
   backupLoad: () => ipcRenderer.invoke('backup-load'),
   backupInfo: () => ipcRenderer.invoke('backup-info'),
+  // Download folder (session-only — resets to OS Downloads on app restart)
+  getDownloadDir: () => ipcRenderer.invoke('get-download-dir'),
+  pickDownloadDir: () => ipcRenderer.invoke('pick-download-dir'),
+  saveBlob: (payload) => ipcRenderer.invoke('save-blob', payload),
 });

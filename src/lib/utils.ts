@@ -328,6 +328,22 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
   // Fast path: serve from in-memory blob (instant, no CDN round-trip)
   const cached = blobCache.get(remoteUrl);
   if (cached) {
+    const api = (window as any).electronAPI;
+    // Electron: write the blob straight into the session download folder via
+    // main process. <a download> would otherwise land in the browser's default
+    // folder, ignoring the user's chosen folder.
+    if (api?.saveBlob) {
+      try {
+        const buffer = await cached.arrayBuffer();
+        const r = await api.saveBlob({ filename, buffer });
+        if (r?.ok) {
+          window.dispatchEvent(new CustomEvent('seedance:download-instant', { detail: { filename, size: cached.size } }));
+          return;
+        }
+        // saveBlob failed → fall through to anchor download
+      } catch { /* fall through to anchor download */ }
+    }
+    // Browser/dev fallback: anchor download (browser's default folder)
     const blobUrl = URL.createObjectURL(cached);
     const a = document.createElement('a');
     a.href = blobUrl;

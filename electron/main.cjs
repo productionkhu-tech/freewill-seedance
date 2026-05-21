@@ -72,9 +72,11 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
-  // Auto-save downloads to Downloads folder. In-app toasts handle all UI feedback (no Windows balloons).
+  // Auto-save downloads. Target folder = session-only override (sessionDownloadDir)
+  // or the OS Downloads folder by default. The override resets to default every
+  // time the app restarts (sessionDownloadDir is in-memory, never persisted).
   mainWindow.webContents.session.on('will-download', (event, item) => {
-    const downloadsPath = app.getPath('downloads');
+    const downloadsPath = sessionDownloadDir || app.getPath('downloads');
     const url = item.getURL();
     const customName = pendingDownloads.get(url);
     if (customName) pendingDownloads.delete(url);
@@ -157,6 +159,51 @@ function setupAutoUpdater() {
 
   if (!isDev) autoUpdater.checkForUpdates().catch(() => {});
 }
+
+// ─── Download folder (session-only) ───
+// Holds the user-chosen download directory for the CURRENT app session only.
+// null → fall back to the OS Downloads folder. Never persisted to disk, so a
+// restart always returns to the default. Used by will-download + save-blob.
+let sessionDownloadDir = null;
+
+ipcMain.handle('get-download-dir', async () => {
+  return {
+    dir: sessionDownloadDir || app.getPath('downloads'),
+    isDefault: !sessionDownloadDir,
+  };
+});
+
+ipcMain.handle('pick-download-dir', async () => {
+  if (!mainWindow) return { ok: false, error: 'window not ready' };
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '다운로드 폴더 선택',
+      defaultPath: sessionDownloadDir || app.getPath('downloads'),
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || !result.filePaths || !result.filePaths.length) {
+      return { ok: false, canceled: true };
+    }
+    sessionDownloadDir = result.filePaths[0];
+    return { ok: true, dir: sessionDownloadDir };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// Write an in-memory blob (blobCache fast-path download) straight to the
+// session download folder. Without this, blobCache hits would go to the
+// browser's default folder via <a download>, bypassing the chosen folder.
+ipcMain.handle('save-blob', async (_e, { filename, buffer }) => {
+  try {
+    const dir = sessionDownloadDir || app.getPath('downloads');
+    const savePath = path.join(dir, filename);
+    fs.writeFileSync(savePath, Buffer.from(buffer));
+    return { ok: true, path: savePath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
 // ─── IPC: direct downloads (bypass server proxy for speed) ───
 const pendingDownloads = new Map(); // url → custom filename
