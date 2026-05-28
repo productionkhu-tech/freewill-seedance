@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useAppStore, AssetRole } from '../store';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
 import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath } from '../lib/utils';
@@ -205,6 +205,59 @@ const renderMessageContent = (content: string, namedAssets: any[]) => {
     return <span key={i}>{part}</span>;
   });
 };
+
+/* ─── Collapsible prompt: 1-line truncated by default, expand/collapse + copy ─── */
+function CollapsiblePrompt({ promptText, namedAssets }: { promptText: string; namedAssets: any[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard API can fail on insecure contexts — silently noop, UI just won't flash check
+    }
+  };
+
+  const toggleExpand = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded(v => !v);
+  };
+
+  return (
+    <div className="flex items-start gap-2 min-w-0 w-full">
+      <div
+        className={
+          'flex-1 min-w-0 text-[14px] text-gray-800 font-medium leading-relaxed ' +
+          (expanded ? 'whitespace-pre-wrap break-words' : 'truncate')
+        }
+      >
+        {renderMessageContent(promptText, namedAssets)}
+      </div>
+      <div className="flex items-center gap-0.5 shrink-0 -mt-0.5">
+        <button
+          onClick={toggleExpand}
+          className="p-1 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors"
+          title={expanded ? '접기' : '펼치기'}
+          aria-label={expanded ? '프롬프트 접기' : '프롬프트 펼치기'}
+        >
+          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+        <button
+          onClick={handleCopy}
+          className="p-1 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded transition-colors"
+          title={copied ? '복사됨!' : '프롬프트 복사'}
+          aria-label="프롬프트 복사"
+        >
+          {copied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /* ─── Main Component ─── */
 export function ChatArea() {
@@ -1049,7 +1102,7 @@ export function ChatArea() {
                     {/* Card Header */}
                     <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-gray-50/80 to-white">
                       <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 flex flex-col sm:flex-row gap-3">
+                        <div className="flex-1 min-w-0 flex flex-col sm:flex-row gap-3">
                           {msg.usedAssets?.length > 0 && (
                             <div className="flex items-center gap-1.5 shrink-0">
                               {msg.usedAssets.map((asset: any, i: number) => (
@@ -1069,7 +1122,9 @@ export function ChatArea() {
                             </div>
                           )}
                           <div className="flex-1 min-w-0">
-                            <div className="text-[14px] text-gray-800 font-medium whitespace-pre-wrap leading-relaxed">{msg.promptText ? renderMessageContent(msg.promptText, getAssetNames((msg.usedAssets as any) || [])) : '프롬프트 없음'}</div>
+                            {msg.promptText
+                              ? <CollapsiblePrompt promptText={msg.promptText} namedAssets={getAssetNames((msg.usedAssets as any) || [])} />
+                              : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
                                 {[msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, `${msg.usedSettings.duration}s`].map((tag, i) => (
