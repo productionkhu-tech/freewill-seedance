@@ -143,8 +143,14 @@ export function validateVideoFile(file: File): Promise<string | null> {
   return new Promise((resolve) => {
     const sizeMB = file.size / (1024 * 1024);
     if (sizeMB > API_LIMITS.video.maxSizeMB) { resolve(`비디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${API_LIMITS.video.maxSizeMB}MB)`); return; }
-    const validTypes = ['video/mp4', 'video/quicktime'];
-    if (!validTypes.includes(file.type)) { resolve(`지원하지 않는 형식: ${file.type} (지원: MP4, MOV)`); return; }
+    // Accept by MIME, but fall back to file extension when the OS reports an
+    // empty type — Windows without QuickTime gives file.type='' for .mov, which
+    // would otherwise be rejected here even though the codec is fine.
+    const validTypes = ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v'];
+    const extOk = /\.(mp4|mov|m4v|webm)$/i.test(file.name);
+    if (!validTypes.includes(file.type) && !(file.type === '' && extOk)) {
+      resolve(`지원하지 않는 형식: ${file.type || '(알 수 없음)'} (지원: MP4, MOV)`); return;
+    }
     const video = document.createElement('video');
     video.preload = 'metadata';
     video.onloadedmetadata = () => {

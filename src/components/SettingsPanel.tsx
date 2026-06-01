@@ -435,7 +435,7 @@ export function SettingsPanel() {
                     &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3 (개당 15MB, 2~15초)
                   </p>
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
-                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', true, assets.filter(a => a.type === 'video_url').length >= 3)}
+                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= 3)}
                   {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', true, assets.filter(a => a.type === 'audio_url').length >= 3)}
                 </div>
               )}
@@ -446,8 +446,8 @@ export function SettingsPanel() {
                   {(() => {
                     const existingVideo = assets.find(a => a.type === 'video_url');
                     return existingVideo
-                      ? renderReplaceButton('비디오 교체', existingVideo, 'video/mp4,video/quicktime')
-                      : renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', false, false);
+                      ? renderReplaceButton('비디오 교체', existingVideo, 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm')
+                      : renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', false, false);
                   })()}
                   {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= 3)}
                 </div>
@@ -458,7 +458,7 @@ export function SettingsPanel() {
                   <p className="text-[12px] text-gray-500 leading-tight">
                     비디오: {assets.filter(a => a.type === 'video_url').length}/3 (최대 3개 이어붙이기)
                   </p>
-                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime', true, assets.filter(a => a.type === 'video_url').length >= 3)}
+                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= 3)}
                 </div>
               )}
             </motion.div>

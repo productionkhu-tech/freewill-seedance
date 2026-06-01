@@ -494,7 +494,10 @@ export function ChatArea() {
             addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
 
-        } else if (file.type.startsWith('video/')) {
+        } else if (file.type.startsWith('video/') || (!file.type && /\.(mp4|mov|m4v|webm)$/i.test(file.name))) {
+          // MIME fallback: Windows without QuickTime reports file.type='' for .mov,
+          // which would drop it into the "unsupported" bucket. Trust the extension;
+          // the <video> metadata decode in validateVideoFile is the real gatekeeper.
           if (mode === 'image_to_video_first' || mode === 'image_to_video_first_last') {
             rejected.push(`${file.name}: 이 모드는 이미지만 받습니다.`); continue;
           }
