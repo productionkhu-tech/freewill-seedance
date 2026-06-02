@@ -137,7 +137,7 @@ npx electron-builder --win --publish always
 | 9팀 | e18a3821 |
 | 10팀 | 6b26237c |
 | AFX팀 | 2de035f8 |
-| 2D팀 | 9e081469 |
+| TA팀 (구 2D팀) | 9e081469 |
 | Special팀 | 9a7cd59c |
 
 원본 매핑: `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\api key\key.xlsx`
