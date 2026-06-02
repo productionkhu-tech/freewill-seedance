@@ -119,7 +119,7 @@ cd "C:/Users/user/Desktop/기획 파일/TA/앱개발/시댄스 api/26.04.15"
 # 3) 빌드 + 키 검증 + publish
 export GH_TOKEN="<사용자가 보관하는 토큰 — 평문 기록 금지>"
 SEEDANCE_API_KEY=test node scripts/build.cjs
-grep -c "ccc0f342\|ef3aaa5c\|3b9715e5\|1654a923\|429c43a3\|32a18b43\|f1148313\|83f240c3\|e18a3821\|6b26237c\|2de035f8\|9e081469\|9a7cd59c" dist-server/server.cjs  # 0이어야 함
+grep -c "ccc0f342\|ef3aaa5c\|3b9715e5\|1654a923\|429c43a3\|32a18b43\|f1148313\|83f240c3\|e18a3821\|6b26237c\|2de035f8\|9e081469\|9a7cd59c\|a88517f4" dist-server/server.cjs  # 0이어야 함
 npx electron-builder --win --publish always
 ```
 
@@ -139,6 +139,7 @@ npx electron-builder --win --publish always
 | AFX팀 | 2de035f8 |
 | TA팀 (구 2D팀) | 9e081469 |
 | Special팀 | 9a7cd59c |
+| AIP팀 | a88517f4 |
 
 원본 매핑: `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\api key\key.xlsx`
 
