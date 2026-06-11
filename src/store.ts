@@ -69,6 +69,8 @@ export interface Asset {
   role: AssetRole;
   file_name?: string;
   cacheId?: string;
+  durationSec?: number;  // measured at attach (video/audio) — enforces the 15s
+                         // combined-duration cap across reference videos/audios
   thumbnailUrl?: string; // small base64 preview for image assets (avoids re-fetch)
   originalPath?: string; // Electron absolute path of the source file — last-resort
                          // recovery when both the server media-cache entry and the

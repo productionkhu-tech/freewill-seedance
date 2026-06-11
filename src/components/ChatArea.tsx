@@ -3,7 +3,7 @@ import { useAppStore, AssetRole } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath } from '../lib/utils';
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -515,6 +515,12 @@ export function ChatArea() {
           }
           const vidErr = await validateVideoFile(file);
           if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
+          const vidDuration = await getMediaDurationSec(file, 'video');
+          // Combined cap: all reference videos in one request ≤ 15s total.
+          // When replacing, the outgoing video's duration doesn't count.
+          const vidOthers = shouldReplace ? assets.filter(a => a.id !== existingVideos[0].id) : assets;
+          const vidTotErr = totalDurationError(vidOthers, 'video_url', vidDuration);
+          if (vidTotErr) { rejected.push(`${file.name}: ${vidTotErr}`); continue; }
           try {
             const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
             const originalPath = getFilePath(file);
@@ -524,10 +530,11 @@ export function ChatArea() {
               const existing = existingVideos[0];
               useAppStore.getState().replaceAsset(project.id, existing.id, {
                 url: '', file_name: file.name, cacheId, thumbnailUrl,
+                durationSec: vidDuration ?? undefined,
                 ...(originalPath ? { originalPath } : {}),
               });
             } else {
-              addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+              addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(vidDuration != null ? { durationSec: vidDuration } : {}), ...(originalPath ? { originalPath } : {}) });
             }
           } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
 
@@ -540,11 +547,15 @@ export function ChatArea() {
           if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
           const audErr = await validateAudioFile(file);
           if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
+          const audDuration = await getMediaDurationSec(file, 'audio');
+          // Combined cap: all reference audio in one request ≤ 15s total
+          const audTotErr = totalDurationError(assets, 'audio_url', audDuration);
+          if (audTotErr) { rejected.push(`${file.name}: ${audTotErr}`); continue; }
           try {
             const originalPath = getFilePath(file);
             // Attach → media-cache only (R2 upload deferred to send time)
             const cacheId = await cacheFile(file);
-            addAsset(project.id, { type: 'audio_url', url: '', role: 'reference_audio', file_name: file.name, cacheId, ...(originalPath ? { originalPath } : {}) });
+            addAsset(project.id, { type: 'audio_url', url: '', role: 'reference_audio', file_name: file.name, cacheId, ...(audDuration != null ? { durationSec: audDuration } : {}), ...(originalPath ? { originalPath } : {}) });
           } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
         } else {
           rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
@@ -777,6 +788,18 @@ export function ChatArea() {
     }
     if ((mode === 'edit_video' || mode === 'extend_video') && !project.assets.some(a => a.type === 'video_url')) {
       alert('비디오를 첨부해주세요.'); return;
+    }
+    // API rule: audio can never be the only reference — at least one image or
+    // video must accompany it. Only multimodal can reach this state (other
+    // modes either reject audio or already require an image/video above).
+    if (mode === 'multimodal_reference' && project.assets.length > 0 && project.assets.every(a => a.type === 'audio_url')) {
+      alert('오디오만으로는 생성할 수 없습니다.\n이미지 또는 비디오를 최소 1개 함께 첨부해주세요.'); return;
+    }
+    // Re-check combined reference durations at send time — assets can arrive
+    // via reuse/restore without passing through the attach-time check.
+    for (const refType of ['video_url', 'audio_url'] as const) {
+      const totErr = totalDurationError(project.assets, refType, null);
+      if (totErr) { alert(totErr); return; }
     }
 
     const currentSettings = { ...project.settings };

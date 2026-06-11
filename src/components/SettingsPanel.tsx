@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
+import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
@@ -208,9 +208,15 @@ export function SettingsPanel() {
           } else {
             const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
+            // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s
+            // total. Read fresh assets — earlier loop iterations add to them.
+            const durationSec = await getMediaDurationSec(file, type === 'video_url' ? 'video' : 'audio');
+            const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
+            const totErr = totalDurationError(freshAssets, type, durationSec);
+            if (totErr) { rejected.push(`${file.name}: ${totErr}`); continue; }
             const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
             const cacheId = await cacheFile(file);
-            addAsset(project.id, { type, url: '', role, file_name: file.name, cacheId, ...(thumbnailUrl ? { thumbnailUrl } : {}), ...(originalPath ? { originalPath } : {}) });
+            addAsset(project.id, { type, url: '', role, file_name: file.name, cacheId, ...(durationSec != null ? { durationSec } : {}), ...(thumbnailUrl ? { thumbnailUrl } : {}), ...(originalPath ? { originalPath } : {}) });
           }
         } catch (e: any) {
           console.error('Failed to process file:', e);
@@ -242,6 +248,12 @@ export function SettingsPanel() {
       } else {
         const vErr = existing.type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
         if (vErr) { alert(vErr); return; }
+        // Combined 15s cap — the asset being swapped out doesn't count
+        const durationSec = await getMediaDurationSec(file, existing.type === 'video_url' ? 'video' : 'audio');
+        const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
+        const totErr = totalDurationError(freshAssets.filter(a => a.id !== existing.id), existing.type, durationSec);
+        if (totErr) { alert(totErr); return; }
+        updates.durationSec = durationSec ?? undefined;
         if (existing.type === 'video_url') {
           updates.thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
         }

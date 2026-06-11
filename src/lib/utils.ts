@@ -95,9 +95,14 @@ export function showNotification(title: string, options?: NotificationOptions) {
 
 // BytePlus API limits
 export const API_LIMITS = {
-  image: { maxSizeMB: 30, minPx: 300, maxPx: 6000 },
-  video: { maxSizeMB: 50, minDuration: 2, maxDuration: 15, minPx: 300, maxPx: 6000 },
-  audio: { maxSizeMB: 15, minDuration: 2, maxDuration: 15 },
+  image: { maxSizeMB: 30, minPx: 300, maxPx: 6000, minRatio: 0.4, maxRatio: 2.5 },
+  video: {
+    maxSizeMB: 50, minDuration: 2, maxDuration: 15, maxTotalDuration: 15,
+    minPx: 300, maxPx: 6000, minRatio: 0.4, maxRatio: 2.5,
+    // width×height must fall in [640×640, 2206×946] — 1080p (1920×1080) fits
+    minTotalPx: 409600, maxTotalPx: 2086876,
+  },
+  audio: { maxSizeMB: 15, minDuration: 2, maxDuration: 15, maxTotalDuration: 15 },
   totalRequestMB: 64,
 };
 
@@ -124,11 +129,15 @@ export function validateImageDimensions(source: File | string): Promise<string |
     img.onload = () => {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       const { width, height } = img;
-      const { minPx, maxPx } = API_LIMITS.image;
+      const { minPx, maxPx, minRatio, maxRatio } = API_LIMITS.image;
+      const ratio = width / height;
       if (width < minPx || height < minPx) {
         resolve(`이미지 해상도 너무 작음: ${width}x${height} (최소 ${minPx}x${minPx})`);
       } else if (width > maxPx || height > maxPx) {
         resolve(`이미지 해상도 초과: ${width}x${height} (최대 ${maxPx}x${maxPx})`);
+      } else if (ratio <= minRatio || ratio >= maxRatio) {
+        // API rule: aspect ratio (w/h) must be strictly inside (0.4, 2.5)
+        resolve(`이미지 비율 벗어남: ${ratio.toFixed(2)} (가로÷세로가 0.4~2.5 사이여야 합니다)`);
       } else {
         resolve(null);
       }
@@ -161,12 +170,22 @@ export function validateVideoFile(file: File): Promise<string | null> {
       const d = video.duration;
       if (d < API_LIMITS.video.minDuration) { resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`); return; }
       if (d > API_LIMITS.video.maxDuration) { resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.maxDuration}초)`); return; }
-      // Check resolution (480p~720p → height roughly 480~1280)
+      // Check dimensions per API rules: each side 300–6000px, w/h ratio in
+      // [0.4, 2.5], total pixels in [640×640, 2206×946] (1080p input is allowed)
       const h = video.videoHeight;
       const w = video.videoWidth;
       if (h > 0 && w > 0) {
-        const shortSide = Math.min(h, w);
-        if (shortSide > 1280) { resolve(`비디오 해상도 초과: ${w}x${h} (720p 이하로 줄여주세요)`); return; }
+        const { minPx, maxPx, minRatio, maxRatio, minTotalPx, maxTotalPx } = API_LIMITS.video;
+        if (w < minPx || h < minPx || w > maxPx || h > maxPx) {
+          resolve(`비디오 해상도 범위 초과: ${w}x${h} (각 변 ${minPx}~${maxPx}px)`); return;
+        }
+        const ratio = w / h;
+        if (ratio < minRatio || ratio > maxRatio) {
+          resolve(`비디오 비율 벗어남: ${ratio.toFixed(2)} (가로÷세로가 0.4~2.5 사이여야 합니다)`); return;
+        }
+        const totalPx = w * h;
+        if (totalPx < minTotalPx) { resolve(`비디오 해상도 너무 작음: ${w}x${h} (최소 640x640 상당)`); return; }
+        if (totalPx > maxTotalPx) { resolve(`비디오 해상도 초과: ${w}x${h} (최대 1080p — 1920x1080 상당까지)`); return; }
       }
       resolve(null);
     };
@@ -197,6 +216,42 @@ export function validateAudioFile(file: File): Promise<string | null> {
     audio.onerror = () => { URL.revokeObjectURL(audio.src); resolve(null); };
     audio.src = URL.createObjectURL(file);
   });
+}
+
+// Read the duration (seconds) of a local video/audio file. Returns null when
+// metadata can't be decoded — callers treat unknown as "don't block" and let
+// the API be the final validator.
+export function getMediaDurationSec(file: File, kind: 'video' | 'audio'): Promise<number | null> {
+  return new Promise((resolve) => {
+    const el = document.createElement(kind);
+    el.preload = 'metadata';
+    el.onloadedmetadata = () => {
+      URL.revokeObjectURL(el.src);
+      resolve(Number.isFinite(el.duration) ? el.duration : null);
+    };
+    el.onerror = () => { URL.revokeObjectURL(el.src); resolve(null); };
+    el.src = URL.createObjectURL(file);
+  });
+}
+
+// API rule: the combined duration of ALL reference videos in one request must
+// not exceed 15s; same cap applies separately to reference audio. durationSec
+// is only known for assets attached after this build — unknown ones are
+// skipped here (the API still validates server-side).
+export function totalDurationError(
+  existing: { type: string; durationSec?: number }[],
+  type: 'video_url' | 'audio_url',
+  addingSec: number | null,
+): string | null {
+  const limit = type === 'video_url' ? API_LIMITS.video.maxTotalDuration : API_LIMITS.audio.maxTotalDuration;
+  const total = existing
+    .filter(a => a.type === type && typeof a.durationSec === 'number')
+    .reduce((sum, a) => sum + (a.durationSec as number), 0) + (addingSec ?? 0);
+  if (total > limit + 0.001) {
+    const label = type === 'video_url' ? '비디오' : '오디오';
+    return `${label} 합산 길이 초과: ${total.toFixed(1)}초 (모든 ${label} 합산 최대 ${limit}초)`;
+  }
+  return null;
 }
 
 // Cache file locally on server (for reuse) → returns cacheId
