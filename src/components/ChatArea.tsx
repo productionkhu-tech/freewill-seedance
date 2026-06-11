@@ -1055,7 +1055,7 @@ export function ChatArea() {
               )}
               {previewItem.usedSettings && (
                 <div className="flex flex-wrap gap-2">
-                  {[previewItem.usedSettings.mode, previewItem.usedSettings.resolution, previewItem.usedSettings.ratio, `${previewItem.usedSettings.duration}s`].map((tag, i) => (
+                  {[previewItem.usedSettings.mode, previewItem.usedSettings.resolution, previewItem.usedSettings.ratio, previewItem.usedSettings.duration === -1 ? 'Auto' : `${previewItem.usedSettings.duration}s`].map((tag, i) => (
                     <span key={i} className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded-full text-[11px] font-medium">{tag}</span>
                   ))}
                 </div>
@@ -1154,7 +1154,7 @@ export function ChatArea() {
                               : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
-                                {[msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, `${msg.usedSettings.duration}s`].map((tag, i) => (
+                                {[msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, msg.usedSettings.duration === -1 ? 'Auto' : `${msg.usedSettings.duration}s`].map((tag, i) => (
                                   <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full text-[10px] font-medium">{tag}</span>
                                 ))}
                               </div>

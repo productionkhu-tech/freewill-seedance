@@ -348,11 +348,19 @@ export function SettingsPanel() {
           </div>
 
           <div className="space-y-2">
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
-              <span className="text-[12px] text-gray-500">{settings.duration}s</span>
+              <div className="flex items-center gap-2">
+                {/* duration -1 = API 지능형 길이 선택 (모델이 4~15초 중 자동 결정) */}
+                <button
+                  onClick={() => updateProjectSettings(project.id, { duration: settings.duration === -1 ? 5 : -1 })}
+                  className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${settings.duration === -1 ? 'bg-[#0071e3] text-white border-[#0071e3]' : 'bg-white text-gray-400 border-gray-300 hover:border-gray-400 hover:text-gray-600'}`}
+                >Auto</button>
+                <span className="text-[12px] text-gray-500">{settings.duration === -1 ? '모델 자동' : `${settings.duration}s`}</span>
+              </div>
             </div>
-            <input type="range" min="4" max="15" value={settings.duration} onChange={(e) => updateProjectSettings(project.id, { duration: parseInt(e.target.value) })} className="w-full accent-[#0071e3]" />
+            <input type="range" min="4" max="15" value={settings.duration === -1 ? 5 : settings.duration} disabled={settings.duration === -1} onChange={(e) => updateProjectSettings(project.id, { duration: parseInt(e.target.value) })} className={`w-full accent-[#0071e3] ${settings.duration === -1 ? 'opacity-40 cursor-not-allowed' : ''}`} />
+            {settings.duration === -1 && <p className="text-[11px] text-gray-400">모델이 콘텐츠에 맞는 길이(4~15초)를 자동 선택합니다. 길이에 따라 과금이 달라지니 주의.</p>}
           </div>
 
           <div className="space-y-2">

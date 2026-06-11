@@ -431,9 +431,12 @@ export const useAppStore = create<AppState>()(
           const state = useAppStore.getState();
           const patched = state.projects.map(p => {
             const s = { ...defaultSettings, ...p.settings };
-            // Clamp duration to seedance 2.0 range (4–15)
-            if (s.duration < 4) s.duration = 4;
-            if (s.duration > 15) s.duration = 15;
+            // Clamp duration to seedance 2.0 range (4–15); -1 = Auto (model
+            // picks the length itself — valid API value, don't clamp it)
+            if (s.duration !== -1) {
+              if (s.duration < 4) s.duration = 4;
+              if (s.duration > 15) s.duration = 15;
+            }
             // Clamp resolution to supported values
             if (!validResolutions.includes(s.resolution)) s.resolution = '720p';
             // Clear in-progress draft prompts on app restart (session-only persistence)
