@@ -275,8 +275,10 @@ export function ChatArea() {
   const [mentionState, setMentionState] = useState<{ active: boolean, query: string }>({ active: false, query: '' });
   const mentionIndexRef = useRef(0);
   const contentEditableRef = useRef<HTMLDivElement>(null);
-  // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적
-  const pasteCycleRef = useRef<'first_frame' | 'last_frame'>('first_frame');
+  // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적.
+  // 슬롯 id를 함께 저장해서, 슬롯이 다른 경로(피커·삭제 후 재추가·프로젝트
+  // 전환)로 바뀌었으면 사이클을 버리고 무조건 first부터 다시 시작한다.
+  const pasteCycleRef = useRef<{ firstId: string; lastId: string; next: 'first_frame' | 'last_frame' } | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const previousProjectIdRef = useRef<string | null>(null);
@@ -713,22 +715,27 @@ export function ChatArea() {
             addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl });
           }
         } else if (mode === 'image_to_video_first_last') {
-          // 빈 슬롯부터 채우고(first → last), 둘 다 차면 first/last 번갈아 교체
+          // 빈 슬롯부터 채우고(first → last), 둘 다 차면 first → last → first …
+          // 순서로 번갈아 교체. 교체 사이클은 항상 first부터 시작한다.
           const thumbnailUrl = await createThumbnail(file);
           const cacheId = await cacheFile(file);
           const first = assets.find(a => a.role === 'first_frame');
           const last = assets.find(a => a.role === 'last_frame');
           if (!first) {
             addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl });
-            pasteCycleRef.current = 'first_frame';
+            pasteCycleRef.current = null; // 슬롯 구성 변경 → 사이클 리셋
           } else if (!last) {
             addAsset(project.id, { type: 'image_url', url: '', role: 'last_frame', file_name: file.name, cacheId, thumbnailUrl });
-            pasteCycleRef.current = 'first_frame';
+            pasteCycleRef.current = null;
           } else {
-            const targetRole = pasteCycleRef.current;
+            const cycle = pasteCycleRef.current;
+            // 마지막 붙여넣기 이후 슬롯이 바뀌었으면(피커로 채움, 재추가 등)
+            // 이어가지 않고 first부터 새로 시작
+            const stale = !cycle || cycle.firstId !== first.id || cycle.lastId !== last.id;
+            const targetRole = stale ? 'first_frame' : cycle.next;
             const target = targetRole === 'first_frame' ? first : last;
             useAppStore.getState().replaceAsset(project.id, target.id, { url: '', file_name: file.name, cacheId, thumbnailUrl });
-            pasteCycleRef.current = targetRole === 'first_frame' ? 'last_frame' : 'first_frame';
+            pasteCycleRef.current = { firstId: first.id, lastId: last.id, next: targetRole === 'first_frame' ? 'last_frame' : 'first_frame' };
           }
         } else {
           // multimodal_reference / edit_video — 레퍼런스 이미지 최대 9장, 초과 시 기존 유지
@@ -1368,7 +1375,7 @@ export function ChatArea() {
                   {filteredMentionAssets.map((asset, idx) => (
                     <button key={asset.id} onClick={() => insertMention(asset)}
                       className={`mention-item w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-indigo-50 transition-none ${idx === mentionIndexRef.current ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700'}`}>
-                      {asset.type === 'image_url' ? <img src={asset.url} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" /> : asset.type === 'video_url' ? <div className="w-6 h-6 bg-purple-50 flex items-center justify-center rounded shrink-0"><Video size={14} className="text-purple-500" /></div> : <div className="w-6 h-6 bg-green-50 flex items-center justify-center rounded shrink-0"><Music size={14} className="text-green-500" /></div>}
+                      {asset.type === 'image_url' && (asset.thumbnailUrl || asset.url) ? <img src={asset.thumbnailUrl || asset.url} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" /> : asset.type === 'image_url' ? <div className="w-6 h-6 bg-blue-50 flex items-center justify-center rounded shrink-0"><ImageIcon size={14} className="text-blue-500" /></div> : asset.type === 'video_url' ? <div className="w-6 h-6 bg-purple-50 flex items-center justify-center rounded shrink-0"><Video size={14} className="text-purple-500" /></div> : <div className="w-6 h-6 bg-green-50 flex items-center justify-center rounded shrink-0"><Music size={14} className="text-green-500" /></div>}
                       <span className="font-medium">[{asset.name}]</span>
                       <span className="text-xs text-gray-400 ml-auto">{asset.role}</span>
                     </button>
