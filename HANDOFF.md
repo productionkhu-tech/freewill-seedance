@@ -12,7 +12,7 @@
 |------|------|
 | 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
 | GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.1206** (2026-06-12 배포) |
+| 현재 버전 | **v26.6.1207** (2026-06-12 배포) |
 | 사용자 | 김현우 / Studio Freewillusion TA |
 | 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
 | 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
@@ -23,6 +23,7 @@
 
 | 버전 | 날짜 | 핵심 변경 |
 |------|------|----------|
+| **26.6.1207** | 06-12 | **media-cache LRU 수명 연장 + 캐시 정리 전체화** — ① `touchCache()`: 캐시 읽기/dedup히트/재업로드마다 mtime 갱신 → 30일 청소가 "안 쓰는 것만" 제거 (자주 재사용하는 레퍼런스는 영구 보존). ② 사이드바 캐시 정리 버튼이 media-cache까지 전부 삭제 (`POST /api/cache/clear`) — 경고문에 클립보드 첨부 복구 불가 명시. `GET /api/cache/stats` 신설 (⚠ `:cacheId` 라우트보다 먼저 등록 필수) |
 | **26.6.1206** | 06-12 | **first_last 붙여넣기 사이클 first부터 보장** — pasteCycleRef를 슬롯 id와 묶어 저장({firstId,lastId,next}). 슬롯이 피커·재추가 등 다른 경로로 바뀌면 사이클 무효화하고 무조건 first부터. 1205의 전역 포인터가 stale 상태로 last부터 교체하던 버그 수정 |
 | **26.6.1205** | 06-12 | **클립보드 이미지 붙여넣기 → 에셋 첨부** — 프롬프트창에 이미지가 HTML로 박히던 참사 차단(`handlePromptPaste`). 모드별 라우팅: t2v·extend=차단 알림, first=추가→교체, first_last=빈 슬롯 채우고 이후 first/last 번갈아 교체(`pasteCycleRef`), multimodal·edit=reference_image 9장 캡(초과 시 경고+기존 유지). 텍스트 붙여넣기는 기본 동작 유지 |
 | **26.6.1204** | 06-12 | **persist 즉시 플러시** — 1.5s 디바운스 쓰기 도중 종료/자동업데이트 재시작 시 상태 유실되던 갭 차단. `flushPersist()` 신설: 다운로드 마킹 직후 + visibilitychange(hidden) + pagehide에서 강제 플러시. downloadedAt 유실 방지가 목적이지만 모든 상태에 적용되는 안전망 |

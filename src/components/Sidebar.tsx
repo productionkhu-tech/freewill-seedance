@@ -67,16 +67,30 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const handleClearCache = async () => {
     const api = (window as any).electronAPI;
     if (!api?.clearCache) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
-    const total = formatBytes(totalCacheBytes);
     const disk = formatBytes(diskCacheSize ?? 0);
     const mem = formatBytes(memCacheBytes);
-    const ok = confirm(`총 ${total} 캐시를 비울까요?\n\n• 디스크: ${disk} (브라우저 HTTP 캐시)\n• 메모리: ${mem} (영상 사전 다운로드 풀)\n\n다운로드 받은 mp4 파일은 영향 없습니다.`);
+    // 레퍼런스 캐시(media-cache) 크기 — 서버에서 조회
+    let mediaStats = { count: 0, bytes: 0 };
+    try { const r = await fetch('/api/cache/stats'); if (r.ok) mediaStats = await r.json(); } catch {}
+    const total = formatBytes(totalCacheBytes + mediaStats.bytes);
+    const ok = confirm(
+      `총 ${total} 캐시를 전부 비울까요?\n\n` +
+      `• 디스크: ${disk} (브라우저 HTTP 캐시)\n` +
+      `• 메모리: ${mem} (영상 사전 다운로드 풀)\n` +
+      `• 레퍼런스 캐시: ${formatBytes(mediaStats.bytes)} (${mediaStats.count}개 — 재사용용 원본 보관소)\n\n` +
+      `⚠ 레퍼런스 캐시를 지우면 과거 메시지 재사용 시 클립보드로 붙여넣었던 ` +
+      `이미지는 복구할 수 없습니다. (파일로 첨부한 것은 원본 경로에서 복구 시도)\n\n` +
+      `다운로드 받은 mp4 파일은 영향 없습니다.`
+    );
     if (!ok) return;
     clearBlobCache();
     setMemCacheBytes(0);
+    // 레퍼런스 캐시(media-cache) — 얄짤없이 전부 삭제
+    let mediaOk = true;
+    try { const r = await fetch('/api/cache/clear', { method: 'POST' }); mediaOk = r.ok && (await r.json()).ok; } catch { mediaOk = false; }
     const result = await api.clearCache();
-    if (result.ok) { setDiskCacheSize(0); alert('캐시를 비웠습니다.'); }
-    else alert(`디스크 캐시 비우기 실패: ${result.error || ''}\n메모리 캐시는 비웠습니다.`);
+    if (result.ok && mediaOk) { setDiskCacheSize(0); alert('캐시를 전부 비웠습니다. (레퍼런스 캐시 포함)'); }
+    else alert(`일부 캐시 비우기 실패${!mediaOk ? ' — 레퍼런스 캐시' : ''}${!result.ok ? ' — 브라우저 캐시: ' + (result.error || '') : ''}\n나머지는 비웠습니다.`);
   };
 
   useEffect(() => {

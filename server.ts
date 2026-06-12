@@ -202,7 +202,9 @@ async function startServer() {
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
   console.log(`[Cache] Using ${CACHE_DIR}`);
 
-  // Cleanup files older than 30 days
+  // Cleanup files older than 30 days — mtime-based. Every cache READ/dedup-hit
+  // refreshes mtime (touchCache below), so actively reused references never
+  // age out; only genuinely unused files get pruned here.
   const CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
   try {
     const now = Date.now();
@@ -212,6 +214,11 @@ async function startServer() {
       if (age > CACHE_MAX_AGE_MS) { fs.unlinkSync(fp); console.log(`[Cache] Deleted old file: ${f}`); }
     }
   } catch {};
+
+  // LRU lifetime extension: any use of a cache entry resets its 30-day clock
+  function touchCache(cachePath: string) {
+    try { const now = new Date(); fs.utimesSync(cachePath, now, now); } catch { /* best-effort */ }
+  }
 
   function mimeFromExt(ext: string): string {
     const v = ext.toLowerCase();
@@ -269,13 +276,45 @@ async function startServer() {
     const cacheId = `${hash}${ext}`;
     const cachePath = path.join(CACHE_DIR, cacheId);
     if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, req.body);
+    else touchCache(cachePath); // dedup hit = 재사용 → 30일 시계 리셋
     res.json({ cacheId });
+  });
+
+  // Cache stats (count + bytes) — for the cleanup confirm dialog.
+  // NOTE: must be registered BEFORE /api/cache/:cacheId or it matches as cacheId.
+  app.get('/api/cache/stats', (_req, res) => {
+    try {
+      let count = 0, bytes = 0;
+      for (const f of fs.readdirSync(CACHE_DIR)) {
+        const st = fs.statSync(path.join(CACHE_DIR, f));
+        if (st.isFile()) { count++; bytes += st.size; }
+      }
+      res.json({ count, bytes });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Wipe the ENTIRE media-cache. Wired to the sidebar cleanup button — explicit
+  // cleanup means full cleanup (user decision). Old messages' clipboard
+  // references become unrecoverable; file references can still recover via
+  // originalPath at reuse time.
+  app.post('/api/cache/clear', (_req, res) => {
+    try {
+      let deleted = 0, bytes = 0;
+      for (const f of fs.readdirSync(CACHE_DIR)) {
+        const fp = path.join(CACHE_DIR, f);
+        const st = fs.statSync(fp);
+        if (st.isFile()) { bytes += st.size; fs.unlinkSync(fp); deleted++; }
+      }
+      console.log(`[Cache] Cleared by user: ${deleted} files, ${(bytes / 1024 / 1024).toFixed(1)}MB`);
+      res.json({ ok: true, deleted, bytes });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
   // Read cached file
   app.get('/api/cache/:cacheId', (req, res) => {
     const cachePath = path.join(CACHE_DIR, req.params.cacheId);
     if (!fs.existsSync(cachePath)) return res.status(404).json({ error: 'File not found in cache' });
+    touchCache(cachePath); // 읽기도 사용 → 30일 시계 리셋
     res.sendFile(cachePath);
   });
 
@@ -302,6 +341,7 @@ async function startServer() {
       if (!fs.existsSync(cachePath)) {
         return res.status(404).json({ error: 'Cached file not found. Please re-attach the file.' });
       }
+      touchCache(cachePath); // 전송에 쓰임 → 30일 시계 리셋
       const fileBuffer = fs.readFileSync(cachePath);
       const publicUrl = await uploadToR2(fileBuffer, req.params.cacheId);
       console.log(`[Re-upload] R2 OK → ${publicUrl.substring(0, 80)}...`);
@@ -333,6 +373,7 @@ async function startServer() {
       const cacheId = `${hash}${ext}`;
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
+      else touchCache(cachePath);
       console.log(`[Cache from path] OK → ${cacheId}`);
       res.json({ cacheId });
     } catch (error: any) {
@@ -363,6 +404,7 @@ async function startServer() {
       const cacheId = `${hash}${ext}`;
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
+      else touchCache(cachePath);
       const publicUrl = await uploadToR2(fileBuffer, filename);
       console.log(`[Re-upload from path] R2 OK → ${publicUrl.substring(0, 80)}... (re-cached: ${cacheId})`);
       res.json({ url: publicUrl, cacheId });
