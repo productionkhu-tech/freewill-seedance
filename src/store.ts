@@ -104,6 +104,8 @@ export interface ChatMessage {
   usedSettings?: GenerationSettings;
   usedAssets?: Asset[];
   promptText?: string;
+  downloadedAt?: number; // last time the user downloaded this video — flips the
+                         // download button to "다시 다운로드" styling
 }
 
 export interface Project {

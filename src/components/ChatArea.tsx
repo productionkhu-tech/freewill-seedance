@@ -452,6 +452,17 @@ export function ChatArea() {
     .filter(m => m.status === 'succeeded' && m.videoUrl)
     .sort((a, b) => b.timestamp - a.timestamp), [project.messages]);
 
+  // Download + mark the message so the button flips to "다시 다운로드".
+  // Marked only after downloadViaProxy resolves (= download handed off OK).
+  const handleVideoDownload = async (msgId: string, videoUrl: string, taskId: string) => {
+    try {
+      await downloadViaProxy(videoUrl, buildDownloadFilename(taskId));
+      useAppStore.getState().updateMessage(project.id, msgId, { downloadedAt: Date.now() });
+    } catch (e) { console.error('download failed:', e); }
+  };
+  // previewItem is a useState snapshot — read downloadedAt live from the store
+  const previewDownloaded = previewItem ? project.messages.find(m => m.id === previewItem.id)?.downloadedAt : undefined;
+
   /* ─── Drag & Drop ─── */
   const handleDragEnter = (e: React.DragEvent) => { e.preventDefault(); dragCounter.current += 1; if (e.dataTransfer.items?.length) setIsDragging(true); };
   const handleDragOver = (e: React.DragEvent) => e.preventDefault();
@@ -1061,9 +1072,9 @@ export function ChatArea() {
                 </div>
               )}
               <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
-                <button onClick={() => { if (previewItem.videoUrl && previewItem.taskId) downloadViaProxy(previewItem.videoUrl, buildDownloadFilename(previewItem.taskId)); }}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-indigo-500 text-white text-[13px] font-medium rounded-lg hover:bg-indigo-600 transition-colors">
-                  <Download size={14} /> 다운로드
+                <button onClick={() => { if (previewItem.videoUrl && previewItem.taskId) handleVideoDownload(previewItem.id, previewItem.videoUrl, previewItem.taskId); }}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-white text-[13px] font-medium rounded-lg transition-colors ${previewDownloaded ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-indigo-500 hover:bg-indigo-600'}`}>
+                  {previewDownloaded ? <RefreshCw size={14} /> : <Download size={14} />} {previewDownloaded ? '다시 다운로드' : '다운로드'}
                 </button>
                 <button onClick={() => scrollToMessage(previewItem.id)}
                   className="flex items-center gap-1.5 px-4 py-2 bg-gray-100 text-gray-700 text-[13px] font-medium rounded-lg hover:bg-gray-200 transition-colors">
@@ -1094,9 +1105,11 @@ export function ChatArea() {
                     <p className="text-[11px] font-semibold text-indigo-500">{project.name}</p>
                     <p className="text-[13px] text-gray-700 line-clamp-2 leading-snug h-[2.5em]">{item.promptText || '프롬프트 없음'}</p>
                     <div className="flex items-center gap-1 pt-1 flex-wrap">
-                      <button onClick={() => { if (item.videoUrl && item.taskId) downloadViaProxy(item.videoUrl, buildDownloadFilename(item.taskId)); }}
-                        className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
-                        <Download size={12} /> 다운로드
+                      <button onClick={() => { if (item.videoUrl && item.taskId) handleVideoDownload(item.id, item.videoUrl, item.taskId); }}
+                        className={`flex items-center gap-1 text-[11px] font-medium px-1.5 py-1 rounded-md transition-colors whitespace-nowrap shrink-0 ${item.downloadedAt
+                          ? 'text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50'
+                          : 'text-gray-500 hover:text-indigo-600 hover:bg-indigo-50'}`}>
+                        {item.downloadedAt ? <RefreshCw size={12} /> : <Download size={12} />} {item.downloadedAt ? '다시 다운로드' : '다운로드'}
                       </button>
                       <button onClick={() => setPreviewItem(item)}
                         className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
@@ -1221,9 +1234,11 @@ export function ChatArea() {
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                               {msg.videoUrl && (
-                                <button onClick={() => downloadViaProxy(msg.videoUrl!, buildDownloadFilename(msg.taskId || 'unknown'))}
-                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
-                                  <Download size={14} /> 영상 다운로드
+                                <button onClick={() => handleVideoDownload(msg.id, msg.videoUrl!, msg.taskId || 'unknown')}
+                                  className={`flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all whitespace-nowrap shrink-0 ${msg.downloadedAt
+                                    ? 'text-emerald-600 hover:text-emerald-700 bg-emerald-50/70 hover:bg-emerald-50 border-emerald-200'
+                                    : 'text-gray-500 hover:text-indigo-600 bg-gray-50 hover:bg-indigo-50 border-gray-200 hover:border-indigo-200'}`}>
+                                  {msg.downloadedAt ? <RefreshCw size={14} /> : <Download size={14} />} {msg.downloadedAt ? '다시 다운로드' : '영상 다운로드'}
                                 </button>
                               )}
                               {msg.imageUrl && (

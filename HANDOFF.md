@@ -12,7 +12,7 @@
 |------|------|
 | 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
 | GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.1202** (2026-06-12 배포) |
+| 현재 버전 | **v26.6.1203** (2026-06-12 배포) |
 | 사용자 | 김현우 / Studio Freewillusion TA |
 | 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
 | 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
@@ -23,6 +23,7 @@
 
 | 버전 | 날짜 | 핵심 변경 |
 |------|------|----------|
+| **26.6.1203** | 06-12 | **다운로드 완료 표시** — `ChatMessage.downloadedAt` 신설(영속). 영상 다운로드 성공 시 버튼이 "다시 다운로드"(emerald 톤, RefreshCw 아이콘)로 전환. 메시지 카드·갤러리·프리뷰 모달 3곳. previewItem은 state 스냅샷이라 downloadedAt은 store에서 live 조회 |
 | **26.6.1202** | 06-12 | **Duration Auto (-1)** — 모델이 4~15초 중 길이 자동 선택. Duration 라벨 옆 Auto 토글, 켜면 슬라이더 비활성. store 마이그레이션 클램프가 -1 보존하도록 수정. 과거 메시지 태그는 'Auto' 표시 |
 | **26.6.1201** | 06-12 | **API 규칙 검증 보강** (공식 레퍼런스 문서 대조) — ① 레퍼런스 비디오 합산 ≤15s·오디오 합산 ≤15s를 첨부/교체/전송 3시점에서 차단 (`Asset.durationSec` 신설, 스냅샷·재사용 경로에도 보존) ② multimodal 오디오 단독 전송 차단 ③ 비디오 입력 검증을 문서 기준으로 교체: 1080p 허용, 총픽셀 [640×640, 2206×946], 비율 0.4~2.5, 각 변 300~6000px ④ 이미지 비율(0.4~2.5) 사전 체크. 참고: task 기록 보존은 7일(video_url 24h는 그대로), 입력 fps 24~60은 브라우저에서 측정 불가라 미검증 |
 | **26.5.1301** | 05-13 | **originalPath fallback** — `webUtils.getPathForFile` 캐처 + `/api/reupload-from-path` 엔드포인트. media-cache 미스 시 원본 파일 디스크 재읽기. 새 GH_TOKEN으로 첫 배포 |
