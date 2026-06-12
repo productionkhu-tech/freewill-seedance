@@ -275,6 +275,8 @@ export function ChatArea() {
   const [mentionState, setMentionState] = useState<{ active: boolean, query: string }>({ active: false, query: '' });
   const mentionIndexRef = useRef(0);
   const contentEditableRef = useRef<HTMLDivElement>(null);
+  // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적
+  const pasteCycleRef = useRef<'first_frame' | 'last_frame'>('first_frame');
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const previousProjectIdRef = useRef<string | null>(null);
@@ -668,6 +670,81 @@ export function ChatArea() {
     range.setStartAfter(space); range.collapse(true);
     sel.removeAllRanges(); sel.addRange(range);
     setMentionState(s => ({ ...s, active: false })); setHasText(true);
+  };
+
+  // Clipboard image paste into the prompt box. Default contentEditable
+  // behavior inlines the image into the prompt HTML (disaster) — intercept and
+  // route to the asset list per mode instead. Text paste falls through.
+  const handlePromptPaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const imageFiles = Array.from(e.clipboardData?.items || [])
+      .filter(it => it.kind === 'file' && it.type.startsWith('image/'))
+      .map(it => it.getAsFile())
+      .filter((f): f is File => !!f);
+    if (imageFiles.length === 0) return; // 텍스트 붙여넣기는 기본 동작 유지
+    e.preventDefault(); // 이미지가 프롬프트 HTML에 박히는 것 차단
+
+    const mode = project.settings.mode;
+    if (mode === 'text_to_video') { alert('Text to Video 모드에서는 이미지를 첨부할 수 없습니다.'); return; }
+    if (mode === 'extend_video') { alert('Extend Video 모드에서는 이미지를 첨부할 수 없습니다.\n(비디오 1~3개만 사용하는 모드입니다)'); return; }
+
+    for (const raw of imageFiles) {
+      // 클립보드 이미지는 전부 image.png라는 이름으로 들어옴 → 구분 가능한 이름 부여
+      const ext = (raw.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+      const file = new File([raw], `clipboard-${stamp}-${Math.random().toString(36).slice(2, 5)}.${ext}`, { type: raw.type });
+
+      const sizeErr = validateImageFile(file);
+      if (sizeErr) { alert(sizeErr); continue; }
+      const dimErr = await validateImageDimensions(file);
+      if (dimErr) { alert(dimErr); continue; }
+
+      // 비동기 검증 사이에 상태가 변했을 수 있으니 매번 fresh 조회
+      const assets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
+
+      try {
+        if (mode === 'image_to_video_first') {
+          // 슬롯 1개 — 있으면 교체 (id 보존 → 멘션 핀 유지), 없으면 추가
+          const thumbnailUrl = await createThumbnail(file);
+          const cacheId = await cacheFile(file);
+          const existing = assets.find(a => a.role === 'first_frame');
+          if (existing) {
+            useAppStore.getState().replaceAsset(project.id, existing.id, { url: '', file_name: file.name, cacheId, thumbnailUrl });
+          } else {
+            addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl });
+          }
+        } else if (mode === 'image_to_video_first_last') {
+          // 빈 슬롯부터 채우고(first → last), 둘 다 차면 first/last 번갈아 교체
+          const thumbnailUrl = await createThumbnail(file);
+          const cacheId = await cacheFile(file);
+          const first = assets.find(a => a.role === 'first_frame');
+          const last = assets.find(a => a.role === 'last_frame');
+          if (!first) {
+            addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl });
+            pasteCycleRef.current = 'first_frame';
+          } else if (!last) {
+            addAsset(project.id, { type: 'image_url', url: '', role: 'last_frame', file_name: file.name, cacheId, thumbnailUrl });
+            pasteCycleRef.current = 'first_frame';
+          } else {
+            const targetRole = pasteCycleRef.current;
+            const target = targetRole === 'first_frame' ? first : last;
+            useAppStore.getState().replaceAsset(project.id, target.id, { url: '', file_name: file.name, cacheId, thumbnailUrl });
+            pasteCycleRef.current = targetRole === 'first_frame' ? 'last_frame' : 'first_frame';
+          }
+        } else {
+          // multimodal_reference / edit_video — 레퍼런스 이미지 최대 9장, 초과 시 기존 유지
+          const imgCount = assets.filter(a => a.type === 'image_url').length;
+          if (imgCount >= 9) {
+            alert('이미지는 최대 9장까지만 첨부할 수 있습니다.\n기존 이미지는 그대로 유지됩니다.');
+            break;
+          }
+          const thumbnailUrl = await createThumbnail(file);
+          const cacheId = await cacheFile(file);
+          addAsset(project.id, { type: 'image_url', url: '', role: 'reference_image', file_name: file.name, cacheId, thumbnailUrl });
+        }
+      } catch (err: any) {
+        alert(`클립보드 이미지 처리 실패: ${err?.message || ''}`);
+      }
+    }
   };
 
   const processFrameFile = async (file: File, role: AssetRole) => {
@@ -1348,7 +1425,7 @@ export function ChatArea() {
               )}
               </AnimatePresence>
               <div className="flex items-end gap-2 w-full">
-                <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown}
+                <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown} onPaste={handlePromptPaste}
                   style={{ minHeight: 44, maxHeight: `min(${promptHeight}px, 70vh)` }}
                   className="w-full overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                   data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />

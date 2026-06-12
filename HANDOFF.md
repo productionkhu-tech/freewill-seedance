@@ -12,7 +12,7 @@
 |------|------|
 | 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
 | GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.1204** (2026-06-12 배포) |
+| 현재 버전 | **v26.6.1205** (2026-06-12 배포) |
 | 사용자 | 김현우 / Studio Freewillusion TA |
 | 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
 | 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
@@ -23,6 +23,7 @@
 
 | 버전 | 날짜 | 핵심 변경 |
 |------|------|----------|
+| **26.6.1205** | 06-12 | **클립보드 이미지 붙여넣기 → 에셋 첨부** — 프롬프트창에 이미지가 HTML로 박히던 참사 차단(`handlePromptPaste`). 모드별 라우팅: t2v·extend=차단 알림, first=추가→교체, first_last=빈 슬롯 채우고 이후 first/last 번갈아 교체(`pasteCycleRef`), multimodal·edit=reference_image 9장 캡(초과 시 경고+기존 유지). 텍스트 붙여넣기는 기본 동작 유지 |
 | **26.6.1204** | 06-12 | **persist 즉시 플러시** — 1.5s 디바운스 쓰기 도중 종료/자동업데이트 재시작 시 상태 유실되던 갭 차단. `flushPersist()` 신설: 다운로드 마킹 직후 + visibilitychange(hidden) + pagehide에서 강제 플러시. downloadedAt 유실 방지가 목적이지만 모든 상태에 적용되는 안전망 |
 | **26.6.1203** | 06-12 | **다운로드 완료 표시** — `ChatMessage.downloadedAt` 신설(영속). 영상 다운로드 성공 시 버튼이 "다시 다운로드"(emerald 톤, RefreshCw 아이콘)로 전환. 메시지 카드·갤러리·프리뷰 모달 3곳. previewItem은 state 스냅샷이라 downloadedAt은 store에서 live 조회 |
 | **26.6.1202** | 06-12 | **Duration Auto (-1)** — 모델이 4~15초 중 길이 자동 선택. Duration 라벨 옆 Auto 토글, 켜면 슬라이더 비활성. store 마이그레이션 클램프가 -1 보존하도록 수정. 과거 메시지 태그는 'Auto' 표시 |
