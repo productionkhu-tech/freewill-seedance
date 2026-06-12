@@ -7,6 +7,10 @@ import { showNotification, setCachedBlob, getCachedBlob } from './lib/utils';
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 const DEBOUNCE_MS = 1500;
+// Latest snapshot waiting for the debounce timer. Kept so critical updates
+// (e.g. downloadedAt) and window-hide/quit can flush to disk immediately —
+// otherwise a quit within DEBOUNCE_MS silently drops the write.
+let pendingWrite: { name: string; value: string } | null = null;
 
 // External backup mirror to Documents/Freewill Seedance Backup/seedance-backup.json.
 // Survives any userData loss (app-name rename, uninstall+reinstall, AppData cleanup).
@@ -37,8 +41,9 @@ const idbStorage: StateStorage = {
     return null;
   },
   setItem: async (name: string, value: string): Promise<void> => {
+    pendingWrite = { name, value };
     if (writeTimer) clearTimeout(writeTimer);
-    writeTimer = setTimeout(() => set(name, value), DEBOUNCE_MS);
+    writeTimer = setTimeout(() => { pendingWrite = null; set(name, value); }, DEBOUNCE_MS);
 
     // Mirror to external backup file (long debounce — 5 min)
     if (backupTimer) clearTimeout(backupTimer);
@@ -57,6 +62,28 @@ const idbStorage: StateStorage = {
     await del(name);
   },
 };
+
+// Write the pending snapshot to IndexedDB NOW, skipping the debounce. Used
+// after critical updates (downloadedAt) and on window hide/quit so a close
+// within DEBOUNCE_MS can't drop the write. Idempotent — no-op when nothing
+// is pending.
+export function flushPersist(): Promise<void> {
+  if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
+  if (!pendingWrite) return Promise.resolve();
+  const w = pendingWrite;
+  pendingWrite = null;
+  return set(w.name, w.value);
+}
+
+// Safety net: flush whenever the window hides (minimize/tray) or unloads
+// (quit, auto-update restart). visibilitychange-hidden is the reliable signal
+// in Chromium/Electron; pagehide covers real navigation/quit.
+if (typeof window !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void flushPersist();
+  });
+  window.addEventListener('pagehide', () => { void flushPersist(); });
+}
 
 export type AssetRole = 'reference_image' | 'reference_video' | 'reference_audio' | 'first_frame' | 'last_frame';
 

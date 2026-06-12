@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useAppStore, AssetRole } from '../store';
+import { useAppStore, AssetRole, flushPersist } from '../store';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
@@ -458,6 +458,9 @@ export function ChatArea() {
     try {
       await downloadViaProxy(videoUrl, buildDownloadFilename(taskId));
       useAppStore.getState().updateMessage(project.id, msgId, { downloadedAt: Date.now() });
+      // Force the mark to disk now — the 1.5s debounced write would be lost
+      // if the app quits (or auto-update restarts) right after the download.
+      await flushPersist();
     } catch (e) { console.error('download failed:', e); }
   };
   // previewItem is a useState snapshot — read downloadedAt live from the store
