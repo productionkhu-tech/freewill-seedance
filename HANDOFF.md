@@ -12,7 +12,7 @@
 |------|------|
 | 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
 | GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.1208** (2026-06-12 배포) |
+| 현재 버전 | **v26.6.1209** (2026-06-12 배포) |
 | 사용자 | 김현우 / Studio Freewillusion TA |
 | 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
 | 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
@@ -23,6 +23,7 @@
 
 | 버전 | 날짜 | 핵심 변경 |
 |------|------|----------|
+| **26.6.1209** | 06-12 | **이미지 비율 하드차단 제거** — 1201에서 넣은 `validateImageDimensions`의 0.4~2.5 비율 거부 삭제. 스모크 테스트로 API가 비율 초과 이미지를 받아 중앙 크롭 확인됨. px 범위(300~6000)는 하드 리밋이라 유지. 비디오 비율/총픽셀 제한은 그대로(문서 명시 하드리밋, 미검증) |
 | **26.6.1208** | 06-12 | **실사 인물/민감 콘텐츠 에러 한글화** — translateError에 `real person`·`PrivacyInformation`(실사 얼굴 레퍼런스 거부)·`SensitiveContentDetected` 케이스 추가. 실 API 스모크 테스트로 확인: 3.60:1 이미지는 API가 받아 21:9로 중앙크롭(거부 아님), 포토리얼 얼굴(앨리스)은 `InputImageSensitiveContentDetected.PrivacyInformation`로 생성시점 400. 매지코(비실사)는 통과 |
 | **26.6.1207** | 06-12 | **media-cache LRU 수명 연장 + 캐시 정리 전체화** — ① `touchCache()`: 캐시 읽기/dedup히트/재업로드마다 mtime 갱신 → 30일 청소가 "안 쓰는 것만" 제거 (자주 재사용하는 레퍼런스는 영구 보존). ② 사이드바 캐시 정리 버튼이 media-cache까지 전부 삭제 (`POST /api/cache/clear`) — 경고문에 클립보드 첨부 복구 불가 명시. `GET /api/cache/stats` 신설 (⚠ `:cacheId` 라우트보다 먼저 등록 필수) |
 | **26.6.1206** | 06-12 | **first_last 붙여넣기 사이클 first부터 보장** — pasteCycleRef를 슬롯 id와 묶어 저장({firstId,lastId,next}). 슬롯이 피커·재추가 등 다른 경로로 바뀌면 사이클 무효화하고 무조건 first부터. 1205의 전역 포인터가 stale 상태로 last부터 교체하던 버그 수정 |

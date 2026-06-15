@@ -95,7 +95,11 @@ export function showNotification(title: string, options?: NotificationOptions) {
 
 // BytePlus API limits
 export const API_LIMITS = {
-  image: { maxSizeMB: 30, minPx: 300, maxPx: 6000, minRatio: 0.4, maxRatio: 2.5 },
+  // Image aspect ratio is intentionally NOT enforced: BytePlus accepts
+  // out-of-range ratios and center-crops to the nearest supported ratio
+  // (verified via API smoke test 2026-06-12). The 0.4~2.5 in the docs is the
+  // nominal range, not a hard reject. px bounds 300~6000 ARE hard limits.
+  image: { maxSizeMB: 30, minPx: 300, maxPx: 6000 },
   video: {
     maxSizeMB: 50, minDuration: 2, maxDuration: 15, maxTotalDuration: 15,
     minPx: 300, maxPx: 6000, minRatio: 0.4, maxRatio: 2.5,
@@ -129,15 +133,13 @@ export function validateImageDimensions(source: File | string): Promise<string |
     img.onload = () => {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       const { width, height } = img;
-      const { minPx, maxPx, minRatio, maxRatio } = API_LIMITS.image;
-      const ratio = width / height;
+      const { minPx, maxPx } = API_LIMITS.image;
+      // No aspect-ratio check — BytePlus center-crops out-of-range images.
+      // Only the px bounds are real hard limits.
       if (width < minPx || height < minPx) {
         resolve(`이미지 해상도 너무 작음: ${width}x${height} (최소 ${minPx}x${minPx})`);
       } else if (width > maxPx || height > maxPx) {
         resolve(`이미지 해상도 초과: ${width}x${height} (최대 ${maxPx}x${maxPx})`);
-      } else if (ratio <= minRatio || ratio >= maxRatio) {
-        // API rule: aspect ratio (w/h) must be strictly inside (0.4, 2.5)
-        resolve(`이미지 비율 벗어남: ${ratio.toFixed(2)} (가로÷세로가 0.4~2.5 사이여야 합니다)`);
       } else {
         resolve(null);
       }
