@@ -13,7 +13,7 @@ function formatBytes(bytes: number | null): string {
 }
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
-  const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject } = useAppStore();
+  const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, autoDownload, setAutoDownload } = useAppStore();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -228,6 +228,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             title="다운로드 폴더 선택 (앱 재시작 시 기본 폴더로 초기화)">
             폴더 선택
           </button>
+          {/* Auto-download: when on, every video auto-saves to the folder above
+              on completion. Manual "다시 다운로드" marker is unaffected. */}
+          <label className="flex items-center gap-2 pt-0.5 cursor-pointer select-none"
+            title="켜면 생성 완료되는 영상이 위 폴더로 자동 저장됩니다. (이미 만들어진 영상은 영향 없음)">
+            <input type="checkbox" checked={autoDownload}
+              onChange={(e) => setAutoDownload(e.target.checked)}
+              className="accent-[#0071e3] w-3.5 h-3.5 shrink-0" />
+            <span className="text-[11px] text-white/70">생성 시 자동 다운로드</span>
+          </label>
         </div>
         <button onClick={openDashboard}
           className="w-full flex items-center gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"

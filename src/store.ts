@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist, StateStorage, createJSONStorage } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del } from 'idb-keyval';
-import { showNotification, setCachedBlob, getCachedBlob } from './lib/utils';
+import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename } from './lib/utils';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -149,6 +149,8 @@ interface AppState {
   _hasHydrated: boolean;
   projects: Project[];
   currentProjectId: string | null;
+  autoDownload: boolean; // global toggle — auto-save every video when it succeeds
+  setAutoDownload: (v: boolean) => void;
   setCurrentProjectId: (id: string) => void;
   createProject: () => void;
   renameProject: (id: string, name: string) => void;
@@ -186,6 +188,8 @@ export const useAppStore = create<AppState>()(
       _hasHydrated: false,
       projects: [],
       currentProjectId: null,
+      autoDownload: false,
+      setAutoDownload: (v) => set({ autoDownload: v }),
       setCurrentProjectId: (id) => set({ currentProjectId: id }),
       createProject: () => {
         const newProject: Project = {
@@ -380,6 +384,22 @@ export const useAppStore = create<AppState>()(
               imageUrl: contentData?.last_frame_url,
               endTime: Date.now(),
             });
+            // Persist the succeeded status to disk IMMEDIATELY (skip the 1.5s
+            // debounce). This is the safety net against re-download on restart:
+            // if the app is killed (crash / auto-update quitAndInstall) right
+            // after completion, the status would otherwise revert to 'running'
+            // on reopen → re-polled → re-downloaded. Forcing it succeeded here
+            // means completed videos are NEVER re-polled, so auto-download can't
+            // fire twice for the same video.
+            void flushPersist();
+            // Auto-download: this succeeded block runs exactly once per task
+            // (line ~343 early-returns once succeeded, and App.tsx only polls
+            // running/queued), so no per-message guard is needed. Does NOT set
+            // downloadedAt — that marker is manual-click only ("다시 다운로드").
+            if (get().autoDownload && contentData?.video_url) {
+              downloadViaProxy(contentData.video_url, buildDownloadFilename(taskId))
+                .catch(err => console.warn('[AutoDownload] failed:', err?.message || err));
+            }
             // Full pre-fetch into memory cache → subsequent download saves from RAM (zero CDN round-trip).
             // Validate response before caching: a 404/500 body would otherwise be served as a "video"
             // resulting in blank playback and broken downloads.
@@ -452,6 +472,7 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         projects: state.projects,
         currentProjectId: state.currentProjectId,
+        autoDownload: state.autoDownload,
       }),
       onRehydrateStorage: () => {
         return () => {

@@ -12,7 +12,7 @@
 |------|------|
 | 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
 | GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.1501** (2026-06-15 배포 — 1209의 날짜정정 재배포, 코드 동일) |
+| 현재 버전 | **v26.6.1502** (2026-06-15 배포) |
 | 사용자 | 김현우 / Studio Freewillusion TA |
 | 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
 | 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
@@ -23,6 +23,7 @@
 
 | 버전 | 날짜 | 핵심 변경 |
 |------|------|----------|
+| **26.6.1502** | 06-15 | **생성 시 자동 다운로드 토글** — 사이드바 다운로드 폴더 박스에 체크박스. ON이면 영상 완료 시 지정 폴더로 자동 저장(`pollTask` succeeded 블록에서 `downloadViaProxy`). **downloadedAt 미설정** = 수동 클릭만 '다시 다운로드' 라벨. succeeded 직후 **`flushPersist()`** 즉시 호출 → 완료상태 디스크 즉시 반영 → 재시작·자동업데이트 후 재다운로드 차단(완료 태스크는 재폴링 안 됨). `autoDownload`는 전역·영속(partialize). 폴더는 기존대로 세션 한정 |
 | **26.6.1501** | 06-15 | **버전 날짜 정정 재배포** — 1209와 코드 100% 동일, 라벨만 6/15로. (1201~1208은 12xx로 남김 = 실제는 6/15 작업분) |
 | **26.6.1209** | 06-12(실제 06-15) | **이미지 비율 하드차단 제거** — 1201에서 넣은 `validateImageDimensions`의 0.4~2.5 비율 거부 삭제. 스모크 테스트로 API가 비율 초과 이미지를 받아 중앙 크롭 확인됨. px 범위(300~6000)는 하드 리밋이라 유지. 비디오 비율/총픽셀 제한은 그대로(문서 명시 하드리밋, 미검증) |
 | **26.6.1208** | 06-12 | **실사 인물/민감 콘텐츠 에러 한글화** — translateError에 `real person`·`PrivacyInformation`(실사 얼굴 레퍼런스 거부)·`SensitiveContentDetected` 케이스 추가. 실 API 스모크 테스트로 확인: 3.60:1 이미지는 API가 받아 21:9로 중앙크롭(거부 아님), 포토리얼 얼굴(앨리스)은 `InputImageSensitiveContentDetected.PrivacyInformation`로 생성시점 400. 매지코(비실사)는 통과 |
