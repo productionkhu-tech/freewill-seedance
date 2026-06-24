@@ -10,9 +10,22 @@ const fs = require('fs');
 
 const root = path.join(__dirname, '..');
 
+// Node 25 + Windows intermittently fails child_process spawns (~1 in 5-10),
+// which affects execSync AND esbuild/vite's own internal spawns. Retry transient
+// failures so a deploy never randomly aborts or (worse) ships a stale dist/.
+function withRetry(fn, label, tries = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try { return fn(); }
+    catch (e) {
+      if (attempt >= tries) throw e;
+      console.warn(`  [retry ${attempt}/${tries - 1}] ${label} failed: ${String(e.message || e).split('\n')[0]} — retrying...`);
+    }
+  }
+}
+
 function run(cmd, label) {
   console.log(`\n=== ${label} ===`);
-  execSync(cmd, { cwd: root, stdio: 'inherit', shell: true });
+  withRetry(() => execSync(cmd, { cwd: root, stdio: 'inherit', shell: true }), label);
 }
 
 // 0. Self-heal the electron-builder node_modules collector.
@@ -72,7 +85,7 @@ const distServer = path.join(root, 'dist-server');
 if (!fs.existsSync(distServer)) fs.mkdirSync(distServer);
 
 console.log('\n=== Bundling server (esbuild JS API) ===');
-require('esbuild').buildSync({
+withRetry(() => require('esbuild').buildSync({
   entryPoints: [path.join(root, 'server.ts')],
   bundle: true,
   platform: 'node',
@@ -80,7 +93,7 @@ require('esbuild').buildSync({
   format: 'cjs',
   outfile: path.join(distServer, 'server.cjs'),
   external: ['vite'],
-});
+}), 'esbuild buildSync');
 console.log('  dist-server/server.cjs');
 
 // 3. Patch the bundled server to use production mode
