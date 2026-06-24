@@ -229,8 +229,54 @@ const renderMessageContent = (content: string, namedAssets: any[]) => {
   });
 };
 
+/* Render a saved prompt-HTML snapshot (with mention pills) into React nodes for
+   the message card — mirrors the input's pills (panel + element) with their
+   image icons. No dangerouslySetInnerHTML: text nodes render as text and any
+   unknown element degrades to its textContent, so user-typed/pasted markup can
+   never execute. Thumbnails are the frozen ones baked in at send. */
+const renderPromptHtml = (html: string): React.ReactNode[] => {
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  const out: React.ReactNode[] = [];
+  temp.childNodes.forEach((node, i) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.textContent) out.push(<span key={i}>{node.textContent}</span>);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node as HTMLElement;
+    if (el.tagName === 'BR') { out.push(<br key={i} />); return; }
+    const isPanel = el.classList.contains('mention-pill');
+    const isElement = el.classList.contains('element-pill');
+    if (isPanel || isElement) {
+      const name = el.getAttribute('data-name') || '';
+      const thumb = el.querySelector('img')?.getAttribute('src') || '';
+      if (isElement) {
+        const cat = el.getAttribute('data-category') as AssetCategory;
+        const meta = (cat && CATEGORY_META[cat]) || { bg: '#f5f3ff', text: '#6d28d9', border: '#ddd6fe', accent: '#8b5cf6' };
+        out.push(
+          <span key={i} className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px] font-medium" style={{ background: meta.bg, color: meta.text, border: `1px solid ${meta.border}` }}>
+            {thumb ? <img src={thumb} className="w-4 h-4 object-cover rounded-sm" alt="" /> : <span className="w-2 h-2 rounded-full inline-block" style={{ background: meta.accent }} />}
+            <span>[{name}]</span>
+          </span>
+        );
+      } else {
+        out.push(
+          <span key={i} className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px]">
+            {thumb ? <img src={thumb} className="w-4 h-4 object-cover rounded-sm" alt="" /> : null}
+            <span className="font-medium">[{name}]</span>
+          </span>
+        );
+      }
+      return;
+    }
+    if (el.textContent) out.push(<span key={i}>{el.textContent}</span>);
+  });
+  return out;
+};
+
 /* ─── Collapsible prompt: 1-line truncated by default, expand/collapse + copy ─── */
-function CollapsiblePrompt({ promptText, namedAssets }: { promptText: string; namedAssets: any[] }) {
+function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText: string; promptHtml?: string; namedAssets: any[] }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -258,7 +304,7 @@ function CollapsiblePrompt({ promptText, namedAssets }: { promptText: string; na
           (expanded ? 'whitespace-pre-wrap break-words' : 'truncate')
         }
       >
-        {renderMessageContent(promptText, namedAssets)}
+        {promptHtml ? renderPromptHtml(promptHtml) : renderMessageContent(promptText, namedAssets)}
       </div>
       <div className="flex items-center gap-0.5 shrink-0 -mt-0.5">
         <button
@@ -855,7 +901,7 @@ export function ChatArea() {
     const range = sel.getRangeAt(0);
     range.deleteContents();
     const frag = document.createDocumentFragment();
-    for (const n of nodes) {
+    nodes.forEach((n, i) => {
       if (n.type === 'text') {
         n.text.split('\n').forEach((part, idx) => {
           if (idx > 0) frag.appendChild(document.createElement('br'));
@@ -863,9 +909,15 @@ export function ChatArea() {
         });
       } else {
         frag.appendChild(buildMentionPill(n.item));
+        // Only inject a caret-target space when no real text follows (pill is last,
+        // or two pills are adjacent). When text follows it already carries the
+        // user's original spacing — adding one here would double it or split a
+        // Korean particle ("@남자가" → "남자 가").
+        const next = nodes[i + 1];
+        if (next && next.type !== 'pill') return;
         frag.appendChild(document.createTextNode(' '));
       }
-    }
+    });
     const last = frag.lastChild;
     range.insertNode(frag);
     if (last) { range.setStartAfter(last); range.collapse(true); sel.removeAllRanges(); sel.addRange(range); }
@@ -1094,9 +1146,16 @@ export function ChatArea() {
         alert(`일부 래퍼런스 복원 실패:\n\n${failures.join('\n')}\n\n파일을 다시 첨부해주세요.`);
       }
     }
-    if (msg.promptText && contentEditableRef.current) {
-      contentEditableRef.current.innerHTML = textToHtml(msg.promptText, getAssetNames(msg.usedAssets || []));
-      // Sync pill asset IDs with newly restored store assets (old IDs → new IDs)
+    if ((msg.promptHtml || msg.promptText) && contentEditableRef.current) {
+      // Prefer the exact innerHTML snapshot — it carries element-library mention
+      // pills too, which resolve to bare names in promptText and can't be rebuilt
+      // from it. Fall back to text→pill reconstruction for pre-promptHtml messages
+      // (those still lose element mentions — unavoidable, the data isn't there).
+      contentEditableRef.current.innerHTML = msg.promptHtml
+        ? msg.promptHtml
+        : textToHtml(msg.promptText, getAssetNames(msg.usedAssets || []));
+      // Panel pills: re-bind data-asset-id by name — replaceAllAssets just gave the
+      // restored assets fresh ids, so the snapshot's ids are stale.
       const freshAssets = getAssetNames(useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []);
       contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
         const name = pill.getAttribute('data-name');
@@ -1104,7 +1163,23 @@ export function ChatArea() {
         if (match) pill.setAttribute('data-asset-id', match.id);
         else pill.removeAttribute('data-asset-id');
       });
+      // Element pills: validate against the live (global) library. Drop pills whose
+      // element was deleted; refresh name + thumbnail for the rest so a renamed or
+      // re-imaged asset shows current state and the next send merges its images.
+      contentEditableRef.current.querySelectorAll('.element-pill').forEach(pill => {
+        const id = pill.getAttribute('data-element-id');
+        const el = id ? useAppStore.getState().elementAssets.find(e => e.id === id) : null;
+        if (!el) { pill.remove(); return; }
+        pill.setAttribute('data-name', el.name);
+        const textSpan = pill.querySelector('span[data-el-text]');
+        if (textSpan) textSpan.textContent = `[${el.name}]`;
+        const img = pill.querySelector('img') as HTMLImageElement | null;
+        const newSrc = el.images[0]?.thumbnailUrl || el.images[0]?.url || '';
+        if (img && newSrc) img.setAttribute('src', newSrc);
+      });
       setHasText(true);
+      syncMentionCount();
+      if (currentProjectId) useAppStore.getState().updateDraftPrompt(currentProjectId, contentEditableRef.current.innerHTML);
     }
     if (showGallery) exitGallery();
     setPreviewItem(null);
@@ -1133,6 +1208,9 @@ export function ChatArea() {
     }
     const plainText = getPlainText(contentEditableRef.current.innerHTML);
     if (!plainText.trim()) return;
+    // Snapshot the pill-bearing HTML so 재사용 can restore mentions exactly —
+    // element mentions resolve to bare names in plainText and are otherwise lost.
+    const promptHtml = contentEditableRef.current.innerHTML;
 
     // Validate required assets BEFORE anything else
     const mode = project.settings.mode;
@@ -1275,7 +1353,7 @@ export function ChatArea() {
     for (let i = 0; i < outputCount; i++) {
       const id = crypto.randomUUID();
       systemMessageIds.push(id);
-      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, usedSettings: currentSettings, usedAssets: thumbAssets } as any);
+      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets } as any);
     }
     setTimeout(() => scrollToBottom(), 150);
 
@@ -1305,7 +1383,7 @@ export function ChatArea() {
           if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
           const taskId = data.id || data.data?.task_id;
           if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, promptText: plainText });
+          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, promptText: plainText, promptHtml });
           useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
         } catch (error: any) {
           updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
@@ -1565,7 +1643,7 @@ export function ChatArea() {
                           )}
                           <div className="flex-1 min-w-0">
                             {msg.promptText
-                              ? <CollapsiblePrompt promptText={msg.promptText} namedAssets={getAssetNames((msg.usedAssets as any) || [])} />
+                              ? <CollapsiblePrompt promptText={msg.promptText} promptHtml={msg.promptHtml} namedAssets={getAssetNames((msg.usedAssets as any) || [])} />
                               : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">

@@ -164,6 +164,7 @@ export interface ChatMessage {
   usedSettings?: GenerationSettings;
   usedAssets?: Asset[];
   promptText?: string;
+  promptHtml?: string; // innerHTML snapshot (with mention pills) for exact 재사용 — element mentions are stored as bare names in promptText and can't be re-pillified from it
   downloadedAt?: number; // last time the user downloaded this video — flips the
                          // download button to "다시 다운로드" styling
 }
