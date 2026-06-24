@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
-import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, RefreshCw } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw } from 'lucide-react';
+import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
@@ -16,6 +16,73 @@ const acceptFor = (type: 'image_url' | 'video_url' | 'audio_url') =>
   type === 'image_url' ? 'image/*'
   : type === 'video_url' ? 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm'
   : 'audio/wav,audio/mpeg';
+
+// One reference-asset row. Extracted to a module-level component because each
+// row needs its own useDragControls (hooks can't run in a .map loop body).
+// - Reorder via framer (POINTER drag from the ⠿ grip only → dragListener=false
+//   + dragControls). The grabbed row physically lifts and others slide aside.
+// - Replace via native HTML5 file drop on the row (different event channel from
+//   framer's pointer drag, so the two never collide). id is preserved on both,
+//   so mention pills stay valid.
+function AssetRow({ asset, name, onReplaceFile, onRemove, dragOverId, setDragOverId }: {
+  asset: Asset; name: string;
+  onReplaceFile: (a: Asset, f: File) => void;
+  onRemove: (id: string) => void;
+  dragOverId: string | null;
+  setDragOverId: (updater: string | null | ((c: string | null) => string | null)) => void;
+}) {
+  const controls = useDragControls();
+  const thumb = (asset as any).thumbnailUrl as string | undefined;
+  return (
+    <Reorder.Item
+      value={asset}
+      as="div"
+      dragListener={false}
+      dragControls={controls}
+      onDragOver={(e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDragOverId(asset.id); }}
+      onDragLeave={(e: React.DragEvent) => { if (!(e.currentTarget as Node).contains(e.relatedTarget as Node)) setDragOverId((c) => c === asset.id ? null : c); }}
+      onDrop={(e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation(); setDragOverId(null);
+        const f = e.dataTransfer.files?.[0]; if (f) onReplaceFile(asset, f);
+      }}
+      className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] border-black/5'}`}
+    >
+      <div className="flex items-center gap-2 overflow-hidden">
+        <span
+          onPointerDown={(e) => controls.start(e)}
+          title="끌어서 순서 변경"
+          className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 shrink-0 -ml-0.5 select-none touch-none"
+        >
+          <GripVertical size={15} />
+        </span>
+        {asset.type === 'image_url' && (
+          thumb || asset.url.startsWith('data:image') || asset.url.startsWith('http')
+            ? <img src={thumb || asset.url} alt="asset" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
+            : <ImageIcon size={14} className="text-blue-500 shrink-0" />
+        )}
+        {asset.type === 'video_url' && (
+          thumb
+            ? <img src={thumb} alt="video" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
+            : <Video size={14} className="text-purple-500 shrink-0" />
+        )}
+        {asset.type === 'audio_url' && <Music size={14} className="text-green-500 shrink-0" />}
+        <div className="flex flex-col overflow-hidden">
+          <span className="text-xs font-medium text-gray-800">[{name}] {asset.file_name && <span className="text-gray-500 font-normal ml-1 truncate">{asset.file_name}</span>}</span>
+          <span className="text-[10px] font-medium text-gray-500">{asset.role}</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-0.5 shrink-0">
+        <label title="이 에셋 교체 (클릭하거나 파일을 끌어다 놓기)" className="text-gray-400 hover:text-indigo-500 p-1 cursor-pointer">
+          <RefreshCw size={14} />
+          <input type="file" accept={acceptFor(asset.type)} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onReplaceFile(asset, f); e.target.value = ''; }} />
+        </label>
+        <button onClick={() => onRemove(asset.id)} title="삭제" className="text-gray-400 hover:text-red-500 p-1">
+          <Trash2 size={14} />
+        </button>
+      </div>
+    </Reorder.Item>
+  );
+}
 
 const MODES: { id: GenerationMode; name: string }[] = [
   { id: 'text_to_video', name: 'Text to Video' },
@@ -89,7 +156,7 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
@@ -426,46 +493,21 @@ export function SettingsPanel() {
           <h3 className="text-[14px] font-semibold text-[#1d1d1f] tracking-tight border-b border-gray-100 pb-2">Reference Assets</h3>
 
           <div className="space-y-2">
-            {namedAssets.map((asset) => (
-              <div key={asset.id}
-                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverAssetId(asset.id); }}
-                onDragLeave={(e) => { if (!(e.currentTarget as Node).contains(e.relatedTarget as Node)) setDragOverAssetId(c => c === asset.id ? null : c); }}
-                onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverAssetId(null); const f = e.dataTransfer.files?.[0]; if (f) handleReplaceFile(asset, f); }}
-                className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverAssetId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] border-black/5'}`}>
-                <div className="flex items-center gap-2 overflow-hidden">
-                  {asset.type === 'image_url' && (
-                    (asset as any).thumbnailUrl || asset.url.startsWith('data:image') || asset.url.startsWith('http') ? (
-                      <img src={(asset as any).thumbnailUrl || asset.url} alt="asset" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
-                    ) : (
-                      <ImageIcon size={14} className="text-blue-500 shrink-0" />
-                    )
-                  )}
-                  {asset.type === 'video_url' && (
-                    (asset as any).thumbnailUrl ? (
-                      <img src={(asset as any).thumbnailUrl} alt="video" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
-                    ) : (
-                      <Video size={14} className="text-purple-500 shrink-0" />
-                    )
-                  )}
-                  {asset.type === 'audio_url' && <Music size={14} className="text-green-500 shrink-0" />}
-                  <div className="flex flex-col overflow-hidden">
-                    <span className="text-xs font-medium text-gray-800">[{asset.name}] {asset.file_name && <span className="text-gray-500 font-normal ml-1 truncate">{asset.file_name}</span>}</span>
-                    <span className="text-[10px] font-medium text-gray-500">{asset.role}</span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-0.5 shrink-0">
-                  <label title="이 에셋 교체 (클릭하거나 파일을 끌어다 놓기)" className="text-gray-400 hover:text-indigo-500 p-1 cursor-pointer">
-                    <RefreshCw size={14} />
-                    <input type="file" accept={acceptFor(asset.type)} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleReplaceFile(asset, f); e.target.value = ''; }} />
-                  </label>
-                  <button onClick={() => removeAsset(project.id, asset.id)} title="삭제" className="text-gray-400 hover:text-red-500 p-1">
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              </div>
-            ))}
+            <Reorder.Group as="div" axis="y" values={assets} onReorder={(newOrder) => setAssetOrder(project.id, (newOrder as Asset[]).map(a => a.id))} className="space-y-2">
+              {assets.map((asset, i) => (
+                <AssetRow
+                  key={asset.id}
+                  asset={asset}
+                  name={namedAssets[i]?.name ?? ''}
+                  onReplaceFile={handleReplaceFile}
+                  onRemove={(id) => removeAsset(project.id, id)}
+                  dragOverId={dragOverAssetId}
+                  setDragOverId={setDragOverAssetId}
+                />
+              ))}
+            </Reorder.Group>
             {assets.length === 0 && <p className="text-xs text-gray-500 text-center py-2">No assets added yet.</p>}
-            {assets.length > 0 && <p className="text-[10px] text-gray-400 text-center pt-0.5">↻ 클릭 또는 파일 드롭으로 개별 에셋 교체 (멘션 유지)</p>}
+            {assets.length > 0 && <p className="text-[10px] text-gray-400 text-center pt-0.5">⠿ 잡아서 끌면 순서 변경 · ↻ 또는 파일 드롭으로 교체 (멘션 유지)</p>}
           </div>
 
           <AnimatePresence mode="wait">

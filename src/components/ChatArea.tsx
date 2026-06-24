@@ -873,6 +873,24 @@ export function ChatArea() {
   /* ─── Send ─── */
   const handleSend = async () => {
     if (!contentEditableRef.current || isGenerating) return;
+    // Force mention labels to the CURRENT asset order before reading the prompt.
+    // The [project.assets] sync effect is async (passive), so if the user
+    // reorders/replaces and sends in the same tick, the pills could still hold
+    // stale "[Image N]" labels — which would mismatch the (current-order)
+    // content[] array sent to the API and point a mention at the wrong asset.
+    // Re-resolving each pill by its stable data-asset-id closes that race.
+    {
+      const namedNow = getAssetNames(project.assets);
+      contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
+        const id = pill.getAttribute('data-asset-id');
+        const a = id ? namedNow.find(n => n.id === id) : null;
+        if (a) {
+          pill.setAttribute('data-name', a.name);
+          const t = pill.querySelector('span[style*="font-weight"]');
+          if (t) t.textContent = `[${a.name}]`;
+        }
+      });
+    }
     const plainText = getPlainText(contentEditableRef.current.innerHTML);
     if (!plainText.trim()) return;
 

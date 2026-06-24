@@ -160,6 +160,7 @@ interface AppState {
   removeAsset: (projectId: string, assetId: string) => void;
   replaceAsset: (projectId: string, assetId: string, updates: Partial<Omit<Asset, 'id'>>) => void;
   replaceAllAssets: (projectId: string, assets: Omit<Asset, 'id'>[]) => void;
+  setAssetOrder: (projectId: string, orderedIds: string[]) => void;
   clearAssets: (projectId: string) => void;
   updateDraftPrompt: (projectId: string, draft: string) => void;
   addMessage: (projectId: string, message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
@@ -279,6 +280,22 @@ export const useAppStore = create<AppState>()(
                 }
               : p
           ),
+        }));
+      },
+      // Apply a new asset order (drag-to-reorder via framer Reorder). Reorders
+      // the existing asset OBJECTS by id — ids/objects preserved, only positions
+      // change. Mention pills track assets by id and the ChatArea sync effect
+      // renumbers their labels (Image 1↔2) automatically, so mentions stay
+      // correct. Validates the id set matches (else no-op) to avoid data loss.
+      setAssetOrder: (projectId, orderedIds) => {
+        set((state) => ({
+          projects: state.projects.map((p) => {
+            if (p.id !== projectId) return p;
+            const byId = new Map(p.assets.map((a) => [a.id, a]));
+            const assets = orderedIds.map((id) => byId.get(id)).filter(Boolean) as typeof p.assets;
+            if (assets.length !== p.assets.length) return p; // mismatch → keep original
+            return { ...p, assets, updatedAt: Date.now() };
+          }),
         }));
       },
       clearAssets: (projectId) => {

@@ -12,7 +12,7 @@
 |------|------|
 | 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
 | GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.2401** (2026-06-24 배포) |
+| 현재 버전 | **v26.6.2404** (2026-06-24 배포) |
 | 사용자 | 김현우 / Studio Freewillusion TA |
 | 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
 | 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
@@ -23,6 +23,8 @@
 
 | 버전 | 날짜 | 핵심 변경 |
 |------|------|----------|
+| **26.6.2404** | 06-24 | **순서 변경을 framer Reorder 소터블로** (2403 HTML5 드래그 폐기 — 색만 바뀌던 게 별로라는 피드백). `motion/react`의 `Reorder.Group/Item` + `useDragControls`로 행 자체가 들려 따라오고 나머지가 슬라이드. 행을 `AssetRow` 모듈 컴포넌트로 분리(행마다 useDragControls 필요). 그립 `onPointerDown→controls.start`만 드래그 시작(`dragListener=false`), 나머지 클릭 안전. **포인터 드래그라 HTML5 파일-드롭(교체)과 이벤트 채널 분리 → 충돌 없음.** store `setAssetOrder(orderedIds)`(id 기준 재배열, 객체·id 보존, 카운트 검증). 멘션은 sync effect가 재번호 자동. **+ 전송 레이스 픽스**: `handleSend`가 `getPlainText` 직전에 핀 라벨을 현재 `project.assets`로 강제 재동기화 — reorder 직후 즉시 전송 시 passive effect 미flush로 stale 라벨이 content[] 새 순서와 어긋나 멘션이 엉뚱한 에셋 가리키던 레이스 차단(검증: reorder→즉시전송 시 content순서·멘션 일치 확인). (2402 화살표·2403 HTML5드래그는 폐기·미배포 단계였음) |
+| **26.6.2403** | 06-24 | (폐기·미배포) 레퍼런스 에셋 순서 변경 — 드래그 핸들(⠿) (2402의 ▲▼ 화살표 폐기, 미배포였음). 행 왼쪽 그립만 draggable, `dataTransfer`에 `REORDER_MIME`(`application/x-seedance-reorder`) 세팅 → 같은 행의 "파일 드롭=교체"와 충돌 없이 구분(onDrop에서 `getData(REORDER_MIME)` 있으면 reorder, 없고 files면 replace). store `reorderAsset(draggedId, targetId)`(splice 이동, **id·객체 보존**). 멘션은 sync effect가 재번호 자동 갱신 — 핀은 id로 에셋 추적. **미배포(로컬 빌드)** |
 | **26.6.2401** | 06-24 | **레퍼런스 에셋 개별 교체** — Reference Assets 리스트의 각 행에 ↻ 교체 버튼(클릭 파일피커) + 행 전체 드롭 타깃(파일 드롭 → 그 에셋만 교체, 드래그오버 하이라이트). 기존 `replaceAsset`(id·위치 보존) 재사용 → 멘션 안전(이름 위치기반 유지 + 썸네일 sync effect가 자동 갱신). 타입 가드(이미지↔이미지만). 멘션/전송 로직 변경 0. 9개 중 N번째만 교체 가능. + 패널 빈곳 드롭 navigate 방지, 드래그취소 하이라이트 정리, build.cjs esbuild를 JS API로(Node25 npx 실패→stale server.cjs 방지) |
 | **26.6.1502** | 06-15 | **생성 시 자동 다운로드 토글** — 사이드바 다운로드 폴더 박스에 체크박스. ON이면 영상 완료 시 지정 폴더로 자동 저장(`pollTask` succeeded 블록에서 `downloadViaProxy`). **downloadedAt 미설정** = 수동 클릭만 '다시 다운로드' 라벨. succeeded 직후 **`flushPersist()`** 즉시 호출 → 완료상태 디스크 즉시 반영 → 재시작·자동업데이트 후 재다운로드 차단(완료 태스크는 재폴링 안 됨). `autoDownload`는 전역·영속(partialize). 폴더는 기존대로 세션 한정 |
 | **26.6.1501** | 06-15 | **버전 날짜 정정 재배포** — 1209와 코드 100% 동일, 라벨만 6/15로. (1201~1208은 12xx로 남김 = 실제는 6/15 작업분) |
