@@ -152,14 +152,16 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose }: {
           {/* Name */}
           <div className="space-y-1.5">
             <label className="block text-[12px] font-semibold text-black/70">이름</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 김현우"
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 김현우" autoFocus
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (!busy) save(); } }}
               className="w-full px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[14px] outline-none focus:border-[#0071e3] transition-colors" />
           </div>
 
           {/* Description */}
           <div className="space-y-1.5">
             <label className="block text-[12px] font-semibold text-black/70">설명 <span className="text-gray-400 font-normal">(선택)</span></label>
-            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="간단한 설명 (검색에 사용됨)"
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="간단한 설명 (검색에 사용됨) · 저장은 Ctrl+Enter"
+              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!busy) save(); } }}
               className="w-full px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[13px] outline-none focus:border-[#0071e3] transition-colors resize-none" />
           </div>
 
@@ -207,7 +209,7 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose }: {
           </div>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="text-[13px] font-medium text-gray-500 hover:text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100 transition-colors">취소</button>
-            <button onClick={save} disabled={busy} className="flex items-center gap-1.5 text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] disabled:opacity-50 px-4 py-2 rounded-lg transition-colors active:scale-95"><Check size={15} /> 저장</button>
+            <button onClick={save} disabled={busy} title="저장 (Enter)" className="flex items-center gap-1.5 text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] disabled:opacity-50 px-4 py-2 rounded-lg transition-colors active:scale-95"><Check size={15} /> 저장</button>
           </div>
         </div>
       </motion.div>
@@ -592,7 +594,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
         {/* Share-link banner */}
         <AnimatePresence>
           {shareLink && (
-            <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
+            <motion.div key="share-banner" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.16 }}
               className="absolute top-3 left-1/2 -translate-x-1/2 z-30 w-[min(560px,92%)] bg-white rounded-xl shadow-2xl border border-gray-200 px-4 py-3">
               <div className="flex items-center gap-2 mb-2">
@@ -613,6 +615,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
         <AnimatePresence>
           {importing && (
             <ImportDialog
+              key="import-dialog"
               currentCollectionName={selectedCollection?.name ?? null}
               onCommit={commitImport}
               onClose={() => setImporting(false)}
@@ -624,6 +627,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
         <AnimatePresence>
           {editing && (
             <AssetEditor
+              key="asset-editor"
               initial={editing === 'new' ? null : editing}
               onSave={commitSave}
               onDelete={editing !== 'new' ? () => { if (confirm(`'${editing.name}' 어셋을 삭제할까요? (앱에 저장된 이미지도 함께 삭제)`)) { deleteElementAsset(editing.id); setEditing(null); } } : null}

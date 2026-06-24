@@ -753,6 +753,128 @@ export function ChatArea() {
     }, 500);
   };
 
+  // Build a mention pill element — shared by click-to-mention and paste-to-mention.
+  const buildMentionPill = (item: any): HTMLSpanElement => {
+    const pill = document.createElement('span');
+    pill.contentEditable = 'false';
+    if (item.kind === 'element') {
+      const meta = CATEGORY_META[item.category as AssetCategory];
+      pill.className = 'element-pill';
+      pill.dataset.name = item.name;
+      pill.dataset.elementId = item.id;
+      pill.dataset.category = item.category;
+      pill.style.cssText = `display:inline-flex;align-items:center;background:${meta.bg};color:${meta.text};padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid ${meta.border};`;
+      const iconHtml = item.thumbnailUrl
+        ? `<img src="${item.thumbnailUrl}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
+        : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${meta.accent};margin-right:5px;"></span>`;
+      pill.innerHTML = `${iconHtml}<span data-el-text style="font-weight:500;">[${item.name}]</span>`;
+    } else {
+      pill.className = 'mention-pill'; pill.dataset.name = item.name; pill.dataset.assetId = item.id;
+      pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
+      const thumbSrc = (item.type === 'image_url' || item.type === 'video_url') ? (item.thumbnailUrl || (item.type === 'image_url' ? item.url : '')) : '';
+      const iconHtml = thumbSrc
+        ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
+        : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${item.type === 'video_url' ? '🎥' : '🎵'}</span>`;
+      pill.innerHTML = `${iconHtml}<span style="font-weight:500;">[${item.name}]</span>`;
+    }
+    return pill;
+  };
+
+  // ─── Paste-to-mention ───
+  // Parse pasted text, turning `@name` / `[name]` refs that match a panel asset
+  // (Image N / Video N / Audio N) or a bound-collection element into pills. Refs
+  // that don't match anything stay as literal text (e.g. "@image2" with no Image 2
+  // stays "@image2"). Element conversions respect the shared 9-image budget. Never
+  // throws on weird input — stray '@'/'[' just pass through.
+  const resolveMentionTokens = (text: string): Array<{ type: 'text'; text: string } | { type: 'pill'; item: any }> => {
+    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, '');
+    const panelCands = getAssetNames(project.assets)
+      .filter(a => a.role !== 'first_frame' && a.role !== 'last_frame')
+      .map(a => ({ kind: 'asset' as const, norm: norm(a.name), imgs: 0, item: { kind: 'asset', ...a } }));
+    const elemCands = (elementMentionEnabled ? collectionElements : [])
+      .map(e => ({ kind: 'element' as const, norm: norm(e.name), imgs: e.images.length, item: { kind: 'element', id: e.id, name: e.name, category: e.category, thumbnailUrl: e.images[0]?.thumbnailUrl || e.images[0]?.url || '' } }));
+    // elements first (user-named, specific), then panel; longest normalized name first
+    const cands = [...elemCands, ...panelCands].filter(c => c.norm).sort((a, b) => b.norm.length - a.norm.length);
+
+    const usedEl = new Set<string>();
+    mentionedElementStats().ids.forEach(id => usedEl.add(id));
+    let usedImgs = project.assets.filter(a => a.type === 'image_url').length
+      + [...usedEl].reduce((n, id) => n + (elementAssets.find(e => e.id === id)?.images.length || 0), 0);
+    const canConvert = (c: { kind: string; imgs: number; item: any }) => {
+      if (c.kind !== 'element') return true;          // panel mention adds no images (already attached)
+      if (usedEl.has(c.item.id)) return true;          // already counted (dedup)
+      if (usedImgs + c.imgs > 9) return false;         // would exceed shared cap → leave as text
+      usedEl.add(c.item.id); usedImgs += c.imgs;
+      return true;
+    };
+
+    // Space-flexible, case-insensitive match of candNorm against text from `pos`.
+    // Returns the end index, or -1. Rejects if the next char would extend the ref
+    // (so "@image1" never partial-matches inside "@image12").
+    const matchAt = (pos: number, candNorm: string) => {
+      let ti = pos, ci = 0;
+      while (ci < candNorm.length) {
+        while (ti < text.length && /\s/.test(text[ti])) ti++;
+        if (ti >= text.length || text[ti].toLowerCase() !== candNorm[ci]) return -1;
+        ti++; ci++;
+      }
+      if (ti < text.length && /[a-z0-9]/i.test(text[ti])) return -1;
+      return ti;
+    };
+
+    const nodes: Array<{ type: 'text'; text: string } | { type: 'pill'; item: any }> = [];
+    let buf = '';
+    const flush = () => { if (buf) { nodes.push({ type: 'text', text: buf }); buf = ''; } };
+    let i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '@') {
+        let hit: { c: any; end: number } | null = null;
+        for (const c of cands) { const end = matchAt(i + 1, c.norm); if (end !== -1) { hit = { c, end }; break; } }
+        if (hit && canConvert(hit.c)) { flush(); nodes.push({ type: 'pill', item: hit.c.item }); i = hit.end; continue; }
+      } else if (ch === '[') {
+        const close = text.indexOf(']', i + 1);
+        if (close !== -1 && close - i <= 60) {
+          const c = cands.find(x => x.norm === norm(text.slice(i + 1, close)));
+          if (c && canConvert(c)) { flush(); nodes.push({ type: 'pill', item: c.item }); i = close + 1; continue; }
+        }
+      }
+      buf += ch; i++;
+    }
+    flush();
+    return nodes;
+  };
+
+  // Insert resolved nodes (text + pills) at the caret, replacing any selection.
+  // Newlines become <br> so multi-line pasted prompts keep their line breaks.
+  const insertNodesAtCaret = (nodes: Array<{ type: 'text'; text: string } | { type: 'pill'; item: any }>) => {
+    const ce = contentEditableRef.current;
+    if (!ce) return;
+    ce.focus();
+    const sel = window.getSelection(); if (!sel?.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const frag = document.createDocumentFragment();
+    for (const n of nodes) {
+      if (n.type === 'text') {
+        n.text.split('\n').forEach((part, idx) => {
+          if (idx > 0) frag.appendChild(document.createElement('br'));
+          if (part) frag.appendChild(document.createTextNode(part));
+        });
+      } else {
+        frag.appendChild(buildMentionPill(n.item));
+        frag.appendChild(document.createTextNode(' '));
+      }
+    }
+    const last = frag.lastChild;
+    range.insertNode(frag);
+    if (last) { range.setStartAfter(last); range.collapse(true); sel.removeAllRanges(); sel.addRange(range); }
+    setMentionState(s => ({ ...s, active: false }));
+    setHasText(!!ce.innerText.trim());
+    syncMentionCount();
+    if (currentProjectId) useAppStore.getState().updateDraftPrompt(currentProjectId, ce.innerHTML);
+  };
+
   const insertMention = (item: any) => {
     if (!contentEditableRef.current) return;
     // Shared image budget: element images draw from the SAME 9-image cap as the
@@ -775,30 +897,7 @@ export function ChatArea() {
       const mentionStart = (range.startContainer.textContent || '').lastIndexOf('@', range.startOffset);
       if (mentionStart !== -1) { range.setStart(range.startContainer, mentionStart); range.deleteContents(); }
     }
-    const pill = document.createElement('span');
-    pill.contentEditable = 'false';
-    if (item.kind === 'element') {
-      // Library mention — distinct class (.element-pill) so the panel-asset sync
-      // effect never touches it; carries data-element-id + category color.
-      const meta = CATEGORY_META[item.category as AssetCategory];
-      pill.className = 'element-pill';
-      pill.dataset.name = item.name;
-      pill.dataset.elementId = item.id;
-      pill.dataset.category = item.category;
-      pill.style.cssText = `display:inline-flex;align-items:center;background:${meta.bg};color:${meta.text};padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid ${meta.border};`;
-      const iconHtml = item.thumbnailUrl
-        ? `<img src="${item.thumbnailUrl}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
-        : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${meta.accent};margin-right:5px;"></span>`;
-      pill.innerHTML = `${iconHtml}<span data-el-text style="font-weight:500;">[${item.name}]</span>`;
-    } else {
-      pill.className = 'mention-pill'; pill.dataset.name = item.name; pill.dataset.assetId = item.id;
-      pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
-      const thumbSrc = (item.type === 'image_url' || item.type === 'video_url') ? (item.thumbnailUrl || (item.type === 'image_url' ? item.url : '')) : '';
-      const iconHtml = thumbSrc
-        ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
-        : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${item.type === 'video_url' ? '🎥' : '🎵'}</span>`;
-      pill.innerHTML = `${iconHtml}<span style="font-weight:500;">[${item.name}]</span>`;
-    }
+    const pill = buildMentionPill(item);
     const space = document.createTextNode('\u00A0');
     range.insertNode(space); range.insertNode(pill);
     range.setStartAfter(space); range.collapse(true);
@@ -815,7 +914,17 @@ export function ChatArea() {
       .filter(it => it.kind === 'file' && it.type.startsWith('image/'))
       .map(it => it.getAsFile())
       .filter((f): f is File => !!f);
-    if (imageFiles.length === 0) return; // 텍스트 붙여넣기는 기본 동작 유지
+    if (imageFiles.length === 0) {
+      // Text paste: auto-convert @name / [name] refs to pills. Only intercept when
+      // at least one ref actually matches — otherwise let the default paste run so
+      // plain / multi-line text stays untouched.
+      const pasted = e.clipboardData?.getData('text/plain') || '';
+      if (pasted && /[@[]/.test(pasted)) {
+        const nodes = resolveMentionTokens(pasted);
+        if (nodes.some(n => n.type === 'pill')) { e.preventDefault(); insertNodesAtCaret(nodes); }
+      }
+      return; // plain text without matching refs → default paste
+    }
     e.preventDefault(); // 이미지가 프롬프트 HTML에 박히는 것 차단
 
     const mode = project.settings.mode;
