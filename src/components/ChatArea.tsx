@@ -1354,7 +1354,7 @@ export function ChatArea() {
     // usedAssets (panel refs) because reuse restores usedAssets to the panel,
     // whereas element images must ride the mention, not the panel. Thumbnails only.
     const usedElementImages = mentionedElements.flatMap(el =>
-      el.images.map((img, idx) => ({ id: `${el.id}-${idx}`, name: el.name, category: el.category, url: img.thumbnailUrl || img.url }))
+      el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, url: img.thumbnailUrl || img.url }))
     );
 
     for (let i = 0; i < outputCount; i++) {
@@ -1548,9 +1548,10 @@ export function ChatArea() {
                     ))}
                     {((previewItem.usedElementImages as any) || []).map((ei: any) => {
                       const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
+                      const full = elementAssets.find(e => e.id === ei.elementId)?.images.find((im: any) => im.id === ei.imageId)?.url;
                       return (
                         <div key={ei.id} title={ei.name} className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50" style={{ border: `2px solid ${meta.border}` }}>
-                          <HoverZoom className="block w-full h-full" src={ei.url}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                          <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full && full !== ei.url ? full : undefined}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                         </div>
                       );
                     })}
@@ -1656,9 +1657,10 @@ export function ChatArea() {
                               ))}
                               {((msg.usedElementImages as any) || []).map((ei: any) => {
                                 const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
+                                const full = elementAssets.find(e => e.id === ei.elementId)?.images.find((im: any) => im.id === ei.imageId)?.url;
                                 return (
                                   <div key={ei.id} title={ei.name} className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
-                                    <HoverZoom className="block w-full h-full" src={ei.url}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                                    <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full && full !== ei.url ? full : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                                     <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
                                   </div>
                                 );
