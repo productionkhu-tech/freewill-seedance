@@ -165,6 +165,7 @@ export interface ChatMessage {
   usedAssets?: Asset[];
   promptText?: string;
   promptHtml?: string; // innerHTML snapshot (with mention pills) for exact 재사용 — element mentions are stored as bare names in promptText and can't be re-pillified from it
+  usedElementImages?: { id: string; name: string; category: string; url: string }[]; // element-mention images shown on the card reference strip (panel refs are in usedAssets; element images ride the mention, so kept separate)
   downloadedAt?: number; // last time the user downloaded this video — flips the
                          // download button to "다시 다운로드" styling
 }

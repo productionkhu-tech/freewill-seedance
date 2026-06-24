@@ -1350,10 +1350,17 @@ export function ChatArea() {
       return out;
     }));
 
+    // Mentioned-element images for the card's reference strip. Kept separate from
+    // usedAssets (panel refs) because reuse restores usedAssets to the panel,
+    // whereas element images must ride the mention, not the panel. Thumbnails only.
+    const usedElementImages = mentionedElements.flatMap(el =>
+      el.images.map((img, idx) => ({ id: `${el.id}-${idx}`, name: el.name, category: el.category, url: img.thumbnailUrl || img.url }))
+    );
+
     for (let i = 0; i < outputCount; i++) {
       const id = crypto.randomUUID();
       systemMessageIds.push(id);
-      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets } as any);
+      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages } as any);
     }
     setTimeout(() => scrollToBottom(), 150);
 
@@ -1383,7 +1390,7 @@ export function ChatArea() {
           if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
           const taskId = data.id || data.data?.task_id;
           if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, promptText: plainText, promptHtml });
+          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml });
           useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
         } catch (error: any) {
           updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
@@ -1516,11 +1523,11 @@ export function ChatArea() {
                 <p className="text-[11px] font-semibold text-indigo-500 uppercase tracking-wider">{project.name}</p>
                 <p className="text-[15px] text-gray-800 mt-1 leading-relaxed whitespace-pre-wrap">{previewItem.promptText || '프롬프트 없음'}</p>
               </div>
-              {previewItem.usedAssets?.length > 0 && (
+              {(previewItem.usedAssets?.length > 0 || (previewItem.usedElementImages as any)?.length > 0) && (
                 <div>
                   <p className="text-[12px] font-semibold text-gray-500 mb-2">래퍼런스</p>
                   <div className="flex gap-2 flex-wrap">
-                    {previewItem.usedAssets.map((a: any, i: number) => (
+                    {(previewItem.usedAssets || []).map((a: any, i: number) => (
                       <div key={i} className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
                         {a.type === 'image_url' ? (
                           <HoverZoom className="block w-full h-full" src={a.url} fullSrc={a.cacheId ? `/api/cache/${a.cacheId}` : undefined}>
@@ -1539,6 +1546,14 @@ export function ChatArea() {
                         )}
                       </div>
                     ))}
+                    {((previewItem.usedElementImages as any) || []).map((ei: any) => {
+                      const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
+                      return (
+                        <div key={ei.id} title={ei.name} className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50" style={{ border: `2px solid ${meta.border}` }}>
+                          <HoverZoom className="block w-full h-full" src={ei.url}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1621,9 +1636,9 @@ export function ChatArea() {
                     <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-gray-50/80 to-white">
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1 min-w-0 flex flex-col sm:flex-row gap-3">
-                          {msg.usedAssets?.length > 0 && (
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {msg.usedAssets.map((asset: any, i: number) => (
+                          {(msg.usedAssets?.length > 0 || (msg.usedElementImages as any)?.length > 0) && (
+                            <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                              {(msg.usedAssets || []).map((asset: any, i: number) => (
                                 <div key={asset.id || i} className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white relative group shrink-0">
                                   {asset.type.startsWith('video') ? (
                                     asset.thumbnailUrl
@@ -1639,6 +1654,15 @@ export function ChatArea() {
                                   <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">{asset.role?.replace('_', ' ')}</div>
                                 </div>
                               ))}
+                              {((msg.usedElementImages as any) || []).map((ei: any) => {
+                                const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
+                                return (
+                                  <div key={ei.id} title={ei.name} className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
+                                    <HoverZoom className="block w-full h-full" src={ei.url}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                                    <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
                           <div className="flex-1 min-w-0">
