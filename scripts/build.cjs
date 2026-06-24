@@ -58,14 +58,26 @@ ensureBuilderPatch();
 // 1. Build frontend
 run('npx vite build', 'Building frontend (Vite)');
 
-// 2. Bundle server with esbuild (tree-shakes, bundles dependencies, single CJS file)
+// 2. Bundle server with esbuild (tree-shakes, bundles dependencies, single CJS file).
+//    Use esbuild's JS API directly instead of `npx esbuild` via execSync — on
+//    newer Node (25.x) the npx+cmd.exe spawn fails intermittently with a Windows
+//    error code, which previously left a STALE server.cjs silently packaged into
+//    the EXE. The JS API has no shell/npx layer, so it's reliable across Node
+//    versions. (buildSync throws on real errors → build fails loud, as it should.)
 const distServer = path.join(root, 'dist-server');
 if (!fs.existsSync(distServer)) fs.mkdirSync(distServer);
 
-run(
-  'npx esbuild server.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist-server/server.cjs --external:vite',
-  'Bundling server (esbuild)'
-);
+console.log('\n=== Bundling server (esbuild JS API) ===');
+require('esbuild').buildSync({
+  entryPoints: [path.join(root, 'server.ts')],
+  bundle: true,
+  platform: 'node',
+  target: 'node18',
+  format: 'cjs',
+  outfile: path.join(distServer, 'server.cjs'),
+  external: ['vite'],
+});
+console.log('  dist-server/server.cjs');
 
 // 3. Patch the bundled server to use production mode
 const serverFile = path.join(distServer, 'server.cjs');

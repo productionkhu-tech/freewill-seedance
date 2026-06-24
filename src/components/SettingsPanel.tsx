@@ -11,6 +11,12 @@ const RESOLUTIONS: { id: string; name: string }[] = [
 ];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
 
+// File picker accept filter per asset type (used by per-asset replace).
+const acceptFor = (type: 'image_url' | 'video_url' | 'audio_url') =>
+  type === 'image_url' ? 'image/*'
+  : type === 'video_url' ? 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm'
+  : 'audio/wav,audio/mpeg';
+
 const MODES: { id: GenerationMode; name: string }[] = [
   { id: 'text_to_video', name: 'Text to Video' },
   { id: 'image_to_video_first', name: 'Image to Video (First Frame)' },
@@ -86,6 +92,16 @@ export function SettingsPanel() {
   const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
+  const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
+
+  // Clear the per-row replace highlight when a drag ends anywhere (ESC-cancel
+  // or drop), so an abandoned drag doesn't leave a row stuck highlighted.
+  useEffect(() => {
+    const clear = () => setDragOverAssetId(null);
+    window.addEventListener('dragend', clear);
+    window.addEventListener('drop', clear);
+    return () => { window.removeEventListener('dragend', clear); window.removeEventListener('drop', clear); };
+  }, []);
 
   const project = projects.find((p) => p.id === currentProjectId);
 
@@ -232,6 +248,15 @@ export function SettingsPanel() {
   // referencing it stay attached). Used in modes with single-slot assets like
   // edit_video's video, so users can swap the source without deleting+re-adding.
   const handleReplaceFile = async (existing: Asset, file: File) => {
+    // Replace must keep the SAME media type (so the asset's role/name/mention
+    // stay valid). Block obvious cross-category swaps; ambiguous cases fall
+    // through to the per-type validators below.
+    const isVid = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(file.name);
+    const isAud = file.type.startsWith('audio/') || /\.(wav|mp3|mpeg|mpga)$/i.test(file.name);
+    const isImg = file.type.startsWith('image/') || /\.(jpe?g|png|webp|bmp|gif|tiff?|heic|heif)$/i.test(file.name);
+    if (existing.type === 'image_url' && (isVid || isAud)) { alert('이미지는 이미지로만 교체할 수 있어요.'); return; }
+    if (existing.type === 'video_url' && (isImg || isAud)) { alert('비디오는 비디오로만 교체할 수 있어요.'); return; }
+    if (existing.type === 'audio_url' && (isImg || isVid)) { alert('오디오는 오디오로만 교체할 수 있어요.'); return; }
     try {
       const updates: Partial<Asset> = { file_name: file.name };
       const originalPath = getFilePath(file);
@@ -315,7 +340,9 @@ export function SettingsPanel() {
   };
 
   return (
-    <div className="w-80 bg-[#f5f5f7] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0">
+    <div className="w-80 bg-[#f5f5f7] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => { e.preventDefault(); setDragOverAssetId(null); }}>
       <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 backdrop-blur-xl z-10">
         <Settings size={18} className="text-gray-500" />
         <h2 className="text-[21px] font-semibold text-[#1d1d1f] tracking-tight">Settings</h2>
@@ -400,7 +427,11 @@ export function SettingsPanel() {
 
           <div className="space-y-2">
             {namedAssets.map((asset) => (
-              <div key={asset.id} className="flex items-start justify-between p-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px]">
+              <div key={asset.id}
+                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverAssetId(asset.id); }}
+                onDragLeave={(e) => { if (!(e.currentTarget as Node).contains(e.relatedTarget as Node)) setDragOverAssetId(c => c === asset.id ? null : c); }}
+                onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverAssetId(null); const f = e.dataTransfer.files?.[0]; if (f) handleReplaceFile(asset, f); }}
+                className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverAssetId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] border-black/5'}`}>
                 <div className="flex items-center gap-2 overflow-hidden">
                   {asset.type === 'image_url' && (
                     (asset as any).thumbnailUrl || asset.url.startsWith('data:image') || asset.url.startsWith('http') ? (
@@ -422,12 +453,19 @@ export function SettingsPanel() {
                     <span className="text-[10px] font-medium text-gray-500">{asset.role}</span>
                   </div>
                 </div>
-                <button onClick={() => removeAsset(project.id, asset.id)} className="text-gray-400 hover:text-red-500 p-1 shrink-0">
-                  <Trash2 size={14} />
-                </button>
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <label title="이 에셋 교체 (클릭하거나 파일을 끌어다 놓기)" className="text-gray-400 hover:text-indigo-500 p-1 cursor-pointer">
+                    <RefreshCw size={14} />
+                    <input type="file" accept={acceptFor(asset.type)} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleReplaceFile(asset, f); e.target.value = ''; }} />
+                  </label>
+                  <button onClick={() => removeAsset(project.id, asset.id)} title="삭제" className="text-gray-400 hover:text-red-500 p-1">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
               </div>
             ))}
             {assets.length === 0 && <p className="text-xs text-gray-500 text-center py-2">No assets added yet.</p>}
+            {assets.length > 0 && <p className="text-[10px] text-gray-400 text-center pt-0.5">↻ 클릭 또는 파일 드롭으로 개별 에셋 교체 (멘션 유지)</p>}
           </div>
 
           <AnimatePresence mode="wait">
