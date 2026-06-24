@@ -12,7 +12,7 @@
 |------|------|
 | 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
 | GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.2404** (2026-06-24 배포) |
+| 현재 버전 | **v26.6.2407** (2026-06-24 배포) |
 | 사용자 | 김현우 / Studio Freewillusion TA |
 | 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
 | 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
@@ -23,6 +23,9 @@
 
 | 버전 | 날짜 | 핵심 변경 |
 |------|------|----------|
+| **26.6.2407** | 06-24 | **비디오 썸네일 검정 프레임 방지** — `createVideoThumbnail`이 0.1s만 캡처해 녹화·페이드인 인트로가 검정으로 잡히던 문제. 여러 지점(0.1·10·25·50·75%) 캡처 후 `getImageData` 평균 luma로 검정(<16) 건너뛰고 첫 비검정 프레임 선택(전부 어두우면 가장 밝은 것). 캡처 240px로 상향(행·호버 모두 선명). 썸네일 있는 비디오 호버는 이 좋은 썸네일 사용(라이브 video는 썸네일 없는 폴백만). (2405~2407 호버확대 묶음, 미배포) |
+| **26.6.2406** | 06-24 | **호버 확대에 비디오 첫 프레임** — HoverZoom `videoSrc` 추가: 비디오는 `<video src=/api/cache/{cacheId}#t=0.1 poster={썸네일}>`로 실제 첫 프레임 표시(캐시 만료 시 poster 폴백). 썸네일 없던 비디오도 cacheId 있으면 호버로 첫 프레임 봄. preload=metadata+range라 가벼움. (2405와 함께 묶임, 미배포 단계였음) |
+| **26.6.2405** | 06-24 | **레퍼런스 썸네일 호버 확대** — `HoverZoom`(`createPortal`로 body에 fixed 렌더 → overflow 클립 회피, 썸네일 왼쪽에 256px, 뷰포트 클램프). 이미지는 `/api/cache/{cacheId}` full-res 우선(onerror→썸네일). 적용: 어셋 패널(AssetRow)·프리뷰 모달·메시지 카드 usedAssets. **프롬프트 멘션 핀은 제외**(요청). **미배포(로컬 빌드)** |
 | **26.6.2404** | 06-24 | **순서 변경을 framer Reorder 소터블로** (2403 HTML5 드래그 폐기 — 색만 바뀌던 게 별로라는 피드백). `motion/react`의 `Reorder.Group/Item` + `useDragControls`로 행 자체가 들려 따라오고 나머지가 슬라이드. 행을 `AssetRow` 모듈 컴포넌트로 분리(행마다 useDragControls 필요). 그립 `onPointerDown→controls.start`만 드래그 시작(`dragListener=false`), 나머지 클릭 안전. **포인터 드래그라 HTML5 파일-드롭(교체)과 이벤트 채널 분리 → 충돌 없음.** store `setAssetOrder(orderedIds)`(id 기준 재배열, 객체·id 보존, 카운트 검증). 멘션은 sync effect가 재번호 자동. **+ 전송 레이스 픽스**: `handleSend`가 `getPlainText` 직전에 핀 라벨을 현재 `project.assets`로 강제 재동기화 — reorder 직후 즉시 전송 시 passive effect 미flush로 stale 라벨이 content[] 새 순서와 어긋나 멘션이 엉뚱한 에셋 가리키던 레이스 차단(검증: reorder→즉시전송 시 content순서·멘션 일치 확인). (2402 화살표·2403 HTML5드래그는 폐기·미배포 단계였음) |
 | **26.6.2403** | 06-24 | (폐기·미배포) 레퍼런스 에셋 순서 변경 — 드래그 핸들(⠿) (2402의 ▲▼ 화살표 폐기, 미배포였음). 행 왼쪽 그립만 draggable, `dataTransfer`에 `REORDER_MIME`(`application/x-seedance-reorder`) 세팅 → 같은 행의 "파일 드롭=교체"와 충돌 없이 구분(onDrop에서 `getData(REORDER_MIME)` 있으면 reorder, 없고 files면 replace). store `reorderAsset(draggedId, targetId)`(splice 이동, **id·객체 보존**). 멘션은 sync effect가 재번호 자동 갱신 — 핀은 id로 에셋 추적. **미배포(로컬 빌드)** |
 | **26.6.2401** | 06-24 | **레퍼런스 에셋 개별 교체** — Reference Assets 리스트의 각 행에 ↻ 교체 버튼(클릭 파일피커) + 행 전체 드롭 타깃(파일 드롭 → 그 에셋만 교체, 드래그오버 하이라이트). 기존 `replaceAsset`(id·위치 보존) 재사용 → 멘션 안전(이름 위치기반 유지 + 썸네일 sync effect가 자동 갱신). 타입 가드(이미지↔이미지만). 멘션/전송 로직 변경 0. 9개 중 N번째만 교체 가능. + 패널 빈곳 드롭 navigate 방지, 드래그취소 하이라이트 정리, build.cjs esbuild를 JS API로(Node25 npx 실패→stale server.cjs 방지) |

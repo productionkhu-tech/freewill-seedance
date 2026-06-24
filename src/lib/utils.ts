@@ -9,13 +9,17 @@ export function cn(...inputs: ClassValue[]) {
 // Used so video assets show a real preview in the asset list and mention pills
 // instead of a generic Video icon. Returns '' on any failure (codec, decode,
 // canvas) — callers should fall back to the icon when empty.
-export function createVideoThumbnail(file: File, size: number = 80): Promise<string> {
+export function createVideoThumbnail(file: File, size: number = 240): Promise<string> {
   return new Promise((resolve) => {
     const objectUrl = URL.createObjectURL(file);
     const video = document.createElement('video');
-    video.preload = 'metadata';
+    video.preload = 'auto';   // need real frames for seeking, not just metadata
     video.muted = true;
     (video as any).playsInline = true;
+    const canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
     let settled = false;
     const finish = (val: string) => {
       if (settled) return;
@@ -23,34 +27,52 @@ export function createVideoThumbnail(file: File, size: number = 80): Promise<str
       try { URL.revokeObjectURL(objectUrl); } catch {}
       resolve(val);
     };
+
+    // Capture at several points and keep the first non-black frame — recordings
+    // and fade-ins are pure black for the opening frames, so t=0.1 alone often
+    // yields a black thumbnail. Falls back to the brightest frame seen if every
+    // sample is dark.
+    let times: number[] = [];
+    let idx = 0;
+    let best = '';
+    let bestLuma = -1;
+    const BLACK = 16; // avg luma below this ≈ black
+
+    const next = () => {
+      if (idx >= times.length) return finish(best); // all dark → brightest
+      const t = times[idx++];
+      try { video.currentTime = t; } catch { finish(best); }
+    };
+
     video.onloadedmetadata = () => {
-      // Seek slightly past 0 — many codecs return a black frame at exactly 0.
-      try {
-        video.currentTime = Math.min(0.1, (video.duration || 1) * 0.1);
-      } catch {
-        finish('');
-      }
+      const d = (video.duration && isFinite(video.duration)) ? video.duration : 0;
+      const cand = d ? [Math.min(0.1, d), d * 0.1, d * 0.25, d * 0.5, d * 0.75] : [0.1, 0.5, 1, 2];
+      times = [...new Set(cand.map(t => +t.toFixed(3)).filter(t => t >= 0 && (!d || t < d)))];
+      next();
     };
+
     video.onseeked = () => {
+      const w = video.videoWidth, h = video.videoHeight;
+      if (!w || !h || !ctx) return next();
+      const scale = Math.max(size / w, size / h);
+      const sw = w * scale, sh = h * scale;
+      ctx.drawImage(video, (size - sw) / 2, (size - sh) / 2, sw, sh);
+      let luma = 999;
       try {
-        const w = video.videoWidth, h = video.videoHeight;
-        if (!w || !h) return finish('');
-        const canvas = document.createElement('canvas');
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return finish('');
-        const scale = Math.max(size / w, size / h);
-        const sw = w * scale, sh = h * scale;
-        ctx.drawImage(video, (size - sw) / 2, (size - sh) / 2, sw, sh);
-        finish(canvas.toDataURL('image/jpeg', 0.6));
-      } catch {
-        finish('');
-      }
+        const d = ctx.getImageData(0, 0, size, size).data;
+        let sum = 0, n = 0;
+        for (let i = 0; i < d.length; i += 4 * 16) { sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; n++; }
+        luma = n ? sum / n : 0;
+      } catch { /* tainted (shouldn't happen for same-origin blob) → treat as usable */ }
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+      if (luma > bestLuma) { bestLuma = luma; best = dataUrl; }
+      if (luma >= BLACK) return finish(dataUrl); // good, non-black frame
+      next(); // too dark, try a later point
     };
-    video.onerror = () => finish('');
-    // Safety net: some codecs never fire seeked; cap at 4s.
-    setTimeout(() => finish(''), 4000);
+
+    video.onerror = () => finish(best);
+    // Safety net: some codecs never fire seeked; cap total at 8s.
+    setTimeout(() => finish(best), 8000);
     video.src = objectUrl;
   });
 }

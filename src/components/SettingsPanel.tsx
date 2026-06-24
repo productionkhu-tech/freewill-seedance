@@ -3,6 +3,7 @@ import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
+import { HoverZoom } from './HoverZoom';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
@@ -57,13 +58,21 @@ function AssetRow({ asset, name, onReplaceFile, onRemove, dragOverId, setDragOve
         </span>
         {asset.type === 'image_url' && (
           thumb || asset.url.startsWith('data:image') || asset.url.startsWith('http')
-            ? <img src={thumb || asset.url} alt="asset" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
+            ? <HoverZoom className="shrink-0 inline-flex" src={thumb || asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}>
+                <img src={thumb || asset.url} alt="asset" className="w-8 h-8 object-cover rounded border border-gray-200 cursor-zoom-in" />
+              </HoverZoom>
             : <ImageIcon size={14} className="text-blue-500 shrink-0" />
         )}
         {asset.type === 'video_url' && (
           thumb
-            ? <img src={thumb} alt="video" className="w-8 h-8 object-cover rounded shrink-0 border border-gray-200" />
-            : <Video size={14} className="text-purple-500 shrink-0" />
+            ? <HoverZoom className="shrink-0 inline-flex" src={thumb}>
+                <img src={thumb} alt="video" className="w-8 h-8 object-cover rounded border border-gray-200 cursor-zoom-in" />
+              </HoverZoom>
+            : asset.cacheId
+              ? <HoverZoom className="shrink-0 inline-flex" src="" videoSrc={`/api/cache/${asset.cacheId}`}>
+                  <span className="w-8 h-8 flex items-center justify-center rounded border border-gray-200 bg-purple-50 cursor-zoom-in shrink-0"><Video size={14} className="text-purple-500" /></span>
+                </HoverZoom>
+              : <Video size={14} className="text-purple-500 shrink-0" />
         )}
         {asset.type === 'audio_url' && <Music size={14} className="text-green-500 shrink-0" />}
         <div className="flex flex-col overflow-hidden">

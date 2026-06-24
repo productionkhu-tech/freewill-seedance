@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useAppStore, AssetRole, flushPersist } from '../store';
+import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { motion, AnimatePresence } from 'motion/react';
@@ -1160,9 +1161,17 @@ export function ChatArea() {
                     {previewItem.usedAssets.map((a: any, i: number) => (
                       <div key={i} className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
                         {a.type === 'image_url' ? (
-                          <img src={a.url} className="w-full h-full object-cover" />
+                          <HoverZoom className="block w-full h-full" src={a.url} fullSrc={a.cacheId ? `/api/cache/${a.cacheId}` : undefined}>
+                            <img src={a.url} className="w-full h-full object-cover cursor-zoom-in" />
+                          </HoverZoom>
                         ) : a.type === 'video_url' && a.thumbnailUrl ? (
-                          <img src={a.thumbnailUrl} className="w-full h-full object-cover" />
+                          <HoverZoom className="block w-full h-full" src={a.thumbnailUrl}>
+                            <img src={a.thumbnailUrl} className="w-full h-full object-cover cursor-zoom-in" />
+                          </HoverZoom>
+                        ) : a.type === 'video_url' && a.cacheId ? (
+                          <HoverZoom className="block w-full h-full" src="" videoSrc={`/api/cache/${a.cacheId}`}>
+                            <div className="w-full h-full flex items-center justify-center text-gray-400 cursor-zoom-in"><Video size={20} /></div>
+                          </HoverZoom>
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-gray-400">{a.type === 'audio_url' ? <Music size={20} /> : <Video size={20} />}</div>
                         )}
@@ -1256,12 +1265,14 @@ export function ChatArea() {
                                 <div key={asset.id || i} className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white relative group shrink-0">
                                   {asset.type.startsWith('video') ? (
                                     asset.thumbnailUrl
-                                      ? <img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover" />
-                                      : <div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400"><Video size={14} /></div>
+                                      ? <HoverZoom className="block w-full h-full" src={asset.thumbnailUrl}><img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                                      : asset.cacheId
+                                        ? <HoverZoom className="block w-full h-full" src="" videoSrc={`/api/cache/${asset.cacheId}`}><div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400 cursor-zoom-in"><Video size={14} /></div></HoverZoom>
+                                        : <div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400"><Video size={14} /></div>
                                   ) : asset.type.startsWith('audio') ? (
                                     <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-400"><Music size={14} /></div>
                                   ) : (
-                                    <img src={asset.url} alt="" className="w-full h-full object-cover" />
+                                    <HoverZoom className="block w-full h-full" src={asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                                   )}
                                   <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">{asset.role?.replace('_', ' ')}</div>
                                 </div>
