@@ -104,6 +104,39 @@ export interface Asset {
                          // tmpfiles URL are gone (e.g. attached on a pre-2408 build).
 }
 
+/* ─── Element asset library (independent collections, mention-by-name) ───
+   Stored separately from project reference assets. An element's images keep a
+   FULL-RES base64 data URL in `url` so the library survives deletion of the
+   on-disk source file AND userData loss (the Documents backup mirror persists
+   the whole store JSON). At send time the base64 is re-cached + re-uploaded to
+   R2 via the SAME helpers panel assets use — no server.ts changes. */
+export type AssetCategory = 'character' | 'location' | 'prop';
+
+export interface ElementImage {
+  id: string;
+  url: string;          // full-res base64 data URL — durable source (backed up)
+  thumbnailUrl: string; // small base64 preview for the UI
+  cacheId?: string;     // opportunistic media-cache id for the fast send path
+  file_name?: string;
+}
+
+export interface ElementAsset {
+  id: string;
+  collectionId: string;
+  category: AssetCategory;
+  name: string;
+  description: string;
+  images: ElementImage[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AssetCollection {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
 export interface GenerationSettings {
   model: string;
   resolution: string;
@@ -151,6 +184,11 @@ interface AppState {
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
   setAutoDownload: (v: boolean) => void;
+  // Transient (NOT persisted): # of images from elements currently @mentioned in
+  // the active prompt. ChatArea writes it; SettingsPanel reads it to show the
+  // shared "panel + element" image budget in the Reference Assets hint.
+  mentionedElementImages: number;
+  setMentionedElementImages: (n: number) => void;
   setCurrentProjectId: (id: string) => void;
   createProject: () => void;
   renameProject: (id: string, name: string) => void;
@@ -169,6 +207,17 @@ interface AppState {
   clearMessages: (projectId: string) => void;
   pollTask: (projectId: string, messageId: string, taskId: string) => Promise<void>;
   cancelTask: (projectId: string, messageId: string, taskId: string) => Promise<void>;
+  // ─── Element library ───
+  assetCollections: AssetCollection[];
+  elementAssets: ElementAsset[];
+  projectCollectionId: Record<string, string>; // chat-projectId → bound collectionId
+  createCollection: (name: string) => string;   // returns the new collection id
+  renameCollection: (id: string, name: string) => void;
+  deleteCollection: (id: string) => void;        // also drops its elementAssets + bindings
+  addElementAsset: (asset: Omit<ElementAsset, 'id' | 'createdAt' | 'updatedAt'>) => void;
+  updateElementAsset: (id: string, updates: Partial<Omit<ElementAsset, 'id' | 'collectionId' | 'createdAt'>>) => void;
+  deleteElementAsset: (id: string) => void;
+  setProjectCollection: (projectId: string, collectionId: string | null) => void;
 }
 
 export const defaultSettings: GenerationSettings = {
@@ -191,6 +240,51 @@ export const useAppStore = create<AppState>()(
       currentProjectId: null,
       autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
+      mentionedElementImages: 0,
+      setMentionedElementImages: (n) => set({ mentionedElementImages: n }),
+      // ─── Element library state + actions ───
+      assetCollections: [],
+      elementAssets: [],
+      projectCollectionId: {},
+      createCollection: (name) => {
+        const id = uuidv4();
+        set((state) => ({
+          assetCollections: [...state.assetCollections, { id, name: name.trim() || '새 컬렉션', createdAt: Date.now() }],
+        }));
+        return id;
+      },
+      renameCollection: (id, name) => set((state) => ({
+        assetCollections: state.assetCollections.map((c) => (c.id === id ? { ...c, name: name.trim() || c.name } : c)),
+      })),
+      deleteCollection: (id) => set((state) => {
+        // Drop the collection, its element assets, and any project bindings to it.
+        const binding = { ...state.projectCollectionId };
+        for (const pid of Object.keys(binding)) if (binding[pid] === id) delete binding[pid];
+        return {
+          assetCollections: state.assetCollections.filter((c) => c.id !== id),
+          elementAssets: state.elementAssets.filter((a) => a.collectionId !== id),
+          projectCollectionId: binding,
+        };
+      }),
+      addElementAsset: (asset) => set((state) => ({
+        elementAssets: [...state.elementAssets, { ...asset, id: uuidv4(), createdAt: Date.now(), updatedAt: Date.now() }],
+      })),
+      // id + collectionId are pinned (a mention pill tracks the asset by id, so it
+      // must never change here — same invariant as replaceAsset for panel assets).
+      updateElementAsset: (id, updates) => set((state) => ({
+        elementAssets: state.elementAssets.map((a) =>
+          a.id === id ? { ...a, ...updates, id: a.id, collectionId: a.collectionId, updatedAt: Date.now() } : a
+        ),
+      })),
+      deleteElementAsset: (id) => set((state) => ({
+        elementAssets: state.elementAssets.filter((a) => a.id !== id),
+      })),
+      setProjectCollection: (projectId, collectionId) => set((state) => {
+        const binding = { ...state.projectCollectionId };
+        if (collectionId) binding[projectId] = collectionId;
+        else delete binding[projectId];
+        return { projectCollectionId: binding };
+      }),
       setCurrentProjectId: (id) => set({ currentProjectId: id }),
       createProject: () => {
         const newProject: Project = {
@@ -220,7 +314,9 @@ export const useAppStore = create<AppState>()(
           if (state.currentProjectId === id) {
             newCurrentId = newProjects.length > 0 ? newProjects[0].id : null;
           }
-          return { projects: newProjects, currentProjectId: newCurrentId };
+          const binding = { ...state.projectCollectionId };
+          delete binding[id]; // drop the deleted project's collection binding
+          return { projects: newProjects, currentProjectId: newCurrentId, projectCollectionId: binding };
         });
       },
       updateProjectSettings: (projectId, settings) => {
@@ -490,6 +586,9 @@ export const useAppStore = create<AppState>()(
         projects: state.projects,
         currentProjectId: state.currentProjectId,
         autoDownload: state.autoDownload,
+        assetCollections: state.assetCollections,
+        elementAssets: state.elementAssets,
+        projectCollectionId: state.projectCollectionId,
       }),
       onRehydrateStorage: () => {
         return () => {

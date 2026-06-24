@@ -244,7 +244,7 @@ async function startServer() {
   // Upload to R2 → returns a presigned GET URL (12h) BytePlus can fetch directly.
   // Key is unique-per-upload: same source video reused across tasks gets fresh keys,
   // so deleting task A's object never breaks task B that hasn't fetched yet.
-  async function uploadToR2(fileBuffer: Buffer, filename: string): Promise<string> {
+  async function uploadToR2(fileBuffer: Buffer, filename: string, opts?: { expiresIn?: number; contentType?: string; contentDisposition?: string }): Promise<string> {
     const ext = path.extname(filename) || '.mp4';
     const safeBase = path
       .basename(filename, ext)
@@ -257,16 +257,95 @@ async function startServer() {
       Bucket: R2_BUCKET!,
       Key: key,
       Body: fileBuffer,
-      ContentType: mimeFromExt(ext),
+      ContentType: opts?.contentType || mimeFromExt(ext),
+      ...(opts?.contentDisposition ? { ContentDisposition: opts.contentDisposition } : {}),
     }));
 
     const url = await getSignedUrl(
       r2,
       new GetObjectCommand({ Bucket: R2_BUCKET!, Key: key }),
-      { expiresIn: 12 * 60 * 60 }, // 12h — covers any realistic generation wait
+      { expiresIn: opts?.expiresIn ?? 12 * 60 * 60 }, // default 12h — covers a generation wait
     );
     return url;
   }
+
+  // ─── Element asset-pack sharing ───
+  // Client POSTs a JSON bundle (asset metadata + base64 images). We host it on R2
+  // under the element-packs/ prefix and return a 24h download link. Two layers of
+  // lifecycle: (1) the presigned URL controls ACCESS — dead after 24h, reusable
+  // any number of times within; (2) a persisted index + boot/hourly sweep DELETEs
+  // the R2 object after 24h so nothing accumulates. The sweep uses the same
+  // object-delete permission as upload (more reliable than bucket lifecycle, and
+  // no bucket-wide config that could touch generation media).
+  const PACK_PREFIX = 'element-packs/';
+  const PACK_TTL_MS = 24 * 60 * 60 * 1000;
+  const PACK_INDEX = path.join(CACHE_DIR, 'element-pack-index.json');
+  const loadPackIndex = (): { key: string; createdAt: number }[] => {
+    try { return JSON.parse(fs.readFileSync(PACK_INDEX, 'utf8')); } catch { return []; }
+  };
+  const savePackIndex = (list: { key: string; createdAt: number }[]) => {
+    try { fs.writeFileSync(PACK_INDEX, JSON.stringify(list)); } catch (e: any) { console.warn('[element-pack] index save failed:', e?.message); }
+  };
+  async function sweepExpiredPacks() {
+    const list = loadPackIndex();
+    if (list.length === 0) return;
+    const now = Date.now();
+    const keep: { key: string; createdAt: number }[] = [];
+    let deleted = 0;
+    for (const p of list) {
+      if (now - p.createdAt >= PACK_TTL_MS) {
+        try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET!, Key: p.key })); deleted++; }
+        catch { keep.push(p); /* delete failed (offline?) → retry next sweep */ }
+      } else keep.push(p);
+    }
+    if (keep.length !== list.length) savePackIndex(keep);
+    if (deleted) console.log(`[element-pack] swept ${deleted} expired pack(s) from R2`);
+  }
+  sweepExpiredPacks().catch(() => {});                                   // on boot
+  setInterval(() => { sweepExpiredPacks().catch(() => {}); }, 60 * 60 * 1000); // hourly
+
+  app.post('/api/element-pack', express.raw({ type: '*/*', limit: '120mb' }), async (req, res) => {
+    try {
+      const buf = Buffer.from(req.body as Buffer);
+      if (!buf.length) return res.status(400).json({ error: 'empty body' });
+      const key = `${PACK_PREFIX}${crypto.randomBytes(8).toString('hex')}-${Date.now()}.fwsl.json`;
+      await r2.send(new PutObjectCommand({
+        Bucket: R2_BUCKET!,
+        Key: key,
+        Body: buf,
+        ContentType: 'application/json',
+        ContentDisposition: 'attachment; filename="asset-pack.fwsl.json"',
+      }));
+      const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET!, Key: key }), { expiresIn: 24 * 60 * 60 }); // 24h
+      const list = loadPackIndex(); list.push({ key, createdAt: Date.now() }); savePackIndex(list);
+      res.json({ url, expiresInHours: 24 });
+    } catch (e: any) {
+      console.error('[element-pack] upload failed:', e?.message || e);
+      res.status(500).json({ error: e?.message || 'upload failed' });
+    }
+  });
+
+  // Import-by-link: fetch a shared pack URL server-side (no browser CORS) and
+  // return the JSON. SSRF-guarded — only our own R2 host is allowed. Body is the
+  // raw URL string (text/plain so the json parser skips it).
+  app.post('/api/element-pack/fetch', express.raw({ type: '*/*', limit: '64kb' }), async (req, res) => {
+    try {
+      const url = Buffer.from(req.body as Buffer).toString('utf8').trim();
+      if (!url) return res.status(400).json({ error: 'no url' });
+      let host = '';
+      try { host = new URL(url).hostname; } catch { return res.status(400).json({ error: '잘못된 링크' }); }
+      const r2Host = (() => { try { return new URL(R2_ENDPOINT!).hostname; } catch { return ''; } })();
+      if (!r2Host || host !== r2Host) return res.status(403).json({ error: '지원하지 않는 링크입니다 (Freewill 공유 링크만 가능)' });
+      const r = await fetch(url);
+      if (!r.ok) return res.status(502).json({ error: `링크를 불러올 수 없습니다 (${r.status}) — 만료됐거나 잘못된 링크` });
+      const text = await r.text();
+      if (text.length > 120 * 1024 * 1024) return res.status(413).json({ error: 'pack too large' });
+      res.type('application/json').send(text);
+    } catch (e: any) {
+      console.error('[element-pack/fetch] failed:', e?.message || e);
+      res.status(500).json({ error: e?.message || 'fetch failed' });
+    }
+  });
 
   // Cache file locally (for image/audio reuse) → returns { cacheId }
   app.post('/api/cache', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {

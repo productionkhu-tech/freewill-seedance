@@ -123,10 +123,12 @@ export const API_LIMITS = {
   // nominal range, not a hard reject. px bounds 300~6000 ARE hard limits.
   image: { maxSizeMB: 30, minPx: 300, maxPx: 6000 },
   video: {
-    maxSizeMB: 50, minDuration: 2, maxDuration: 15, maxTotalDuration: 15,
+    maxSizeMB: 200, minDuration: 2, maxDuration: 15, maxTotalDuration: 15,
     minPx: 300, maxPx: 6000, minRatio: 0.4, maxRatio: 2.5,
-    // width×height must fall in [640×640, 2206×946] — 1080p (1920×1080) fits
-    minTotalPx: 409600, maxTotalPx: 2086876,
+    // Total px must fall in [640×640=409600, 3326×2494=8295044] per the Seedance
+    // 2.0 API (covers up to 4k input). Previously mis-capped at ~1080p (2086876),
+    // which wrongly rejected valid 1080p+/4k reference videos. Size cap 200MB (was 50).
+    minTotalPx: 409600, maxTotalPx: 8295044,
   },
   audio: { maxSizeMB: 15, minDuration: 2, maxDuration: 15, maxTotalDuration: 15 },
   totalRequestMB: 64,
@@ -195,7 +197,7 @@ export function validateVideoFile(file: File): Promise<string | null> {
       if (d < API_LIMITS.video.minDuration) { resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`); return; }
       if (d > API_LIMITS.video.maxDuration) { resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.maxDuration}초)`); return; }
       // Check dimensions per API rules: each side 300–6000px, w/h ratio in
-      // [0.4, 2.5], total pixels in [640×640, 2206×946] (1080p input is allowed)
+      // [0.4, 2.5], total pixels in [640×640, 3326×2494] (up to 4k input allowed)
       const h = video.videoHeight;
       const w = video.videoWidth;
       if (h > 0 && w > 0) {
@@ -209,7 +211,7 @@ export function validateVideoFile(file: File): Promise<string | null> {
         }
         const totalPx = w * h;
         if (totalPx < minTotalPx) { resolve(`비디오 해상도 너무 작음: ${w}x${h} (최소 640x640 상당)`); return; }
-        if (totalPx > maxTotalPx) { resolve(`비디오 해상도 초과: ${w}x${h} (최대 1080p — 1920x1080 상당까지)`); return; }
+        if (totalPx > maxTotalPx) { resolve(`비디오 해상도 초과: ${w}x${h} (최대 4k — 3326x2494 상당까지)`); return; }
       }
       resolve(null);
     };
@@ -366,6 +368,46 @@ export function readFileAsDataUrl(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+// Reconstruct a File from a base64 data URL. Used to push element-library
+// images (stored as durable base64) back through the cacheFile → reuploadFromCache
+// path at send time, so they reach the API exactly like manual reference images.
+export async function dataUrlToFile(dataUrl: string, name: string): Promise<File> {
+  const blob = await (await fetch(dataUrl)).blob();
+  return new File([blob], name, { type: blob.type || 'image/png' });
+}
+
+// Upload an element asset-pack JSON bundle to R2 (via the server) and get back a
+// time-limited (7-day) download link to share. Content-Type octet-stream so the
+// server's route-level raw parser handles it (not the json parser).
+export async function createElementPackLink(bundleJson: string): Promise<string> {
+  const res = await fetch('/api/element-pack', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: bundleJson,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || '공유 링크 생성 실패');
+  }
+  const data = await res.json();
+  return data.url as string;
+}
+
+// Fetch a shared pack by its link (server proxies → avoids CORS). Returns the
+// raw bundle JSON text for parseBundle().
+export async function fetchElementPackByLink(url: string): Promise<string> {
+  const res = await fetch('/api/element-pack/fetch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: url,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || '링크에서 불러오기 실패');
+  }
+  return await res.text();
 }
 
 // In-memory blob cache — pre-fetched on generation success, used by both preview and download.

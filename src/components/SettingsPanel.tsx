@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
-import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw } from 'lucide-react';
+import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
+import { ElementLibrary } from './ElementLibrary';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
@@ -165,10 +166,11 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
+  const [elementOpen, setElementOpen] = useState(false);
 
   // Clear the per-row replace highlight when a drag ends anywhere (ESC-cancel
   // or drop), so an abandoned drag doesn't leave a row stuck highlighted.
@@ -184,6 +186,7 @@ export function SettingsPanel() {
   if (!project) return null;
   const { settings, assets } = project;
   const namedAssets = getAssetNames(assets);
+  const boundCollectionName = currentProjectId ? assetCollections.find(c => c.id === projectCollectionId[currentProjectId])?.name : undefined;
 
   const availableTypes = useMemo(() => {
     if (settings.mode === 'extend_video') return ['video_url'];
@@ -499,7 +502,21 @@ export function SettingsPanel() {
 
         {/* Assets */}
         <div className="bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">
-          <h3 className="text-[14px] font-semibold text-[#1d1d1f] tracking-tight border-b border-gray-100 pb-2">Reference Assets</h3>
+          <div className="flex items-center justify-between border-b border-gray-100 pb-2">
+            <div className="min-w-0">
+              <h3 className="text-[14px] font-semibold text-[#1d1d1f] tracking-tight">Reference Assets</h3>
+              {boundCollectionName && (
+                <button onClick={() => setElementOpen(true)} title="이 채팅의 @멘션에 사용 중인 어셋 컬렉션 (클릭: element 열기)"
+                  className="flex items-center gap-1 text-[10px] text-emerald-600 hover:text-emerald-700 font-medium mt-0.5 max-w-full">
+                  <FolderOpen size={11} className="shrink-0" /><span className="truncate">어셋: {boundCollectionName}</span>
+                </button>
+              )}
+            </div>
+            <button onClick={() => setElementOpen(true)} title="어셋 라이브러리 — 등록해 둔 캐릭터·로케이션·프랍을 @로 멘션"
+              className="flex items-center gap-1 text-[12px] font-medium text-[#0071e3] bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg transition-colors active:scale-95 shrink-0">
+              <Layers size={13} /> element
+            </button>
+          </div>
 
           <div className="space-y-2">
             <Reorder.Group as="div" axis="y" values={assets} onReorder={(newOrder) => setAssetOrder(project.id, (newOrder as Asset[]).map(a => a.id))} className="space-y-2">
@@ -538,11 +555,29 @@ export function SettingsPanel() {
 
               {settings.mode === 'multimodal_reference' && (
                 <div className="space-y-2">
-                  <p className="text-[12px] text-gray-500 leading-tight">
-                    이미지: {assets.filter(a => a.type === 'image_url').length}/9 (개당 30MB, 300~6000px)
-                    &nbsp;&middot;&nbsp;비디오: {assets.filter(a => a.type === 'video_url').length}/3 (개당 50MB, 2~15초)
-                    &nbsp;&middot;&nbsp;오디오: {assets.filter(a => a.type === 'audio_url').length}/3 (개당 15MB, 2~15초)
-                  </p>
+                  <div className="text-[11px] leading-snug space-y-1">
+                    {(() => {
+                      const panelImgs = assets.filter(a => a.type === 'image_url').length;
+                      const total = panelImgs + mentionedElementImages;
+                      return (
+                        <div className="flex items-baseline gap-2">
+                          <span className="w-10 shrink-0 font-semibold text-gray-600">이미지</span>
+                          <span className={`w-8 shrink-0 tabular-nums ${total > 9 ? 'text-red-500' : total === 9 ? 'text-amber-600' : 'text-gray-700'}`}>{total}/9</span>
+                          <span className="text-gray-400 whitespace-nowrap">개당 30MB · 300~6000px{mentionedElementImages > 0 ? ` · @어셋 ${mentionedElementImages}` : ''}</span>
+                        </div>
+                      );
+                    })()}
+                    <div className="flex items-baseline gap-2">
+                      <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
+                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'video_url').length}/3</span>
+                      <span className="text-gray-400 whitespace-nowrap">개당 200MB · 2~15초</span>
+                    </div>
+                    <div className="flex items-baseline gap-2">
+                      <span className="w-10 shrink-0 font-semibold text-gray-600">오디오</span>
+                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'audio_url').length}/3</span>
+                      <span className="text-gray-400 whitespace-nowrap">개당 15MB · 2~15초</span>
+                    </div>
+                  </div>
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
                   {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= 3)}
                   {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', true, assets.filter(a => a.type === 'audio_url').length >= 3)}
@@ -603,7 +638,7 @@ export function SettingsPanel() {
                     />
                   </div>
                   {assetIdType === 'video_url' && (
-                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">비디오: MP4/MOV, 480p~720p, 2~15초, 50MB 이하, 24~60fps</p>
+                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">비디오: MP4/MOV, 480p~4k, 2~15초, 200MB 이하, 24~60fps</p>
                   )}
                   {assetIdType === 'audio_url' && (
                     <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">오디오: WAV/MP3, 2~15초, 15MB 이하</p>
@@ -619,6 +654,10 @@ export function SettingsPanel() {
           </AnimatePresence>
         </div>
       </div>
+
+      <AnimatePresence>
+        {elementOpen && <ElementLibrary open={elementOpen} onClose={() => setElementOpen(false)} projectId={project.id} />}
+      </AnimatePresence>
     </div>
   );
 }

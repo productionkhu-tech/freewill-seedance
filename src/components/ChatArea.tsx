@@ -1,10 +1,24 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useAppStore, AssetRole, flushPersist } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage } from '../store';
 import { HoverZoom } from './HoverZoom';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
+import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile } from '../lib/utils';
+
+// Resolve one element-library image to a fresh R2 URL for the API payload. Tries
+// the opportunistic media-cache id first; on miss (30-day LRU eviction) rebuilds
+// from the durable base64 → re-caches → re-uploads. Same R2 path panel assets
+// use, so element images reach the API identically to manual references.
+async function resolveElementImageUrl(img: ElementImage): Promise<string> {
+  if (img.cacheId) {
+    try { return await reuploadFromCache(img.cacheId); } catch { /* evicted → rebuild from base64 below */ }
+  }
+  const file = await dataUrlToFile(img.url, img.file_name || 'element.png');
+  const cacheId = await cacheFile(file);
+  return await reuploadFromCache(cacheId);
+}
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -182,6 +196,12 @@ const getPlainText = (html: string) => {
   temp.querySelectorAll('.mention-pill').forEach(pill => {
     pill.replaceWith(`[${pill.getAttribute('data-name')}]`);
   });
+  // Element-library mentions resolve to the bare asset name so the prompt reads
+  // naturally ("김현우가 걷는다"); the asset's images ride along as reference
+  // images, merged into content[] at send time.
+  temp.querySelectorAll('.element-pill').forEach(pill => {
+    pill.replaceWith(pill.getAttribute('data-name') || '');
+  });
   temp.style.cssText = 'position:absolute;left:-9999px;white-space:pre-wrap;';
   document.body.appendChild(temp);
   const text = temp.innerText;
@@ -264,7 +284,7 @@ function CollapsiblePrompt({ promptText, namedAssets }: { promptText: string; na
 
 /* ─── Main Component ─── */
 export function ChatArea() {
-  const { projects, currentProjectId, addMessage, updateMessage, addAsset, removeAsset } = useAppStore();
+  const { projects, currentProjectId, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages } = useAppStore();
   const project = projects.find((p) => p.id === currentProjectId);
   const [hasText, setHasText] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -289,6 +309,26 @@ export function ChatArea() {
   const [promptHeight, setPromptHeight] = useState(160);
   const [downloads, setDownloads] = useState<Record<string, { received: number; total: number; state: string }>>({});
   const [downloadsCollapsed, setDownloadsCollapsed] = useState(false);
+
+  // Sum images of the distinct elements currently @mentioned in the prompt.
+  // Defined up here (before the effects/guard that use it) so it's never in its
+  // temporal dead zone. Uses elementAssets (not the post-guard elementById memo).
+  const mentionedElementStats = () => {
+    const ids = new Set<string>();
+    let count = 0;
+    contentEditableRef.current?.querySelectorAll('.element-pill').forEach(p => {
+      const id = p.getAttribute('data-element-id');
+      if (id && !ids.has(id)) { ids.add(id); const el = elementAssets.find(e => e.id === id); if (el) count += el.images.length; }
+    });
+    return { count, ids };
+  };
+  // Mirror the mentioned-element image count into the store (only when it changes)
+  // so SettingsPanel's "이미지 N/9" reflects elements used in the prompt, not just
+  // panel assets — i.e. the shared budget shows up there too.
+  const syncMentionCount = () => {
+    const n = mentionedElementStats().count;
+    if (useAppStore.getState().mentionedElementImages !== n) setMentionedElementImages(n);
+  };
 
   // Listen to download events from Electron main process
   useEffect(() => {
@@ -335,6 +375,7 @@ export function ChatArea() {
       const draft = newProject?.draftPrompt || '';
       contentEditableRef.current.innerHTML = draft;
       setHasText(!!contentEditableRef.current.innerText.trim());
+      syncMentionCount();
     }
     previousProjectIdRef.current = currentProjectId;
     setHeaderSearch('');
@@ -360,6 +401,7 @@ export function ChatArea() {
       if (detail?.projectId !== currentProjectId) return;
       if (contentEditableRef.current) contentEditableRef.current.innerHTML = '';
       setHasText(false);
+      syncMentionCount();
       if (currentProjectId) useAppStore.getState().updateDraftPrompt(currentProjectId, '');
     };
     window.addEventListener('seedance:reset', handler as EventListener);
@@ -410,6 +452,38 @@ export function ChatArea() {
     if (changed) setHasText(!!contentEditableRef.current.innerText.trim());
   }, [project?.assets]);
 
+  // Lookup across ALL collections — a pill stays valid even if the user later
+  // switches the bound collection; it only dies when the element is deleted.
+  // MUST be declared above the effect that lists it as a dependency: this hook
+  // runs before the `if (!project) return null` guard, so referencing it any
+  // later would hit its temporal dead zone during render (blank-screen crash).
+  const elementById = useMemo(() => new Map(elementAssets.map(e => [e.id, e] as const)), [elementAssets]);
+
+  // Element-pill counterpart — tracks library mentions (.element-pill) by their
+  // data-element-id. Separate from the panel-asset effect above (which only
+  // touches .mention-pill) so the two mention systems never interfere. Removes
+  // pills whose element was deleted, refreshes name + thumbnail on edit.
+  useEffect(() => {
+    if (!contentEditableRef.current) return;
+    let changed = false;
+    contentEditableRef.current.querySelectorAll('.element-pill').forEach(pill => {
+      const id = pill.getAttribute('data-element-id');
+      const el = id ? elementById.get(id) : null;
+      if (!el) { pill.remove(); changed = true; return; }
+      if (el.name !== pill.getAttribute('data-name')) {
+        pill.setAttribute('data-name', el.name);
+        const textSpan = pill.querySelector('span[data-el-text]');
+        if (textSpan) textSpan.textContent = `[${el.name}]`;
+        changed = true;
+      }
+      const img = pill.querySelector('img') as HTMLImageElement | null;
+      const newSrc = el.images[0]?.thumbnailUrl || el.images[0]?.url || '';
+      if (img && newSrc && img.getAttribute('src') !== newSrc) { img.setAttribute('src', newSrc); changed = true; }
+    });
+    if (changed) setHasText(!!contentEditableRef.current.innerText.trim());
+    syncMentionCount();
+  }, [elementById]);
+
   const handleMessagesScroll = useCallback(() => {
     if (messagesScrollRef.current) {
       const el = messagesScrollRef.current;
@@ -449,7 +523,29 @@ export function ChatArea() {
 
   const namedAssets = useMemo(() => getAssetNames(project.assets), [project.assets]);
   const mentionableAssets = useMemo(() => namedAssets.filter(a => a.role !== 'first_frame' && a.role !== 'last_frame'), [namedAssets]);
-  const filteredMentionAssets = useMemo(() => mentionableAssets.filter(a => a.name.toLowerCase().includes(mentionState.query.toLowerCase())), [mentionableAssets, mentionState.query]);
+
+  // Element library: the @ menu surfaces the bound collection's assets, but only
+  // in modes that actually take reference images (others can't carry them).
+  const boundCollectionId = currentProjectId ? projectCollectionId[currentProjectId] : undefined;
+  const boundCollectionName = boundCollectionId ? assetCollections.find(c => c.id === boundCollectionId)?.name : undefined;
+  const elementMentionEnabled = project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video';
+  const collectionElements = useMemo(
+    () => (elementMentionEnabled && boundCollectionId ? elementAssets.filter(a => a.collectionId === boundCollectionId) : []),
+    [elementAssets, boundCollectionId, elementMentionEnabled]
+  );
+
+  // Unified @ menu = panel reference assets + bound-collection elements, each
+  // tagged with `kind` so insertMention and the dropdown can branch.
+  const filteredMentionAssets = useMemo(() => {
+    const q = mentionState.query.toLowerCase();
+    const assetItems = mentionableAssets
+      .filter(a => a.name.toLowerCase().includes(q))
+      .map(a => ({ kind: 'asset' as const, ...a }));
+    const elementItems = collectionElements
+      .filter(e => e.name.toLowerCase().includes(q))
+      .map(e => ({ kind: 'element' as const, id: e.id, name: e.name, category: e.category, thumbnailUrl: e.images[0]?.thumbnailUrl || e.images[0]?.url || '' }));
+    return [...assetItems, ...elementItems];
+  }, [mentionableAssets, collectionElements, mentionState.query]);
 
   const displayMessages = useMemo(() => headerSearch.trim()
     ? project.messages.filter(m => m.promptText?.toLowerCase().includes(headerSearch.toLowerCase()))
@@ -601,11 +697,15 @@ export function ChatArea() {
 
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
     setHasText(!!e.currentTarget.innerText.trim());
+    syncMentionCount();
     const sel = window.getSelection();
     if (sel?.rangeCount) {
       const range = sel.getRangeAt(0);
       if (range.startContainer.nodeType === Node.TEXT_NODE) {
-        const match = range.startContainer.textContent?.slice(0, range.startOffset).match(/@(\w*)$/);
+        // `[^\s@]*` (not `\w*`) so the query captures Korean/Unicode asset names —
+        // `\w` is ASCII-only, which broke "@김…" filtering entirely. Closes on
+        // whitespace so a stray "@" in prose doesn't keep the menu open forever.
+        const match = range.startContainer.textContent?.slice(0, range.startOffset).match(/@([^\s@]*)$/);
         if (match) { mentionIndexRef.current = 0; setMentionState({ active: true, query: match[1] }); }
         else setMentionState(s => ({ ...s, active: false }));
       } else { setMentionState(s => ({ ...s, active: false })); }
@@ -653,8 +753,21 @@ export function ChatArea() {
     }, 500);
   };
 
-  const insertMention = (asset: any) => {
+  const insertMention = (item: any) => {
     if (!contentEditableRef.current) return;
+    // Shared image budget: element images draw from the SAME 9-image cap as the
+    // panel's reference images. Block the mention proactively if it would push the
+    // combined count past 9 — so it's caught here, not as a surprise at send.
+    if (item.kind === 'element') {
+      const panelImgs = project.assets.filter(a => a.type === 'image_url').length;
+      const { count, ids } = mentionedElementStats();
+      const adding = ids.has(item.id) ? 0 : (elementById.get(item.id)?.images.length || 0);
+      if (panelImgs + count + adding > 9) {
+        alert(`이미지 합산 9장을 넘습니다.\n패널 ${panelImgs}장 + 어셋 ${count}장${adding ? ` + ‘${item.name}’ ${adding}장` : ''} = ${panelImgs + count + adding}장.\n(어셋 이미지는 래퍼런스 패널과 9장을 나눠 씁니다)\n패널 이미지나 다른 어셋 멘션을 줄여주세요.`);
+        setMentionState(s => ({ ...s, active: false }));
+        return;
+      }
+    }
     contentEditableRef.current.focus();
     const sel = window.getSelection(); if (!sel?.rangeCount) return;
     const range = sel.getRangeAt(0);
@@ -663,18 +776,35 @@ export function ChatArea() {
       if (mentionStart !== -1) { range.setStart(range.startContainer, mentionStart); range.deleteContents(); }
     }
     const pill = document.createElement('span');
-    pill.contentEditable = 'false'; pill.className = 'mention-pill'; pill.dataset.name = asset.name; pill.dataset.assetId = asset.id;
-    pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
-    const thumbSrc = (asset.type === 'image_url' || asset.type === 'video_url') ? (asset.thumbnailUrl || (asset.type === 'image_url' ? asset.url : '')) : '';
-    const iconHtml = thumbSrc
-      ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
-      : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
-    pill.innerHTML = `${iconHtml}<span style="font-weight:500;">[${asset.name}]</span>`;
+    pill.contentEditable = 'false';
+    if (item.kind === 'element') {
+      // Library mention — distinct class (.element-pill) so the panel-asset sync
+      // effect never touches it; carries data-element-id + category color.
+      const meta = CATEGORY_META[item.category as AssetCategory];
+      pill.className = 'element-pill';
+      pill.dataset.name = item.name;
+      pill.dataset.elementId = item.id;
+      pill.dataset.category = item.category;
+      pill.style.cssText = `display:inline-flex;align-items:center;background:${meta.bg};color:${meta.text};padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid ${meta.border};`;
+      const iconHtml = item.thumbnailUrl
+        ? `<img src="${item.thumbnailUrl}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
+        : `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${meta.accent};margin-right:5px;"></span>`;
+      pill.innerHTML = `${iconHtml}<span data-el-text style="font-weight:500;">[${item.name}]</span>`;
+    } else {
+      pill.className = 'mention-pill'; pill.dataset.name = item.name; pill.dataset.assetId = item.id;
+      pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
+      const thumbSrc = (item.type === 'image_url' || item.type === 'video_url') ? (item.thumbnailUrl || (item.type === 'image_url' ? item.url : '')) : '';
+      const iconHtml = thumbSrc
+        ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
+        : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${item.type === 'video_url' ? '🎥' : '🎵'}</span>`;
+      pill.innerHTML = `${iconHtml}<span style="font-weight:500;">[${item.name}]</span>`;
+    }
     const space = document.createTextNode('\u00A0');
     range.insertNode(space); range.insertNode(pill);
     range.setStartAfter(space); range.collapse(true);
     sel.removeAllRanges(); sel.addRange(range);
     setMentionState(s => ({ ...s, active: false })); setHasText(true);
+    syncMentionCount();
   };
 
   // Clipboard image paste into the prompt box. Default contentEditable
@@ -921,6 +1051,33 @@ export function ChatArea() {
       if (totErr) { alert(totErr); return; }
     }
 
+    // ─── Element-library mentions → reference images (merged at send only) ───
+    // Collect distinct .element-pill ids in document order, resolve to assets.
+    const mentionedElementIds: string[] = [];
+    {
+      const seen = new Set<string>();
+      contentEditableRef.current.querySelectorAll('.element-pill').forEach(p => {
+        const id = p.getAttribute('data-element-id');
+        if (id && !seen.has(id)) { seen.add(id); mentionedElementIds.push(id); }
+      });
+    }
+    const mentionedElements = mentionedElementIds
+      .map(id => elementById.get(id))
+      .filter(Boolean) as typeof elementAssets;
+    if (mentionedElements.length > 0) {
+      // Reference images only carry in these two modes.
+      if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
+        alert('어셋 멘션은 Multimodal Reference 또는 Edit Video 모드에서만 레퍼런스로 전송됩니다.\n해당 모드로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.');
+        return;
+      }
+      const panelImageCount = project.assets.filter(a => a.type === 'image_url').length;
+      const elementImageCount = mentionedElements.reduce((n, e) => n + e.images.length, 0);
+      if (panelImageCount + elementImageCount > 9) {
+        alert(`이미지 합산 ${panelImageCount + elementImageCount}장 — 최대 9장까지만 보낼 수 있습니다.\n(래퍼런스 패널 ${panelImageCount}장 + 어셋 멘션 ${elementImageCount}장)\n어셋 멘션이나 패널 이미지를 줄여주세요.`);
+        return;
+      }
+    }
+
     const currentSettings = { ...project.settings };
     const currentAssets = [...project.assets];
 
@@ -967,6 +1124,23 @@ export function ChatArea() {
       }
     }
 
+    // Resolve mentioned element images → fresh R2 URLs (same cache→R2 path as
+    // panel assets). Built as reference_image content items, appended AFTER the
+    // panel assets so the panel's own [Image N] numbering is unaffected.
+    const elementContent: any[] = [];
+    for (const el of mentionedElements) {
+      for (const img of el.images) {
+        try {
+          const url = await resolveElementImageUrl(img);
+          elementContent.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
+        } catch {
+          alert(`어셋 '${el.name}'의 이미지 업로드에 실패했습니다. 다시 시도해주세요.`);
+          setIsGenerating(false);
+          return;
+        }
+      }
+    }
+
     // All checks passed — keep prompt/settings/assets intact for fast iteration; user manually clears if needed
 
     const outputCount = project.settings.output_count || 1;
@@ -1003,6 +1177,7 @@ export function ChatArea() {
         if (currentSettings.mode !== 'image_to_video_first') item.role = asset.role;
         return item;
       }));
+      content.push(...elementContent); // element-library mentions as extra reference images
       const payload: any = {
         model: project.settings.model, content,
         generate_audio: currentSettings.return_last_frame ? false : project.settings.generate_audio,
@@ -1401,14 +1576,33 @@ export function ChatArea() {
 
             {mentionState.active && filteredMentionAssets.length > 0 && (
               <div className="absolute bottom-full mb-2 left-4 bg-white border border-gray-200 rounded-xl shadow-xl overflow-hidden z-50 min-w-[250px] animate-slide-up">
-                <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs font-semibold text-gray-500">에셋 선택</div>
+                {(() => {
+                  const panelImgs = project.assets.filter(a => a.type === 'image_url').length;
+                  const elemImgs = elementMentionEnabled ? mentionedElementStats().count : 0;
+                  const used = panelImgs + elemImgs;
+                  return (
+                    <div className="px-3 py-2 bg-gray-50 border-b border-gray-100">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-semibold text-gray-500">에셋 선택</span>
+                        {elementMentionEnabled && <span className={`font-semibold tabular-nums ${used > 9 ? 'text-red-500' : used === 9 ? 'text-amber-600' : 'text-gray-400'}`} title="래퍼런스 패널 이미지 + 멘션한 어셋 이미지 합산 (최대 9장)">이미지 {used}/9</span>}
+                      </div>
+                      {boundCollectionName && <div className="flex items-center gap-1 text-[10px] font-medium text-emerald-600 mt-1 truncate" title="현재 채팅에 사용 중인 어셋 컬렉션"><FolderOpen size={10} className="shrink-0" /> {boundCollectionName}{elementMentionEnabled ? ` · 패널 ${panelImgs} + 어셋 ${elemImgs}` : ''}</div>}
+                    </div>
+                  );
+                })()}
                 <div className="max-h-48 overflow-y-auto">
-                  {filteredMentionAssets.map((asset, idx) => (
-                    <button key={asset.id} onClick={() => insertMention(asset)}
+                  {filteredMentionAssets.map((item, idx) => (
+                    <button key={(item.kind === 'element' ? 'el-' : 'as-') + item.id} onClick={() => insertMention(item)}
                       className={`mention-item w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-indigo-50 transition-none ${idx === mentionIndexRef.current ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700'}`}>
-                      {asset.type === 'image_url' && (asset.thumbnailUrl || asset.url) ? <img src={asset.thumbnailUrl || asset.url} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" /> : asset.type === 'image_url' ? <div className="w-6 h-6 bg-blue-50 flex items-center justify-center rounded shrink-0"><ImageIcon size={14} className="text-blue-500" /></div> : asset.type === 'video_url' ? <div className="w-6 h-6 bg-purple-50 flex items-center justify-center rounded shrink-0"><Video size={14} className="text-purple-500" /></div> : <div className="w-6 h-6 bg-green-50 flex items-center justify-center rounded shrink-0"><Music size={14} className="text-green-500" /></div>}
-                      <span className="font-medium">[{asset.name}]</span>
-                      <span className="text-xs text-gray-400 ml-auto">{asset.role}</span>
+                      {item.kind === 'element' ? (
+                        item.thumbnailUrl
+                          ? <img src={item.thumbnailUrl} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" />
+                          : <div className="w-6 h-6 flex items-center justify-center rounded shrink-0" style={{ background: CATEGORY_META[item.category].bg }}><span className="w-2 h-2 rounded-full" style={{ background: CATEGORY_META[item.category].accent }} /></div>
+                      ) : (
+                        item.type === 'image_url' && (item.thumbnailUrl || item.url) ? <img src={item.thumbnailUrl || item.url} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" /> : item.type === 'image_url' ? <div className="w-6 h-6 bg-blue-50 flex items-center justify-center rounded shrink-0"><ImageIcon size={14} className="text-blue-500" /></div> : item.type === 'video_url' ? <div className="w-6 h-6 bg-purple-50 flex items-center justify-center rounded shrink-0"><Video size={14} className="text-purple-500" /></div> : <div className="w-6 h-6 bg-green-50 flex items-center justify-center rounded shrink-0"><Music size={14} className="text-green-500" /></div>
+                      )}
+                      <span className="font-medium">[{item.name}]</span>
+                      <span className="text-xs ml-auto" style={item.kind === 'element' ? { color: CATEGORY_META[item.category].text } : { color: '#9ca3af' }}>{item.kind === 'element' ? CATEGORY_META[item.category].name : (item as any).role}</span>
                     </button>
                   ))}
                 </div>
