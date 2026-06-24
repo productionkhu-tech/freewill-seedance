@@ -190,17 +190,21 @@ const textToHtml = (text: string, assets: any[]) => {
   }).join('');
 };
 
-const getPlainText = (html: string) => {
+// elementTagMap (send only): element-pill id → "[Image N]" reference marker.
+// When given, element mentions become the BytePlus positional marker so the
+// model binds the name to its reference image (same as panel [Image N]). When
+// omitted (display / draft / copy), they resolve to the bare asset name so the
+// prompt reads naturally ("김현우가 걷는다").
+const getPlainText = (html: string, elementTagMap?: Map<string, string>) => {
   const temp = document.createElement('div');
   temp.innerHTML = html;
   temp.querySelectorAll('.mention-pill').forEach(pill => {
     pill.replaceWith(`[${pill.getAttribute('data-name')}]`);
   });
-  // Element-library mentions resolve to the bare asset name so the prompt reads
-  // naturally ("김현우가 걷는다"); the asset's images ride along as reference
-  // images, merged into content[] at send time.
   temp.querySelectorAll('.element-pill').forEach(pill => {
-    pill.replaceWith(pill.getAttribute('data-name') || '');
+    const id = pill.getAttribute('data-element-id');
+    const tag = id ? elementTagMap?.get(id) : undefined;
+    pill.replaceWith(tag != null ? tag : (pill.getAttribute('data-name') || ''));
   });
   temp.style.cssText = 'position:absolute;left:-9999px;white-space:pre-wrap;';
   document.body.appendChild(temp);
@@ -1365,7 +1369,21 @@ export function ChatArea() {
     setTimeout(() => scrollToBottom(), 150);
 
     try {
-      const content: any[] = [{ type: 'text', text: plainText }];
+      // Bind each element mention to its reference image via the BytePlus
+      // positional marker [Image N]. N continues AFTER the panel images and is
+      // computed fresh from the CURRENT panel here (never cached) — so trimming
+      // the panel 8→7 shifts the asset to [Image 8] correctly. Multi-image
+      // assets take consecutive numbers ([Image 8][Image 9]). Numbering walks
+      // mentionedElements in the SAME order their images are appended to
+      // content below, so labels and images line up exactly. The displayed pill
+      // and stored promptText stay the bare name; only this API text changes.
+      let imgN = currentAssets.filter(a => a.type === 'image_url').length;
+      const elementTagMap = new Map<string, string>();
+      for (const el of mentionedElements) {
+        elementTagMap.set(el.id, el.images.map(() => `[Image ${++imgN}]`).join(''));
+      }
+      const apiText = getPlainText(promptHtml, elementTagMap);
+      const content: any[] = [{ type: 'text', text: apiText }];
       content.push(...currentAssets.map(asset => {
         const item: any = { type: asset.type, [asset.type]: { url: asset.url } };
         if (currentSettings.mode !== 'image_to_video_first') item.role = asset.role;
