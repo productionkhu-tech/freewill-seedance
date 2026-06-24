@@ -55,8 +55,12 @@ function ensureBuilderPatch() {
 }
 ensureBuilderPatch();
 
-// 1. Build frontend
-run('npx vite build', 'Building frontend (Vite)');
+// 1. Build frontend — invoke vite's bin via `node` directly (NOT `npx vite`).
+//    On Node 25 + Windows the npx→cmd.exe spawn fails intermittently (same flaky
+//    error that broke the esbuild step), which would abort the build or, worse,
+//    silently leave a stale dist/. `node <vite-bin>` has no npx/shell-resolution
+//    layer, so it's reliable across Node versions.
+run(`node "${path.join(root, 'node_modules/vite/bin/vite.js')}" build`, 'Building frontend (Vite)');
 
 // 2. Bundle server with esbuild (tree-shakes, bundles dependencies, single CJS file).
 //    Use esbuild's JS API directly instead of `npx esbuild` via execSync — on
