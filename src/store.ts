@@ -234,6 +234,23 @@ export const defaultSettings: GenerationSettings = {
   mode: 'text_to_video',
 };
 
+// ── Seedance 2.0 model catalog ──────────────────────────────────────────────
+// Fast & Mini cap at 720p (no 1080p/4k per BytePlus spec); only the flagship
+// 2.0 supports 1080p. Single source of truth shared by the settings UI, the
+// hydration clamp, and the send-time guard so a model never receives an
+// unsupported resolution. Default model is the flagship (dreamina-seedance-2-0-260128).
+export const MODELS: { id: string; name: string }[] = [
+  { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
+  { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
+  { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini' },
+];
+
+export function modelResolutions(model: string): string[] {
+  return (model.includes('fast') || model.includes('mini'))
+    ? ['480p', '720p']
+    : ['480p', '720p', '1080p'];
+}
+
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -595,7 +612,7 @@ export const useAppStore = create<AppState>()(
       onRehydrateStorage: () => {
         return () => {
           // Migrate: fill missing settings fields with defaults + clamp invalid values
-          const validResolutions = ['480p', '720p', '1080p'];
+          const validModelIds = MODELS.map(m => m.id);
           const state = useAppStore.getState();
           const patched = state.projects.map(p => {
             const s = { ...defaultSettings, ...p.settings };
@@ -605,8 +622,10 @@ export const useAppStore = create<AppState>()(
               if (s.duration < 4) s.duration = 4;
               if (s.duration > 15) s.duration = 15;
             }
-            // Clamp resolution to supported values
-            if (!validResolutions.includes(s.resolution)) s.resolution = '720p';
+            // Unknown/legacy model → flagship default
+            if (!validModelIds.includes(s.model)) s.model = defaultSettings.model;
+            // Clamp resolution to what THIS model supports (Fast/Mini: no 1080p)
+            if (!modelResolutions(s.model).includes(s.resolution)) s.resolution = '720p';
             // Clear in-progress draft prompts on app restart (session-only persistence)
             return { ...p, settings: s, draftPrompt: '' };
           });

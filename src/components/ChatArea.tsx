@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, modelResolutions, MODELS } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -1270,6 +1270,11 @@ export function ChatArea() {
     }
 
     const currentSettings = { ...project.settings };
+    // Clamp resolution to what the chosen model supports (Fast/Mini have no
+    // 1080p) up-front, so the payload, the stored usedSettings, the card tag,
+    // and reuse all agree on the actually-sent value. The UI already gates this;
+    // this is the last line of defense against a stale/migrated setting.
+    if (!modelResolutions(currentSettings.model).includes(currentSettings.resolution)) currentSettings.resolution = '720p';
     const currentAssets = [...project.assets];
 
     // Pre-flight: legacy data URL safety check (only matters for old assets pre-URL migration)
@@ -1391,10 +1396,10 @@ export function ChatArea() {
       }));
       content.push(...elementContent); // element-library mentions as extra reference images
       const payload: any = {
-        model: project.settings.model, content,
-        generate_audio: currentSettings.return_last_frame ? false : project.settings.generate_audio,
-        ratio: project.settings.ratio, duration: project.settings.duration,
-        resolution: project.settings.resolution, watermark: false,
+        model: currentSettings.model, content,
+        generate_audio: currentSettings.return_last_frame ? false : currentSettings.generate_audio,
+        ratio: currentSettings.ratio, duration: currentSettings.duration,
+        resolution: currentSettings.resolution, watermark: false,
       };
       if (currentSettings.return_last_frame) payload.return_last_frame = true;
 
@@ -1578,7 +1583,7 @@ export function ChatArea() {
               )}
               {previewItem.usedSettings && (
                 <div className="flex flex-wrap gap-2">
-                  {[previewItem.usedSettings.mode, previewItem.usedSettings.resolution, previewItem.usedSettings.ratio, previewItem.usedSettings.duration === -1 ? 'Auto' : `${previewItem.usedSettings.duration}s`].map((tag, i) => (
+                  {[MODELS.find(m => m.id === previewItem.usedSettings?.model)?.name?.replace('Seedance ', '') || '2.0', previewItem.usedSettings.mode, previewItem.usedSettings.resolution, previewItem.usedSettings.ratio, previewItem.usedSettings.duration === -1 ? 'Auto' : `${previewItem.usedSettings.duration}s`].map((tag, i) => (
                     <span key={i} className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded-full text-[11px] font-medium">{tag}</span>
                   ))}
                 </div>
@@ -1691,7 +1696,7 @@ export function ChatArea() {
                               : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
-                                {[msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, msg.usedSettings.duration === -1 ? 'Auto' : `${msg.usedSettings.duration}s`].map((tag, i) => (
+                                {[MODELS.find(m => m.id === msg.usedSettings?.model)?.name?.replace('Seedance ', '') || '2.0', msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, msg.usedSettings.duration === -1 ? 'Auto' : `${msg.usedSettings.duration}s`].map((tag, i) => (
                                   <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full text-[10px] font-medium">{tag}</span>
                                 ))}
                               </div>

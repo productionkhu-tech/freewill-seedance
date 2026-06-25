@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelResolutions } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -438,6 +438,20 @@ export function SettingsPanel() {
           </div>
 
           <div className="space-y-2">
+            <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Model</label>
+            <CustomSelect
+              value={settings.model}
+              onChange={(val) => {
+                // Switching model may drop the current resolution (Fast/Mini have
+                // no 1080p) — clamp it in the SAME update so the two never disagree.
+                const res = modelResolutions(val).includes(settings.resolution) ? settings.resolution : '720p';
+                updateProjectSettings(project.id, { model: val, resolution: res });
+              }}
+              options={MODELS}
+            />
+          </div>
+
+          <div className="space-y-2">
             <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Generation Mode</label>
             <CustomSelect value={settings.mode} onChange={(val) => handleModeChange(val as GenerationMode)} options={MODES} />
           </div>
@@ -445,7 +459,7 @@ export function SettingsPanel() {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Resolution</label>
-              <CustomSelect value={settings.resolution} onChange={(val) => updateProjectSettings(project.id, { resolution: val })} options={RESOLUTIONS} />
+              <CustomSelect value={settings.resolution} onChange={(val) => updateProjectSettings(project.id, { resolution: val })} options={RESOLUTIONS.filter(r => modelResolutions(settings.model).includes(r.id))} />
             </div>
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Ratio</label>
