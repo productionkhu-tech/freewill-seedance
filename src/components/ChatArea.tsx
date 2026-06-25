@@ -249,7 +249,12 @@ const renderPromptHtml = (html: string): React.ReactNode[] => {
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     const el = node as HTMLElement;
-    if (el.tagName === 'BR') { out.push(<br key={i} />); return; }
+    // Emit a RAW newline, not <br>: the collapsed card uses `truncate`
+    // (white-space:nowrap) which collapses \n to a space → one-line preview,
+    // while the expanded card uses `whitespace-pre-wrap` → real line break.
+    // A literal <br> ignores white-space and would force multi-line even when
+    // collapsed, breaking the show-more/less toggle for multi-line prompts.
+    if (el.tagName === 'BR') { out.push('\n'); return; }
     const isPanel = el.classList.contains('mention-pill');
     const isElement = el.classList.contains('element-pill');
     if (isPanel || isElement) {
