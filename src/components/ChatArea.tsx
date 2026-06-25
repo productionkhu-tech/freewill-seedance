@@ -242,49 +242,74 @@ const renderPromptHtml = (html: string, namedAssets: any[]): React.ReactNode[] =
   const temp = document.createElement('div');
   temp.innerHTML = html;
   const out: React.ReactNode[] = [];
-  temp.childNodes.forEach((node, i) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      // Text that wasn't a pill at compose time can still hold literal
-      // [Image N]/[Video N]/[Audio N] markers (typed, or pasted before the refs
-      // existed). Re-pill them via renderMessageContent so the card matches the
-      // input — restores the pin display the pre-promptHtml renderer gave.
-      if (node.textContent) out.push(<Fragment key={i}>{renderMessageContent(node.textContent, namedAssets)}</Fragment>);
-      return;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    const el = node as HTMLElement;
-    // Emit a RAW newline, not <br>: the collapsed card uses `truncate`
-    // (white-space:nowrap) which collapses \n to a space → one-line preview,
-    // while the expanded card uses `whitespace-pre-wrap` → real line break.
-    // A literal <br> ignores white-space and would force multi-line even when
-    // collapsed, breaking the show-more/less toggle for multi-line prompts.
-    if (el.tagName === 'BR') { out.push('\n'); return; }
-    const isPanel = el.classList.contains('mention-pill');
-    const isElement = el.classList.contains('element-pill');
-    if (isPanel || isElement) {
-      const name = el.getAttribute('data-name') || '';
-      const thumb = el.querySelector('img')?.getAttribute('src') || '';
-      if (isElement) {
-        const cat = el.getAttribute('data-category') as AssetCategory;
-        const meta = (cat && CATEGORY_META[cat]) || { bg: '#f5f3ff', text: '#6d28d9', border: '#ddd6fe', accent: '#8b5cf6' };
-        out.push(
-          <span key={i} className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px] font-medium" style={{ background: meta.bg, color: meta.text, border: `1px solid ${meta.border}` }}>
-            {thumb ? <img src={thumb} className="w-4 h-4 object-cover rounded-sm" alt="" /> : <span className="w-2 h-2 rounded-full inline-block" style={{ background: meta.accent }} />}
-            <span>[{name}]</span>
-          </span>
-        );
-      } else {
-        out.push(
-          <span key={i} className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px]">
-            {thumb ? <img src={thumb} className="w-4 h-4 object-cover rounded-sm" alt="" /> : null}
-            <span className="font-medium">[{name}]</span>
-          </span>
-        );
+  let key = 0;
+  const endsWithNewline = () => out.length > 0 && out[out.length - 1] === '\n';
+
+  // Walk RECURSIVELY so the card mirrors exactly what the API send sees.
+  // getPlainText() builds the sent text via innerText, which turns block
+  // boundaries (<div>/<p>) AND <br> into "\n". We must match that here — and
+  // recurse INTO blocks — otherwise a 2nd+ line (Enter makes <div>, multi-line
+  // paste makes <div>) would lose its line break AND flatten its pills to plain
+  // text. Newlines are emitted as RAW "\n" (never <br>): the collapsed card uses
+  // `truncate` (white-space:nowrap) → squashes to a one-line preview, while the
+  // expanded card uses `whitespace-pre-wrap` → real line break. A literal <br>
+  // would ignore white-space and force multi-line even when collapsed.
+  const walk = (parent: Node) => {
+    parent.childNodes.forEach(node => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        // Literal [Image N]/[Video N]/[Audio N] in text (typed, or pasted before
+        // the refs existed) → re-pill via renderMessageContent so the card matches
+        // the input — restores the pin display the pre-promptHtml renderer gave.
+        if (node.textContent) out.push(<Fragment key={key++}>{renderMessageContent(node.textContent, namedAssets)}</Fragment>);
+        return;
       }
-      return;
-    }
-    if (el.textContent) out.push(<span key={i}>{el.textContent}</span>);
-  });
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const el = node as HTMLElement;
+      if (el.tagName === 'BR') { out.push('\n'); return; }
+      const isPanel = el.classList.contains('mention-pill');
+      const isElement = el.classList.contains('element-pill');
+      if (isPanel || isElement) {
+        const name = el.getAttribute('data-name') || '';
+        const thumb = el.querySelector('img')?.getAttribute('src') || '';
+        if (isElement) {
+          const cat = el.getAttribute('data-category') as AssetCategory;
+          const meta = (cat && CATEGORY_META[cat]) || { bg: '#f5f3ff', text: '#6d28d9', border: '#ddd6fe', accent: '#8b5cf6' };
+          out.push(
+            <span key={key++} className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px] font-medium" style={{ background: meta.bg, color: meta.text, border: `1px solid ${meta.border}` }}>
+              {thumb ? <img src={thumb} className="w-4 h-4 object-cover rounded-sm" alt="" /> : <span className="w-2 h-2 rounded-full inline-block" style={{ background: meta.accent }} />}
+              <span>[{name}]</span>
+            </span>
+          );
+        } else {
+          // Icon parity with renderMessageContent: image→thumb, video→thumb or
+          // Video icon, audio→Music icon. Type comes from the frozen usedAssets
+          // (namedAssets) so an audio/video pin still reads as that type, not a
+          // bare name, in the card.
+          const asset = namedAssets.find((a: any) => a.name === name);
+          out.push(
+            <span key={key++} className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px]">
+              {thumb ? <img src={thumb} className="w-4 h-4 object-cover rounded-sm" alt="" />
+                : asset?.type === 'video_url' ? <Video size={12} />
+                : asset?.type === 'audio_url' ? <Music size={12} />
+                : null}
+              <span className="font-medium">[{name}]</span>
+            </span>
+          );
+        }
+        return;
+      }
+      // Block element → starts on its own line (mirror innerText), then recurse
+      // so its text + pills render instead of being flattened to textContent.
+      if (el.tagName === 'DIV' || el.tagName === 'P') {
+        if (out.length > 0 && !endsWithNewline()) out.push('\n');
+        walk(el);
+        return;
+      }
+      // Inline wrapper (span/b/i/…) → recurse to catch nested pills & text.
+      walk(el);
+    });
+  };
+  walk(temp);
   return out;
 };
 
