@@ -310,7 +310,9 @@ function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText
       <div
         className={
           'flex-1 min-w-0 text-[14px] text-gray-800 font-medium leading-relaxed ' +
-          (expanded ? 'whitespace-pre-wrap break-words' : 'truncate')
+          // Expanded: cap height + scroll so a very long prompt doesn't blow the
+          // card up to thousands of px; collapsed stays a 1-line truncated preview.
+          (expanded ? 'whitespace-pre-wrap break-words max-h-[50vh] overflow-y-auto pr-1' : 'truncate')
         }
       >
         {promptHtml ? renderPromptHtml(promptHtml) : renderMessageContent(promptText, namedAssets)}
@@ -1664,7 +1666,7 @@ export function ChatArea() {
                     {/* Card Header */}
                     <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-gray-50/80 to-white">
                       <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0 flex flex-col sm:flex-row gap-3">
+                        <div className="flex-1 min-w-0 flex flex-col gap-3">
                           {(msg.usedAssets?.length > 0 || (msg.usedElementImages as any)?.length > 0) && (
                             <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
                               {(msg.usedAssets || []).map((asset: any, i: number) => (
