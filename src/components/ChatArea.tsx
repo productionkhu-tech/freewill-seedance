@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, modelResolutions, MODELS } from '../store';
 import { HoverZoom } from './HoverZoom';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
@@ -1135,7 +1135,10 @@ export function ChatArea() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
-  const handleReuse = async (msg: any) => {
+  const handleReuse = async (msg: any): Promise<boolean> => {
+    // Returns false if any reference asset could not be restored (already alerted).
+    // 재사용 ignores the return; 재생성 uses it to abort before sending.
+    let assetsOk = true;
     if (msg.usedSettings) useAppStore.getState().updateProjectSettings(project.id, msg.usedSettings);
     if (msg.usedAssets) {
       // Build the full restored list FIRST, then commit in one atomic store call.
@@ -1186,6 +1189,7 @@ export function ChatArea() {
       }
       useAppStore.getState().replaceAllAssets(project.id, restored);
       if (failures.length > 0) {
+        assetsOk = false;
         alert(`일부 래퍼런스 복원 실패:\n\n${failures.join('\n')}\n\n파일을 다시 첨부해주세요.`);
       }
     }
@@ -1209,10 +1213,11 @@ export function ChatArea() {
       // Element pills: validate against the live (global) library. Drop pills whose
       // element was deleted; refresh name + thumbnail for the rest so a renamed or
       // re-imaged asset shows current state and the next send merges its images.
+      const droppedElements: string[] = [];
       contentEditableRef.current.querySelectorAll('.element-pill').forEach(pill => {
         const id = pill.getAttribute('data-element-id');
         const el = id ? useAppStore.getState().elementAssets.find(e => e.id === id) : null;
-        if (!el) { pill.remove(); return; }
+        if (!el) { droppedElements.push(pill.getAttribute('data-name') || '(이름 없음)'); pill.remove(); return; }
         pill.setAttribute('data-name', el.name);
         const textSpan = pill.querySelector('span[data-el-text]');
         if (textSpan) textSpan.textContent = `[${el.name}]`;
@@ -1220,17 +1225,32 @@ export function ChatArea() {
         const newSrc = el.images[0]?.thumbnailUrl || el.images[0]?.url || '';
         if (img && newSrc) img.setAttribute('src', newSrc);
       });
+      // A mentioned element that was deleted from the library can't be merged →
+      // the regenerated video would silently lose that subject. Flag it (assetsOk
+      // = false aborts 재생성) and tell the user, mirroring the panel-asset case.
+      if (droppedElements.length > 0) {
+        assetsOk = false;
+        alert(`멘션한 어셋이 삭제되어 빠졌습니다:\n\n${droppedElements.join(', ')}\n\n어셋 라이브러리에서 복구하거나, 프롬프트에서 해당 멘션을 지운 뒤 다시 시도해주세요.`);
+      }
       setHasText(true);
       syncMentionCount();
       if (currentProjectId) useAppStore.getState().updateDraftPrompt(currentProjectId, contentEditableRef.current.innerHTML);
     }
     if (showGallery) exitGallery();
     setPreviewItem(null);
+    return assetsOk;
   };
 
   /* ─── Send ─── */
   const handleSend = async () => {
     if (!contentEditableRef.current || isGenerating) return;
+    // Read the project FRESH from the store rather than the render closure: 재생성
+    // calls handleReuse() (which mutates settings + assets) and then handleSend()
+    // in the SAME tick, before React re-renders — so the closure's `project` would
+    // be stale and we'd send the OLD setup. getState() guarantees the just-restored
+    // setup is what gets sent. For a normal send this is identical to the closure.
+    const project = useAppStore.getState().projects.find(p => p.id === currentProjectId);
+    if (!project) return;
     // Force mention labels to the CURRENT asset order before reading the prompt.
     // The [project.assets] sync effect is async (passive), so if the user
     // reorders/replaces and sends in the same tick, the pills could still hold
@@ -1461,6 +1481,26 @@ export function ChatArea() {
     } catch (error: any) {
       systemMessageIds.forEach(id => updateMessage(project.id, id, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() }));
     } finally { setIsGenerating(false); }
+  };
+
+  /* ─── Regenerate: restore this card's exact setup, then re-run the SAME send ─── */
+  // Reuses the proven handleReuse + handleSend paths verbatim → the payload,
+  // [Image N] numbering, R2 re-upload and validation are byte-for-byte a normal
+  // send, so it can't diverge/tangle. Aborts (no send) when handleReuse reports a
+  // reference it couldn't restore — the user sees "파일을 다시 첨부" instead of a
+  // broken request. regenLockRef stops a double-click from firing two runs in the
+  // window before handleSend flips isGenerating.
+  const regenLockRef = useRef(false);
+  const handleRegenerate = async (msg: any) => {
+    if (isGenerating || regenLockRef.current) return;
+    regenLockRef.current = true;
+    try {
+      const ok = await handleReuse(msg);
+      if (!ok) return;
+      await handleSend();
+    } finally {
+      regenLockRef.current = false;
+    }
   };
 
   /* ─── Render ─── */
@@ -1753,6 +1793,9 @@ export function ChatArea() {
                         </div>
                         <div className="flex items-center gap-0.5 shrink-0">
                           <button onClick={() => handleReuse(msg)} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors" title="프롬프트 재사용"><RefreshCw size={15} /></button>
+                          {(msg.status === 'succeeded' || msg.status === 'failed') && (
+                            <button onClick={() => handleRegenerate(msg)} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title="재생성 (같은 설정·래퍼런스로 다시 생성)"><Sparkles size={15} /></button>
+                          )}
                           <button onClick={() => useAppStore.getState().deleteMessage(project.id, msg.id)} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="삭제"><Trash2 size={15} /></button>
                         </div>
                       </div>
