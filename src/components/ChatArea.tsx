@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, modelResolutions, MODELS } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen } from 'lucide-react';
@@ -238,13 +238,17 @@ const renderMessageContent = (content: string, namedAssets: any[]) => {
    image icons. No dangerouslySetInnerHTML: text nodes render as text and any
    unknown element degrades to its textContent, so user-typed/pasted markup can
    never execute. Thumbnails are the frozen ones baked in at send. */
-const renderPromptHtml = (html: string): React.ReactNode[] => {
+const renderPromptHtml = (html: string, namedAssets: any[]): React.ReactNode[] => {
   const temp = document.createElement('div');
   temp.innerHTML = html;
   const out: React.ReactNode[] = [];
   temp.childNodes.forEach((node, i) => {
     if (node.nodeType === Node.TEXT_NODE) {
-      if (node.textContent) out.push(<span key={i}>{node.textContent}</span>);
+      // Text that wasn't a pill at compose time can still hold literal
+      // [Image N]/[Video N]/[Audio N] markers (typed, or pasted before the refs
+      // existed). Re-pill them via renderMessageContent so the card matches the
+      // input — restores the pin display the pre-promptHtml renderer gave.
+      if (node.textContent) out.push(<Fragment key={i}>{renderMessageContent(node.textContent, namedAssets)}</Fragment>);
       return;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -315,7 +319,7 @@ function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText
           (expanded ? 'whitespace-pre-wrap break-words max-h-[50vh] overflow-y-auto pr-1' : 'truncate')
         }
       >
-        {promptHtml ? renderPromptHtml(promptHtml) : renderMessageContent(promptText, namedAssets)}
+        {promptHtml ? renderPromptHtml(promptHtml, namedAssets) : renderMessageContent(promptText, namedAssets)}
       </div>
       <div className="flex items-center gap-0.5 shrink-0 -mt-0.5">
         <button
@@ -745,6 +749,9 @@ export function ChatArea() {
       if (i === mentionIndexRef.current) {
         item.classList.add('bg-indigo-50', 'text-indigo-700');
         item.classList.remove('text-gray-700');
+        // Keep the keyboard-selected item visible — the list scrolls (max-h-48),
+        // so navigating to the 4th+ item must bring it into the scroll viewport.
+        (item as HTMLElement).scrollIntoView({ block: 'nearest' });
       } else {
         item.classList.remove('bg-indigo-50', 'text-indigo-700');
         item.classList.add('text-gray-700');
