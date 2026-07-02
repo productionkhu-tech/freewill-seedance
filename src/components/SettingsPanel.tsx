@@ -235,6 +235,17 @@ export function SettingsPanel() {
     }
   };
 
+  // Omni task switch — mirror handleModeChange: each task expects different assets
+  // (edit=video, reference=images, image_to_video=frame, text=none), so clear the old
+  // refs on switch. Without this, stale assets from the previous task block/err the new
+  // one (e.g. leftover images make Edit reject, a leftover video blocks a new upload).
+  const handleOmniTaskChange = (val: string) => {
+    if (val === settings.omniTask) return;
+    updateProjectSettings(project.id, { omniTask: val });
+    assets.forEach(a => removeAsset(project.id, a.id));
+    setAssetIdType('image_url');
+  };
+
   const handleAddAssetId = () => {
     if (!assetIdInput.trim()) return;
     if (settings.mode === 'text_to_video') return;
@@ -514,6 +525,13 @@ export function SettingsPanel() {
                   // Task is always explicit — normalize any empty/legacy value to a real task.
                   if (!OMNI_TASKS.some(t => t.id === settings.omniTask)) patch.omniTask = 'text_to_video';
                 }
+                // Provider switch (Seedance ↔ Omni) → clear assets. The two have different
+                // asset semantics (roles/types/limits); stale refs otherwise error or block
+                // the new provider (e.g. leftover Seedance images make Omni Edit reject).
+                if (modelProvider(val) !== modelProvider(settings.model)) {
+                  assets.forEach(a => removeAsset(project.id, a.id));
+                  setAssetIdType('image_url');
+                }
                 updateProjectSettings(project.id, patch);
               }}
               options={MODELS}
@@ -523,7 +541,7 @@ export function SettingsPanel() {
           <div className="space-y-2">
             <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">{isOmni ? 'Video task' : 'Generation Mode'}</label>
             {isOmni
-              ? <CustomSelect value={OMNI_TASKS.some(t => t.id === settings.omniTask) ? (settings.omniTask as string) : 'text_to_video'} onChange={(val) => updateProjectSettings(project.id, { omniTask: val })} options={OMNI_TASKS} />
+              ? <CustomSelect value={OMNI_TASKS.some(t => t.id === settings.omniTask) ? (settings.omniTask as string) : 'text_to_video'} onChange={handleOmniTaskChange} options={OMNI_TASKS} />
               : <CustomSelect value={settings.mode} onChange={(val) => handleModeChange(val as GenerationMode)} options={MODES} />}
           </div>
 
