@@ -493,10 +493,14 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
     return;
   }
 
-  // Slow path: Electron direct download from BytePlus CDN (cold cache → may be slow)
+  // Cold cache: download THROUGH the local proxy, not straight from the CDN. Chromium's
+  // downloadURL() direct from the BytePlus signed URL throttled to ~70KB/s here (14MB → 5min),
+  // while the server proxy fetches the same URL at full speed (~4MB/s) and serves it from
+  // localhost. So route the Electron download at the proxy endpoint.
   const api = (window as any).electronAPI;
   if (api?.download) {
-    await api.download({ url: remoteUrl, filename });
+    const proxied = `${location.origin}/api/download?url=${encodeURIComponent(remoteUrl)}&filename=${encodeURIComponent(filename)}`;
+    await api.download({ url: proxied, filename });
     return;
   }
   // Browser/dev fallback

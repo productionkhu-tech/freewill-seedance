@@ -4,7 +4,6 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { Readable } from 'stream';
 import {
   S3Client,
   PutObjectCommand,
@@ -176,25 +175,13 @@ async function startServer() {
       if (cl) res.setHeader('Content-Length', cl);
 
       if (!response.body) return res.status(500).end();
-      // Use Node Readable.fromWeb + pipe → handles backpressure, no memory copy, much higher throughput
-      const nodeStream = Readable.fromWeb(response.body as any);
-
-      // Cancel upstream when client disconnects (avoids server holding zombie BytePlus fetches)
-      const onClientClose = () => {
-        if (!res.writableEnded) {
-          try { nodeStream.destroy(); } catch {}
-          try { upstreamController.abort(); } catch {}
-        }
-      };
-      res.on('close', onClientClose);
-
-      nodeStream.on('error', (err) => {
-        console.error('[Download] upstream error:', (err as Error).message);
-        if (!res.headersSent) { try { res.status(502).end(); } catch {} }
-        else { try { res.destroy(); } catch {} }
-      });
-
-      nodeStream.pipe(res);
+      // IMPORTANT: piping the undici web-stream straight to the Express `res` throttles the
+      // download to ~70KB/s, even though the SAME fetch streams to a file at 4–6MB/s — a
+      // pathology in the web-stream → http.ServerResponse backpressure adapter. Reading the
+      // body fully first (fetch pulls at full speed) then sending it as one write is ~60× faster.
+      res.on('close', () => { if (!res.writableEnded) { try { upstreamController.abort(); } catch {} } });
+      const buf = Buffer.from(await response.arrayBuffer());
+      res.end(buf);
     } catch (error: any) {
       console.error('[Download] fetch error:', error.message);
       if (!res.headersSent) res.status(500).json({ error: error.message });
