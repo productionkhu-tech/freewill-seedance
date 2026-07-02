@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, modelResolutions, MODELS } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, modelResolutions, MODELS, modelProvider } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile } from '../lib/utils';
+import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl } from '../lib/utils';
 
 // Resolve one element-library image to a fresh R2 URL for the API payload. Tries
 // the opportunistic media-cache id first; on miss (30-day LRU eviction) rebuilds
@@ -195,11 +195,15 @@ const textToHtml = (text: string, assets: any[]) => {
 // model binds the name to its reference image (same as panel [Image N]). When
 // omitted (display / draft / copy), they resolve to the bare asset name so the
 // prompt reads naturally ("김현우가 걷는다").
-const getPlainText = (html: string, elementTagMap?: Map<string, string>) => {
+const getPlainText = (html: string, elementTagMap?: Map<string, string>, mentionTagMap?: Map<string, string>) => {
   const temp = document.createElement('div');
   temp.innerHTML = html;
   temp.querySelectorAll('.mention-pill').forEach(pill => {
-    pill.replaceWith(`[${pill.getAttribute('data-name')}]`);
+    // Panel-asset mention. mentionTagMap (Omni only) rebinds it to <IMAGE_REF_N>; without
+    // it (Seedance / display) it stays the [Image N] positional marker.
+    const id = pill.getAttribute('data-asset-id');
+    const tag = id ? mentionTagMap?.get(id) : undefined;
+    pill.replaceWith(tag != null ? tag : `[${pill.getAttribute('data-name')}]`);
   });
   temp.querySelectorAll('.element-pill').forEach(pill => {
     const id = pill.getAttribute('data-element-id');
@@ -211,6 +215,22 @@ const getPlainText = (html: string, elementTagMap?: Map<string, string>) => {
   const text = temp.innerText;
   document.body.removeChild(temp);
   return text.replace(/\n$/, '');
+};
+
+const OMNI_TASK_LABELS: Record<string, string> = {
+  text_to_video: 'Text→Video', image_to_video: 'Image→Video',
+  reference_to_video: 'Reference→Video', edit: 'Edit Video',
+};
+// Settings chips for a message / preview card. Omni shows its task + fixed 720p (its
+// `mode` field is a stale Seedance leftover); Seedance shows mode / resolution as before.
+const settingsTagList = (us: any): string[] => {
+  if (!us) return [];
+  const modelName = MODELS.find((m: any) => m.id === us.model)?.name?.replace('Seedance ', '') || '2.0';
+  if (modelProvider(us.model) === 'gemini') {
+    const dur = us.omniTask === 'edit' ? '원본 길이' : `${Math.max(3, Math.min(10, us.duration || 5))}s`;
+    return [modelName, OMNI_TASK_LABELS[us.omniTask] || us.omniTask || 'Text→Video', '720p', us.ratio, dur];
+  }
+  return [modelName, us.mode, us.resolution, us.ratio, us.duration === -1 ? 'Auto' : `${us.duration}s`];
 };
 
 const renderMessageContent = (content: string, namedAssets: any[]) => {
@@ -370,8 +390,22 @@ function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText
 
 /* ─── Main Component ─── */
 export function ChatArea() {
-  const { projects, currentProjectId, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages } = useAppStore();
+  const { projects, currentProjectId, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages, billingProject } = useAppStore();
   const project = projects.find((p) => p.id === currentProjectId);
+  // Block sends (reactive mirror for the button's disabled state) whenever no
+  // project is picked — strict: no project ⇒ no generate. handleSend re-checks via
+  // getState() so Enter & 재생성 are gated too; this is just the visual disable.
+  const needsBillingSelection = !billingProject;
+  const isOmni = !!project && modelProvider(project.settings.model) === 'gemini'; // Gemini Omni surface
+  // Task is always explicit; coerce empty/legacy (old "Unspecified") to text_to_video.
+  const omniTask = project ? (project.settings.omniTask || 'text_to_video') : '';
+  // Per live Omni doc: frames belong ONLY to image_to_video (1 image = the start/first frame).
+  // reference_to_video takes *reference* images (not frames); text_to_video/edit take none.
+  const omniFramesOn = isOmni && omniTask === 'image_to_video';
+  // End frame is Omni-UNOFFICIAL (no last-frame/interpolation in the API). Offered on
+  // image_to_video by user opt-in; at send it routes through reference_to_video + a
+  // FIRST/LAST prompt (best-effort). A warning is shown next to the slot.
+  const omniEndFrameOn = isOmni && omniTask === 'image_to_video';
   const [hasText, setHasText] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -384,6 +418,17 @@ export function ChatArea() {
   const [mentionState, setMentionState] = useState<{ active: boolean, query: string }>({ active: false, query: '' });
   const mentionIndexRef = useRef(0);
   const contentEditableRef = useRef<HTMLDivElement>(null);
+  // Validation warnings show as a NON-BLOCKING in-app toast, not window.alert(). A native
+  // alert() de-activates the Electron renderer window — which drops the prompt caret and
+  // wedges the Korean IME until you alt-tab back (the exact bug users hit). A toast never
+  // touches focus, so the caret stays and typing keeps working right after a warning.
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const warn = (msg: string) => {
+    setToast(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 5000);
+  };
   // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적.
   // 슬롯 id를 함께 저장해서, 슬롯이 다른 경로(피커·삭제 후 재추가·프로젝트
   // 전환)로 바뀌었으면 사이클을 버리고 무조건 first부터 다시 시작한다.
@@ -645,7 +690,13 @@ export function ChatArea() {
   // Marked only after downloadViaProxy resolves (= download handed off OK).
   const handleVideoDownload = async (msgId: string, videoUrl: string, taskId: string) => {
     try {
-      await downloadViaProxy(videoUrl, buildDownloadFilename(taskId));
+      // Omni's taskId is a huge Gemini interaction id (v1_Ch…) and "dreamina" is the wrong
+      // brand for it — name Omni downloads "omni-<date>-<short cache id>" from the served URL.
+      const isOmniMsg = modelProvider(project.messages.find(m => m.id === msgId)?.usedSettings?.model || '') === 'gemini';
+      const filename = isOmniMsg
+        ? buildDownloadFilename((videoUrl.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId), '.mp4', 'omni')
+        : buildDownloadFilename(taskId);
+      await downloadViaProxy(videoUrl, filename);
       useAppStore.getState().updateMessage(project.id, msgId, { downloadedAt: Date.now() });
       // Force the mark to disk now — the 1.5s debounced write would be lost
       // if the app quits (or auto-update restarts) right after the download.
@@ -666,7 +717,7 @@ export function ChatArea() {
     const allFiles = Array.from(e.dataTransfer.files);
     if (allFiles.length === 0) return;
     if (mode === 'text_to_video') {
-      alert('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
+      warn('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
       return;
     }
 
@@ -675,6 +726,60 @@ export function ChatArea() {
       for (const file of allFiles) {
         const freshProject = useAppStore.getState().projects.find(p => p.id === project.id);
         const assets = freshProject?.assets || [];
+
+        // ── Gemini Omni: route drops by the selected Video task (bypasses Seedance mode rules) ──
+        if (isOmni) {
+          const task = freshProject?.settings.omniTask || 'text_to_video';
+          const isImg = file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif)$/i.test(file.name);
+          const isVid = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mpe?g|wmv|3gpp?|flv)$/i.test(file.name);
+          if (task === 'text_to_video') { rejected.push(`${file.name}: Text to Video는 에셋을 사용하지 않습니다.`); continue; }
+          if (task === 'edit') {
+            if (!isVid) { rejected.push(`${file.name}: Edit Video는 영상만 받습니다.`); continue; }
+            const sizeMB = file.size / (1024 * 1024);
+            if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
+            const existing = assets.find(a => a.type === 'video_url');
+            try {
+              const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+              const originalPath = getFilePath(file);
+              const cacheId = await cacheFile(file);
+              if (existing) useAppStore.getState().replaceAsset(project.id, existing.id, { url: '', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+              else addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+            } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
+            continue;
+          }
+          // reference_to_video also accepts ONE video reference (verified to work; capped at 1).
+          if (task === 'reference_to_video' && isVid) {
+            if (assets.some(a => a.type === 'video_url')) { rejected.push(`${file.name}: 참조 영상은 1개까지입니다`); continue; }
+            const sizeMB = file.size / (1024 * 1024);
+            if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
+            try {
+              const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+              const originalPath = getFilePath(file);
+              const cacheId = await cacheFile(file);
+              addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+            } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
+            continue;
+          }
+          // image tasks: image_to_video (start/end frames) | reference_to_video (≤10 image refs)
+          if (!isImg) { rejected.push(`${file.name}: 이 태스크는 이미지만 받습니다. (영상 편집은 Edit Video 태스크)`); continue; }
+          const sizeErr = validateImageFile(file);
+          if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
+          let role: any = 'reference_image';
+          if (task === 'image_to_video') {
+            if (!assets.some(a => a.role === 'first_frame')) role = 'first_frame';
+            else if (!assets.some(a => a.role === 'last_frame')) role = 'last_frame';
+            else { rejected.push(`${file.name}: Image to Video는 시작·끝 프레임 2장까지입니다.`); continue; }
+          } else if (assets.filter(a => a.type === 'image_url').length >= 10) {
+            rejected.push(`${file.name}: 이미지 한도 10장 초과`); continue;
+          }
+          try {
+            const thumbnailUrl = await createThumbnail(file);
+            const originalPath = getFilePath(file);
+            const cacheId = await cacheFile(file);
+            addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+          } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
+          continue;
+        }
 
         if (file.type.startsWith('image/')) {
           if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
@@ -764,7 +869,7 @@ export function ChatArea() {
           rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
         }
       }
-      if (rejected.length > 0) alert(`일부 파일이 추가되지 않았습니다:\n\n${rejected.join('\n')}`);
+      if (rejected.length > 0) warn(`일부 파일이 추가되지 않았습니다:\n\n${rejected.join('\n')}`);
     })();
   };
 
@@ -980,7 +1085,7 @@ export function ChatArea() {
       const { count, ids } = mentionedElementStats();
       const adding = ids.has(item.id) ? 0 : (elementById.get(item.id)?.images.length || 0);
       if (panelImgs + count + adding > 9) {
-        alert(`이미지 합산 9장을 넘습니다.\n패널 ${panelImgs}장 + 어셋 ${count}장${adding ? ` + ‘${item.name}’ ${adding}장` : ''} = ${panelImgs + count + adding}장.\n(어셋 이미지는 래퍼런스 패널과 9장을 나눠 씁니다)\n패널 이미지나 다른 어셋 멘션을 줄여주세요.`);
+        warn(`이미지 합산 9장을 넘습니다.\n패널 ${panelImgs}장 + 어셋 ${count}장${adding ? ` + ‘${item.name}’ ${adding}장` : ''} = ${panelImgs + count + adding}장.\n(어셋 이미지는 래퍼런스 패널과 9장을 나눠 씁니다)\n패널 이미지나 다른 어셋 멘션을 줄여주세요.`);
         setMentionState(s => ({ ...s, active: false }));
         return;
       }
@@ -1023,8 +1128,8 @@ export function ChatArea() {
     e.preventDefault(); // 이미지가 프롬프트 HTML에 박히는 것 차단
 
     const mode = project.settings.mode;
-    if (mode === 'text_to_video') { alert('Text to Video 모드에서는 이미지를 첨부할 수 없습니다.'); return; }
-    if (mode === 'extend_video') { alert('Extend Video 모드에서는 이미지를 첨부할 수 없습니다.\n(비디오 1~3개만 사용하는 모드입니다)'); return; }
+    if (mode === 'text_to_video') { warn('Text to Video 모드에서는 이미지를 첨부할 수 없습니다.'); return; }
+    if (mode === 'extend_video') { warn('Extend Video 모드에서는 이미지를 첨부할 수 없습니다.\n(비디오 1~3개만 사용하는 모드입니다)'); return; }
 
     for (const raw of imageFiles) {
       // 클립보드 이미지는 전부 image.png라는 이름으로 들어옴 → 구분 가능한 이름 부여
@@ -1033,9 +1138,9 @@ export function ChatArea() {
       const file = new File([raw], `clipboard-${stamp}-${Math.random().toString(36).slice(2, 5)}.${ext}`, { type: raw.type });
 
       const sizeErr = validateImageFile(file);
-      if (sizeErr) { alert(sizeErr); continue; }
+      if (sizeErr) { warn(sizeErr); continue; }
       const dimErr = await validateImageDimensions(file);
-      if (dimErr) { alert(dimErr); continue; }
+      if (dimErr) { warn(dimErr); continue; }
 
       // 비동기 검증 사이에 상태가 변했을 수 있으니 매번 fresh 조회
       const assets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
@@ -1078,7 +1183,7 @@ export function ChatArea() {
           // multimodal_reference / edit_video — 레퍼런스 이미지 최대 9장, 초과 시 기존 유지
           const imgCount = assets.filter(a => a.type === 'image_url').length;
           if (imgCount >= 9) {
-            alert('이미지는 최대 9장까지만 첨부할 수 있습니다.\n기존 이미지는 그대로 유지됩니다.');
+            warn('이미지는 최대 9장까지만 첨부할 수 있습니다.\n기존 이미지는 그대로 유지됩니다.');
             break;
           }
           const thumbnailUrl = await createThumbnail(file);
@@ -1086,24 +1191,24 @@ export function ChatArea() {
           addAsset(project.id, { type: 'image_url', url: '', role: 'reference_image', file_name: file.name, cacheId, thumbnailUrl });
         }
       } catch (err: any) {
-        alert(`클립보드 이미지 처리 실패: ${err?.message || ''}`);
+        warn(`클립보드 이미지 처리 실패: ${err?.message || ''}`);
       }
     }
   };
 
   const processFrameFile = async (file: File, role: AssetRole) => {
-    if (!file.type.startsWith('image/')) { alert('이미지 파일만 업로드할 수 있습니다.'); return; }
+    if (!file.type.startsWith('image/')) { warn('이미지 파일만 업로드할 수 있습니다.'); return; }
     const sizeErr = validateImageFile(file);
-    if (sizeErr) { alert(sizeErr); return; }
+    if (sizeErr) { warn(sizeErr); return; }
     try {
       const dimErr = await validateImageDimensions(file);
-      if (dimErr) { alert(dimErr); return; }
+      if (dimErr) { warn(dimErr); return; }
       const thumbnailUrl = await createThumbnail(file);
       const originalPath = getFilePath(file);
       // Attach → media-cache only (R2 upload deferred to send time)
       const cacheId = await cacheFile(file);
       addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-    } catch (e) { alert(`이미지 캐싱 실패: ${file.name}`); }
+    } catch (e) { warn(`이미지 캐싱 실패: ${file.name}`); }
   };
   const handleFrameUpload = (e: React.ChangeEvent<HTMLInputElement>, role: AssetRole) => { const f = e.target.files?.[0]; if (f) processFrameFile(f, role); e.target.value = ''; };
   const handleFrameDrop = (e: React.DragEvent<HTMLInputElement>, role: AssetRole) => { e.preventDefault(); e.stopPropagation(); setIsDragging(false); dragCounter.current = 0; const f = e.dataTransfer.files?.[0]; if (f) processFrameFile(f, role); };
@@ -1190,7 +1295,7 @@ export function ChatArea() {
       useAppStore.getState().replaceAllAssets(project.id, restored);
       if (failures.length > 0) {
         assetsOk = false;
-        alert(`일부 래퍼런스 복원 실패:\n\n${failures.join('\n')}\n\n파일을 다시 첨부해주세요.`);
+        warn(`일부 래퍼런스 복원 실패:\n\n${failures.join('\n')}\n\n파일을 다시 첨부해주세요.`);
       }
     }
     if ((msg.promptHtml || msg.promptText) && contentEditableRef.current) {
@@ -1230,7 +1335,7 @@ export function ChatArea() {
       // = false aborts 재생성) and tell the user, mirroring the panel-asset case.
       if (droppedElements.length > 0) {
         assetsOk = false;
-        alert(`멘션한 어셋이 삭제되어 빠졌습니다:\n\n${droppedElements.join(', ')}\n\n어셋 라이브러리에서 복구하거나, 프롬프트에서 해당 멘션을 지운 뒤 다시 시도해주세요.`);
+        warn(`멘션한 어셋이 삭제되어 빠졌습니다:\n\n${droppedElements.join(', ')}\n\n어셋 라이브러리에서 복구하거나, 프롬프트에서 해당 멘션을 지운 뒤 다시 시도해주세요.`);
       }
       setHasText(true);
       syncMentionCount();
@@ -1251,6 +1356,23 @@ export function ChatArea() {
     // setup is what gets sent. For a normal send this is identical to the closure.
     const project = useAppStore.getState().projects.find(p => p.id === currentProjectId);
     if (!project) return;
+
+    // ─── Project gate (strict) — applies to ALL providers, Gemini Omni included ───
+    // A project MUST be selected to generate — no exceptions, even if the list is
+    // empty / offline (no project → no send). Every send path (Enter / 전송 버튼 /
+    // 재생성) funnels through here. Read FRESH from the store (never a stale closure)
+    // → a just-picked project is always honored; the selection is app-global +
+    // session-only and only changes by deliberate dropdown pick, so a queue send /
+    // local-project switch never disturbs it.
+    const { billingProject } = useAppStore.getState();
+    if (!billingProject) {
+      warn('프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)');
+      return;
+    }
+
+    // Gemini Omni = separate provider → its own send path (no BytePlus payload).
+    // (Success reporting to the sheet is Seedance-only; Omni still requires the gate above.)
+    if (modelProvider(project.settings.model) === 'gemini') { await handleSendGemini(project); return; }
     // Force mention labels to the CURRENT asset order before reading the prompt.
     // The [project.assets] sync effect is async (passive), so if the user
     // reorders/replaces and sends in the same tick, the pills could still hold
@@ -1278,27 +1400,27 @@ export function ChatArea() {
     // Validate required assets BEFORE anything else
     const mode = project.settings.mode;
     if (mode === 'image_to_video_first' && !project.assets.some(a => a.role === 'first_frame')) {
-      alert('시작 프레임 이미지를 첨부해주세요.'); return;
+      warn('시작 프레임 이미지를 첨부해주세요.'); return;
     }
     if (mode === 'image_to_video_first_last') {
       if (!project.assets.some(a => a.role === 'first_frame') || !project.assets.some(a => a.role === 'last_frame')) {
-        alert('시작 프레임과 끝 프레임 이미지를 모두 첨부해주세요.'); return;
+        warn('시작 프레임과 끝 프레임 이미지를 모두 첨부해주세요.'); return;
       }
     }
     if ((mode === 'edit_video' || mode === 'extend_video') && !project.assets.some(a => a.type === 'video_url')) {
-      alert('비디오를 첨부해주세요.'); return;
+      warn('비디오를 첨부해주세요.'); return;
     }
     // API rule: audio can never be the only reference — at least one image or
     // video must accompany it. Only multimodal can reach this state (other
     // modes either reject audio or already require an image/video above).
     if (mode === 'multimodal_reference' && project.assets.length > 0 && project.assets.every(a => a.type === 'audio_url')) {
-      alert('오디오만으로는 생성할 수 없습니다.\n이미지 또는 비디오를 최소 1개 함께 첨부해주세요.'); return;
+      warn('오디오만으로는 생성할 수 없습니다.\n이미지 또는 비디오를 최소 1개 함께 첨부해주세요.'); return;
     }
     // Re-check combined reference durations at send time — assets can arrive
     // via reuse/restore without passing through the attach-time check.
     for (const refType of ['video_url', 'audio_url'] as const) {
       const totErr = totalDurationError(project.assets, refType, null);
-      if (totErr) { alert(totErr); return; }
+      if (totErr) { warn(totErr); return; }
     }
 
     // ─── Element-library mentions → reference images (merged at send only) ───
@@ -1317,13 +1439,13 @@ export function ChatArea() {
     if (mentionedElements.length > 0) {
       // Reference images only carry in these two modes.
       if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
-        alert('어셋 멘션은 Multimodal Reference 또는 Edit Video 모드에서만 레퍼런스로 전송됩니다.\n해당 모드로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.');
+        warn('어셋 멘션은 Multimodal Reference 또는 Edit Video 모드에서만 레퍼런스로 전송됩니다.\n해당 모드로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.');
         return;
       }
       const panelImageCount = project.assets.filter(a => a.type === 'image_url').length;
       const elementImageCount = mentionedElements.reduce((n, e) => n + e.images.length, 0);
       if (panelImageCount + elementImageCount > 9) {
-        alert(`이미지 합산 ${panelImageCount + elementImageCount}장 — 최대 9장까지만 보낼 수 있습니다.\n(래퍼런스 패널 ${panelImageCount}장 + 어셋 멘션 ${elementImageCount}장)\n어셋 멘션이나 패널 이미지를 줄여주세요.`);
+        warn(`이미지 합산 ${panelImageCount + elementImageCount}장 — 최대 9장까지만 보낼 수 있습니다.\n(래퍼런스 패널 ${panelImageCount}장 + 어셋 멘션 ${elementImageCount}장)\n어셋 멘션이나 패널 이미지를 줄여주세요.`);
         return;
       }
     }
@@ -1343,7 +1465,7 @@ export function ChatArea() {
     }, 0);
     const totalMB = totalPayloadBytes / (1024 * 1024);
     if (totalMB > 60) {
-      alert(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB\n이미지를 다시 첨부해주세요.`);
+      warn(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB\n이미지를 다시 첨부해주세요.`);
       return;
     }
 
@@ -1373,7 +1495,7 @@ export function ChatArea() {
       }
 
       if (!done) {
-        alert(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n원본 파일이 이동/삭제됐을 수 있습니다. 다시 첨부해주세요.`);
+        warn(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n원본 파일이 이동/삭제됐을 수 있습니다. 다시 첨부해주세요.`);
         setIsGenerating(false);
         return;
       }
@@ -1389,7 +1511,7 @@ export function ChatArea() {
           const url = await resolveElementImageUrl(img);
           elementContent.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
         } catch {
-          alert(`어셋 '${el.name}'의 이미지 업로드에 실패했습니다. 다시 시도해주세요.`);
+          warn(`어셋 '${el.name}'의 이미지 업로드에 실패했습니다. 다시 시도해주세요.`);
           setIsGenerating(false);
           return;
         }
@@ -1459,6 +1581,7 @@ export function ChatArea() {
         generate_audio: currentSettings.return_last_frame ? false : currentSettings.generate_audio,
         ratio: currentSettings.ratio, duration: currentSettings.duration,
         resolution: currentSettings.resolution, watermark: false,
+        project: billingProject, // app-only field; server.ts strips it before BytePlus + maps it to the task for credit reporting
       };
       if (currentSettings.return_last_frame) payload.return_last_frame = true;
 
@@ -1481,6 +1604,195 @@ export function ChatArea() {
     } catch (error: any) {
       systemMessageIds.forEach(id => updateMessage(project.id, id, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() }));
     } finally { setIsGenerating(false); }
+  };
+
+  /* ─── Gemini Omni Flash send (separate provider, sync) ─── */
+  // /api/gemini/generate holds ~30-40s and returns a cached .mp4 URL. No BytePlus
+  // task/poll — the message goes running → (awaited) → succeeded. Panel images
+  // (max 10) ride as inline base64; ratio→aspect(16:9|9:16), duration→"Ns"(3-10),
+  // thinking always high, task always explicit (no Unspecified). Seedance path untouched.
+  const handleSendGemini = async (project: any) => {
+    if (!contentEditableRef.current) return;
+    const userPrompt = getPlainText(contentEditableRef.current.innerHTML);
+    const s = project.settings;
+    const promptHtml = contentEditableRef.current.innerHTML;
+
+    // @element mentions — shared across the image tasks
+    const mentionedElementIds: string[] = [];
+    { const seen = new Set<string>(); contentEditableRef.current.querySelectorAll('.element-pill').forEach(p => { const id = p.getAttribute('data-element-id'); if (id && !seen.has(id)) { seen.add(id); mentionedElementIds.push(id); } }); }
+    const mentionedElements = mentionedElementIds.map(id => elementById.get(id)).filter(Boolean) as typeof elementAssets;
+
+    const task = s.omniTask || 'text_to_video'; // always explicit (Unspecified removed)
+    // Read a cached IMAGE as {base64,mime}. (Edit's source video skips this: the server
+    // reads it straight off the media-cache disk by id — see _uploadCacheId below.)
+    const readCacheB64 = async (cacheId?: string, rawUrl?: string): Promise<{ data: string; mime: string } | null> => {
+      let dataUrl = '';
+      if (cacheId) { try { dataUrl = await readCacheAsDataUrl(cacheId); } catch { /* fall through */ } }
+      if (!dataUrl && typeof rawUrl === 'string' && rawUrl.startsWith('data:')) dataUrl = rawUrl;
+      const m = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+      return m ? { data: m[2], mime: m[1] } : null;
+    };
+    const videoMimeOf = (fn?: string) => { const n = (fn || '').toLowerCase(); return n.endsWith('.mov') ? 'video/quicktime' : n.endsWith('.webm') ? 'video/webm' : n.endsWith('.mpeg') || n.endsWith('.mpg') ? 'video/mpeg' : n.endsWith('.wmv') ? 'video/x-ms-wmv' : n.endsWith('.3gp') || n.endsWith('.3gpp') ? 'video/3gpp' : n.endsWith('.flv') ? 'video/x-flv' : 'video/mp4'; };
+
+    let payload: any;
+    let usedImgAssets: any[] = [];
+    let usedElementImages: any[] = [];
+
+    if (task === 'edit') {
+      // ── Edit Video: exactly 1 source VIDEO → Files API (uploaded server-side by cacheId) ──
+      const video = project.assets.find((a: any) => a.type === 'video_url');
+      if (!video) { warn('Edit Video는 편집할 소스 영상 1개가 필요합니다. 아래 에셋 영역에서 영상을 올려주세요.'); return; }
+      if (!video.cacheId) { warn('소스 영상 캐시를 찾지 못했습니다. 영상을 다시 올려주세요.'); return; }
+      if (!userPrompt.trim()) { warn('영상을 어떻게 편집할지 설명을 입력해주세요. (예: 화면 전체에 눈 내리는 효과 추가)'); return; }
+      if (project.assets.some((a: any) => a.type === 'image_url')) { warn('Edit Video는 이미지를 사용하지 않습니다. 소스 영상 1개만 남겨주세요.'); return; }
+      // Edit is a plain instruction over the 1 source video — it uses no positional markers,
+      // so strip any Seedance [Image/Video/Audio N] that a stray panel mention would leave in.
+      const editText = userPrompt.replace(/\[(?:Image|Video|Audio) \d+\]\s*/g, '').trim();
+      payload = {
+        model: s.model,
+        input: [{ type: 'video', _uploadCacheId: video.cacheId, mime_type: videoMimeOf(video.file_name) }, { type: 'text', text: editText }],
+        response_format: { type: 'video', delivery: 'uri' }, // edit: duration/aspect derived from source (API 400s if set)
+        generation_config: { video_config: { task: 'edit' }, thinking_level: 'high' },
+      };
+      usedImgAssets = [{ ...video, url: video.thumbnailUrl || video.url }];
+      setIsGenerating(true);
+    } else {
+      // ── Text / Image / Reference tasks (+ unofficial end-frame under image_to_video) ──
+      const firstFrame = project.assets.find((a: any) => a.type === 'image_url' && a.role === 'first_frame');
+      const lastFrame = project.assets.find((a: any) => a.type === 'image_url' && a.role === 'last_frame');
+      const refImgs = project.assets.filter((a: any) => a.type === 'image_url' && a.role !== 'first_frame' && a.role !== 'last_frame');
+      // reference_to_video may also take a video reference — VERIFIED to work (the clip's scene
+      // is reproduced, image refs restyle it). Capped at 1 (doc: multiple videos unsupported).
+      const refVideos = task === 'reference_to_video' ? project.assets.filter((a: any) => a.type === 'video_url') : [];
+
+      // Ordered image inputs = [firstFrame?, lastFrame?, panel refImgs…, element images…].
+      // The doc's <IMAGE_REF_N> tags map 1:1 to this array order (0-based), so element
+      // @mentions can be bound to their image positionally — the Omni analogue of the
+      // Seedance [Image N] marker. A reference video (if any) is appended after the images.
+      const imgSources: { asset?: any; img?: any }[] = [];
+      if (firstFrame) imgSources.push({ asset: firstFrame });
+      if (lastFrame) imgSources.push({ asset: lastFrame });
+      for (const a of refImgs) imgSources.push({ asset: a });
+      for (const el of mentionedElements) for (const img of el.images) imgSources.push({ img });
+
+      if (!userPrompt.trim() && imgSources.length === 0) return;
+      if (lastFrame && !firstFrame) { warn('끝 프레임만은 넣을 수 없습니다 — 시작 프레임을 먼저 넣어주세요.'); return; }
+      if (imgSources.length > 10) { warn(`Gemini Omni는 이미지 최대 10장입니다. 현재 ${imgSources.length}장(프레임 + 래퍼런스 + 어셋멘션 합산) — 줄여주세요.`); return; }
+
+      setIsGenerating(true);
+      const imageParts: any[] = [];
+      try {
+        for (const src of imgSources) { const b = await readCacheB64(src.asset?.cacheId || src.img?.cacheId, src.asset?.url || src.img?.url || src.img?.thumbnailUrl); if (b) imageParts.push({ type: 'image', data: b.data, mime_type: b.mime }); }
+      } catch (e: any) { warn('이미지 읽기 실패: ' + e.message); setIsGenerating(false); return; }
+      if (imgSources.length > 0 && imageParts.length === 0) { warn('첨부 이미지를 읽지 못했습니다. 다시 넣어주세요.'); setIsGenerating(false); return; }
+
+      // Documented per-task image rules — fail clearly HERE instead of with a raw API error.
+      if (task === 'text_to_video' && imageParts.length > 0) { warn('Text to Video는 이미지를 사용하지 않습니다.\n이미지를 빼거나 Image / Reference to Video로 바꿔주세요.'); setIsGenerating(false); return; }
+      if (task === 'image_to_video' && imageParts.length === 0) { warn('Image to Video는 이미지가 필요합니다. 시작 프레임을 넣어주세요.'); setIsGenerating(false); return; }
+      if (task === 'image_to_video' && !lastFrame && imageParts.length > 1) { warn('Image to Video는 시작 프레임 1장만 지원합니다.\n여러 장이면 Reference to Video로 바꾸거나, 끝 프레임(비공식)을 쓰려면 시작·끝 2장만 두세요.'); setIsGenerating(false); return; }
+      if (task === 'reference_to_video' && imageParts.length === 0) { warn('Reference to Video는 참조 이미지가 최소 1장 필요합니다.\n위 래퍼런스 영역에서 이미지를 올리거나 @어셋을 멘션해주세요.'); setIsGenerating(false); return; }
+
+      // Build the API prompt with the doc's image-role tags (<FIRST_FRAME>, <IMAGE_REF_N>).
+      let effTask = task;
+      let promptText: string;
+      const videoParts: any[] = []; // reference_to_video: optional video reference (server-uploaded)
+      if (task === 'image_to_video' && lastFrame) {
+        // Unofficial end frame: interpolation is doc-unsupported, so route as reference_to_video
+        // with REAL tags (no fake <LAST_FRAME>). Best-effort only — the UI warns it's not guaranteed.
+        effTask = 'reference_to_video';
+        promptText = `${getPlainText(promptHtml)} Begin the video on <IMAGE_REF_0> and finish on <IMAGE_REF_1>, transitioning smoothly between them.`.trim();
+      } else if (task === 'image_to_video') {
+        // Single start frame → <FIRST_FRAME> binds image[0] (doc: "<FIRST_FRAME> a woman is walking").
+        promptText = `<FIRST_FRAME> ${getPlainText(promptHtml)}`.trim();
+      } else if (task === 'reference_to_video') {
+        // Bind BOTH mention kinds to <IMAGE_REF_N> in place (N = the image's index in the
+        // input array), so @mentions carry Omni's tag syntax instead of Seedance's [Image N].
+        // Shared counter walks the SAME order the images are appended: panel assets first
+        // (each 1 image), then element images (an element may contribute several).
+        let refN = 0;
+        const mentionTagMap = new Map<string, string>(); // panel-asset id → <IMAGE_REF_N>
+        for (const a of [firstFrame, lastFrame, ...refImgs].filter(Boolean) as any[]) mentionTagMap.set(a.id, `<IMAGE_REF_${refN++}>`);
+        // Video mentions have NO positional tag (Omni tags are image-only) — replace with a
+        // natural-language phrase so an @Video mention never leaks the Seedance "[Video N]" marker.
+        for (const v of refVideos as any[]) mentionTagMap.set(v.id, 'the reference video clip');
+        const elementTagMap = new Map<string, string>(); // element id → its <IMAGE_REF_N>(s)
+        for (const el of mentionedElements) elementTagMap.set(el.id, el.images.map(() => `<IMAGE_REF_${refN++}>`).join(' '));
+        const body = getPlainText(promptHtml, elementTagMap, mentionTagMap);
+        // The video reference has NO positional tag (doc defines only <IMAGE_REF_N> for images),
+        // and the model IGNORES an attached clip unless the prompt explicitly names it — so when a
+        // reference video is present we call it out in the guiding suffix (verified: without this the
+        // output used only the images).
+        promptText = (refVideos.length
+          ? `${body} Use the given image(s) as style/subject references and the given video clip as the scene and motion reference; do not treat any of them as literal initial frames.`
+          : `${body} Use the given image(s) as references for the video; do not treat them as literal initial frames.`).trim();
+        // Optional reference video → Files API (server uploads by cacheId, appended after images).
+        if (refVideos.length > 1) { warn('Reference to Video의 참조 영상은 1개까지입니다 (여러 영상은 미지원).'); setIsGenerating(false); return; }
+        for (const v of refVideos) {
+          if (!v.cacheId) { warn(`참조 영상(${v.file_name || ''}) 캐시를 찾지 못했습니다. 다시 올려주세요.`); setIsGenerating(false); return; }
+          videoParts.push({ type: 'video', _uploadCacheId: v.cacheId, mime_type: videoMimeOf(v.file_name) });
+        }
+      } else {
+        // text_to_video — no images.
+        promptText = getPlainText(promptHtml);
+      }
+      // Safety net: Omni has no [Video N]/[Audio N] markers (Seedance-only syntax). A stray
+      // media mention must never leak that into the prompt. (Reference already turns @Video
+      // into "the reference video clip"; this catches audio + the other tasks.)
+      promptText = promptText.replace(/\[(?:Video|Audio) \d+\]\s*/g, '').trim();
+
+      const parts = [...imageParts, ...videoParts];
+      const input = parts.length ? [...parts, { type: 'text', text: promptText }] : promptText;
+      const aspect = s.ratio === '9:16' ? '9:16' : '16:9';
+      const dur = Math.max(3, Math.min(10, Math.round(s.duration || 5)));
+      payload = {
+        model: s.model,
+        input,
+        response_format: { type: 'video', aspect_ratio: aspect, duration: `${dur}s`, delivery: 'uri' },
+        generation_config: { video_config: { task: effTask }, thinking_level: 'high' },
+      };
+      usedImgAssets = [firstFrame, lastFrame, ...refImgs, ...refVideos].filter(Boolean).map((a: any) => ({ ...a, url: a.thumbnailUrl || a.url }));
+      usedElementImages = mentionedElements.flatMap(el => el.images.map(img => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, url: img.thumbnailUrl || img.url })));
+    }
+
+    const settingsSnapshot = { ...s };
+    try {
+      const count = s.output_count || 1;
+      const ids: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const id = crypto.randomUUID(); ids.push(id);
+        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages } as any);
+      }
+      setTimeout(() => scrollToBottom(), 150);
+
+      // Fire each generation in the BACKGROUND (no await). Omni's HTTP call is synchronous
+      // (~40–90s), but we must NOT hold the composer locked that whole time — Seedance only
+      // locks it for the ~2s task submit, then the video renders in the background. So we
+      // kick the fetches off unawaited and unlock immediately; each card resolves on its own,
+      // letting the user queue more Omni prompts while one is still rendering. A 4-min timeout
+      // guards against a rare server stall leaving a card spinning "생성 중" forever.
+      ids.forEach((id) => { void (async () => {
+        const ctrl = new AbortController();
+        const timer = window.setTimeout(() => ctrl.abort(), 240000);
+        try {
+          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: ctrl.signal });
+          const t = await r.text();
+          let d: any; try { d = JSON.parse(t); } catch { throw new Error(`서버 응답 오류 (${r.status})`); }
+          if (!r.ok) throw new Error(d.error || `생성 오류 (${r.status})`);
+          if (!d.videoUrl) throw new Error('영상 URL을 받지 못했습니다.');
+          updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', endTime: Date.now() });
+        } catch (error: any) {
+          const msg = error.name === 'AbortError' ? '생성 시간 초과 (4분) — 다시 시도해주세요.' : error.message;
+          updateMessage(project.id, id, { status: 'failed', content: '생성 실패', error: msg, endTime: Date.now() });
+        } finally {
+          window.clearTimeout(timer);
+        }
+      })(); });
+    } finally {
+      // Brief visible spin (~0.8s) like Seedance's task-submit, THEN unlock — not the whole
+      // 40–90s. The delay also un-batches the true→false so the spinner actually renders.
+      // The generation keeps rendering in the background card; the composer is free to queue more.
+      window.setTimeout(() => setIsGenerating(false), 800);
+    }
   };
 
   /* ─── Regenerate: restore this card's exact setup, then re-run the SAME send ─── */
@@ -1510,6 +1822,25 @@ export function ChatArea() {
   const dismissAllDownloads = () => setDownloads({});
   return (
     <div className="flex-1 flex flex-col bg-[#fafafa] h-full relative min-w-0" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+      {/* Non-blocking validation toast — replaces alert() so the prompt caret/IME stay intact */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            key="toast"
+            initial={{ opacity: 0, y: -12, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -12, scale: 0.98 }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-[70] w-[min(92%,28rem)]"
+          >
+            <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl shadow-lg px-3.5 py-2.5">
+              <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+              <p className="text-[13px] leading-snug whitespace-pre-line flex-1">{toast}</p>
+              <button onClick={() => setToast(null)} className="shrink-0 text-amber-400 hover:text-amber-700 -mt-0.5"><X size={15} /></button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Download progress — collapsed pill or expanded list */}
       <AnimatePresence>
       {downloadEntries.length > 0 && (
@@ -1662,7 +1993,7 @@ export function ChatArea() {
               )}
               {previewItem.usedSettings && (
                 <div className="flex flex-wrap gap-2">
-                  {[MODELS.find(m => m.id === previewItem.usedSettings?.model)?.name?.replace('Seedance ', '') || '2.0', previewItem.usedSettings.mode, previewItem.usedSettings.resolution, previewItem.usedSettings.ratio, previewItem.usedSettings.duration === -1 ? 'Auto' : `${previewItem.usedSettings.duration}s`].map((tag, i) => (
+                  {settingsTagList(previewItem.usedSettings).map((tag, i) => (
                     <span key={i} className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded-full text-[11px] font-medium">{tag}</span>
                   ))}
                 </div>
@@ -1775,7 +2106,7 @@ export function ChatArea() {
                               : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
-                                {[MODELS.find(m => m.id === msg.usedSettings?.model)?.name?.replace('Seedance ', '') || '2.0', msg.usedSettings.mode, msg.usedSettings.resolution, msg.usedSettings.ratio, msg.usedSettings.duration === -1 ? 'Auto' : `${msg.usedSettings.duration}s`].map((tag, i) => (
+                                {settingsTagList(msg.usedSettings).map((tag, i) => (
                                   <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full text-[10px] font-medium">{tag}</span>
                                 ))}
                               </div>
@@ -1929,7 +2260,7 @@ export function ChatArea() {
 
             <div className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white transition-all duration-200">
               <AnimatePresence>
-              {(project.settings.mode === 'image_to_video_first' || project.settings.mode === 'image_to_video_first_last') && (
+              {(omniFramesOn || (!isOmni && (project.settings.mode === 'image_to_video_first' || project.settings.mode === 'image_to_video_first_last'))) && (
                 <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2, ease: 'easeInOut' }} className="overflow-hidden">
                 <div className="flex gap-3 px-2 pt-2 pb-1">
                   {/* Start Frame */}
@@ -1951,7 +2282,7 @@ export function ChatArea() {
                     )}
                   </div>
                   {/* End Frame */}
-                  {project.settings.mode === 'image_to_video_first_last' && (
+                  {(omniEndFrameOn || (!isOmni && project.settings.mode === 'image_to_video_first_last')) && (
                     <div className="relative w-20 h-20 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center overflow-hidden group hover:border-indigo-400 transition-colors bg-white">
                       {project.assets.find(a => a.role === 'last_frame') ? (
                         <>
@@ -1971,6 +2302,9 @@ export function ChatArea() {
                     </div>
                   )}
                 </div>
+                {isOmni && (
+                  <p className="px-2 pb-1 text-[10px] text-amber-600 leading-snug">⚠ 끝 프레임은 Omni <b>비공식</b> 기능 — 참조 방식으로 유도하며 정확한 보간은 보장되지 않아요. 시작 프레임만 쓰면 공식 image_to_video로 동작합니다.</p>
+                )}
                 </motion.div>
               )}
               </AnimatePresence>
@@ -1979,7 +2313,8 @@ export function ChatArea() {
                   style={{ minHeight: 44, maxHeight: `min(${promptHeight}px, 70vh)` }}
                   className="w-full overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                   data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
-                <button onClick={handleSend} disabled={!hasText || isGenerating}
+                <button onClick={handleSend} disabled={!hasText || isGenerating || needsBillingSelection}
+                  title={needsBillingSelection ? '프로젝트를 먼저 선택하세요' : '전송'}
                   className="shrink-0 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all duration-200 mb-0.5 mr-0.5 active:scale-95">
                   {isGenerating ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
                 </button>

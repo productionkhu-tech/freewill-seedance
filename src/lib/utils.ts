@@ -509,8 +509,8 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
   a.remove();
 }
 
-export function buildDownloadFilename(taskId: string, ext: string = '.mp4'): string {
+export function buildDownloadFilename(taskId: string, ext: string = '.mp4', prefix: string = 'dreamina'): string {
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  return `dreamina-${date}-${taskId}${ext}`;
+  return `${prefix}-${date}-${taskId}${ext}`;
 }

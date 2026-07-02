@@ -54,6 +54,12 @@ const TEAM_NAME = (() => {
 console.log(`[Tracker] Resolved team: ${TEAM_NAME}`);
 const reportedTasks = new Set<string>();
 
+// Map: BytePlus task id → billing/tracking project name (from the app's dropdown).
+// Captured at task-create time (stripped from the BytePlus payload), read at
+// report time so the credit tracker can attribute usage to the project. Cleared
+// on terminal status alongside the R2 keys.
+const taskToProject = new Map<string, string>();
+
 // Map: BytePlus task id → R2 object keys uploaded for this task.
 // extend_video can carry up to 3 videos, so this is string[] not string.
 // Cleared on any terminal status (succeeded/failed/expired) or user cancel.
@@ -493,15 +499,170 @@ async function startServer() {
     }
   });
 
+  // Project list proxy → GAS tracker. Server-side so the Electron renderer never
+  // calls GAS directly (avoids CORS/redirect surprises; matches how the credit
+  // POST already goes through the server). Returns { ok, projects:[{project,status,…}] }.
+  // On any failure returns 200 + { ok:false, projects:[] } so the client can tell
+  // "couldn't fetch" (keep current selection) from "fetched, list is empty".
+  app.get('/api/projects', async (_req, res) => {
+    try {
+      const r = await fetch(`${TRACKER_URL}?action=projects`, { redirect: 'follow' });
+      const text = await r.text();
+      let data: any;
+      try { data = JSON.parse(text); } catch { data = { ok: false, projects: [] }; }
+      res.json(data);
+    } catch (error: any) {
+      res.json({ ok: false, projects: [], error: error?.message || 'fetch failed' });
+    }
+  });
+
+  // ── Gemini Omni Flash — video generation proxy (separate provider) ──────────
+  // Uses NANOBANANA_STUDIO_KEY (Google AI Studio). The Interactions create call is
+  // SYNCHRONOUS (~30-40s for a 720p clip) and returns the video inline as base64
+  // (720p clips run ~1-3MB, under the 4MB uri threshold). We cache the bytes as an
+  // .mp4 and hand back a served /api/cache URL, so the chat message stores a small
+  // string rather than a multi-MB base64 data URL → no IndexedDB bloat. The
+  // frontend builds the full Omni payload; this only injects the key + normalizes
+  // the response. Entirely independent of the BytePlus path.
+  // Resumable upload of a media buffer to the Gemini Files API → returns the file uri
+  // once ACTIVE (used for the Edit task's source video, which must be a Files API ref).
+  async function uploadToFilesApi(buf: Buffer, mime: string, key: string): Promise<string | null> {
+    const start = await fetch('https://generativelanguage.googleapis.com/upload/v1beta/files', {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': key,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(buf.length),
+        'X-Goog-Upload-Header-Content-Type': mime,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file: { display_name: 'omni-edit-src' } }),
+    });
+    const uploadUrl = start.headers.get('x-goog-upload-url');
+    if (!uploadUrl) { console.warn('[Gemini] Files start failed', start.status); return null; }
+    const up = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': key, 'X-Goog-Upload-Command': 'upload, finalize', 'X-Goog-Upload-Offset': '0', 'Content-Length': String(buf.length) },
+      body: buf,
+    });
+    const upJson: any = await up.json().catch(() => ({}));
+    const file = upJson.file || upJson;
+    if (!file?.name) { console.warn('[Gemini] Files upload failed', up.status); return null; }
+    let state = file.state || '';
+    for (let i = 0; i < 40 && state !== 'ACTIVE'; i++) {
+      const fr = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}`, { headers: { 'x-goog-api-key': key } });
+      const fd: any = await fr.json().catch(() => ({}));
+      state = fd?.state || '';
+      if (state === 'FAILED') { console.warn('[Gemini] source file FAILED'); return null; }
+      if (state !== 'ACTIVE') await new Promise((r) => setTimeout(r, 3000));
+    }
+    return state === 'ACTIVE' ? file.uri : null;
+  }
+
+  app.post('/api/gemini/generate', async (req, res) => {
+    const KEY = process.env.NANOBANANA_STUDIO_KEY;
+    if (!KEY) { console.error('[Gemini] NANOBANANA_STUDIO_KEY not set'); return res.status(500).json({ error: 'NANOBANANA_STUDIO_KEY가 설정되지 않았습니다.' }); }
+    console.log('[Gemini] Omni generate...');
+    try {
+      const body: any = req.body && typeof req.body === 'object' ? req.body : {};
+      // Resolve inline-uploaded media (Edit source video) → Files API uri, since the
+      // resumable upload needs the server-held key. The client marks the video part
+      // with `_uploadCacheId` (preferred — server reads the bytes straight off the
+      // media-cache disk, no base64 over the wire) or `_uploadData` (base64 fallback).
+      if (Array.isArray(body.input)) {
+        for (const part of body.input) {
+          if (!part || typeof part !== 'object') continue;
+          const cacheRef = part._uploadCacheId; const dataRef = part._uploadData;
+          if (cacheRef || dataRef) {
+            let buf: Buffer | null = null;
+            if (cacheRef) {
+              const safe = String(cacheRef).replace(/[^a-zA-Z0-9._-]/g, '');
+              const p = path.join(CACHE_DIR, safe);
+              if (safe && fs.existsSync(p)) buf = fs.readFileSync(p);
+            } else if (dataRef) {
+              buf = Buffer.from(dataRef, 'base64');
+            }
+            if (!buf) return res.status(502).json({ error: '소스 영상을 찾지 못했습니다 (캐시 유실 — 다시 올려주세요).' });
+            const uri = await uploadToFilesApi(buf, part.mime_type || 'video/mp4', KEY);
+            if (!uri) return res.status(502).json({ error: '소스 영상 업로드 실패 (Files API)' });
+            part.uri = uri;
+          }
+          // Always strip the private upload markers so they never reach the API.
+          delete part._uploadData; delete part._uploadCacheId;
+        }
+      }
+      // Edit derives duration/aspect from the source video — the API 400s if either is set.
+      if (body?.generation_config?.video_config?.task === 'edit' && body.response_format) {
+        delete body.response_format.duration;
+        delete body.response_format.aspect_ratio;
+      }
+      // Synchronous unary generation (doc's recommended fast path). store MUST be true —
+      // the API rejects delivery:"uri" (which we always use) unless store=true, so store=false
+      // from the doc's perf tip is NOT usable here. background/stream=false = plain sync call.
+      body.background = false;
+      body.stream = false;
+      body.store = true;
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
+        body: JSON.stringify(body),
+      });
+      const text = await r.text();
+      let data: any; try { data = JSON.parse(text); } catch { return res.status(r.status).json({ error: `Gemini 응답 파싱 실패 (${r.status})` }); }
+      if (!r.ok) {
+        const msg = data?.error?.message || (Array.isArray(data) && data[0]?.error?.message) || `Gemini 오류 (${r.status})`;
+        console.warn('[Gemini] error', r.status, msg);
+        return res.status(r.status).json({ error: msg });
+      }
+      let vid: any = null;
+      for (const s of (data.steps || [])) for (const c of (s.content || [])) if (c.type === 'video') vid = c;
+      if (!vid) return res.status(502).json({ error: '영상 출력을 찾지 못했습니다.' });
+      let buf: Buffer;
+      if (vid.data) {
+        // Inline base64 (small videos)
+        buf = Buffer.from(vid.data, 'base64');
+      } else if (vid.uri) {
+        // delivery:"uri" (>4MB / all sizes) — poll the Files API until ACTIVE, then download with the key.
+        const fileId = (String(vid.uri).match(/files\/([^:?/]+)/) || [])[1];
+        if (!fileId) return res.status(502).json({ error: '영상 파일 ID 파싱 실패' });
+        let state = '';
+        for (let i = 0; i < 40; i++) {
+          const fr = await fetch(`https://generativelanguage.googleapis.com/v1beta/files/${fileId}`, { headers: { 'x-goog-api-key': KEY } });
+          const fd: any = await fr.json().catch(() => ({}));
+          state = fd?.state || '';
+          if (state === 'ACTIVE') break;
+          if (state === 'FAILED') return res.status(502).json({ error: '영상 파일 처리 실패(FAILED)' });
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        if (state !== 'ACTIVE') return res.status(504).json({ error: '영상 파일 처리 시간 초과' });
+        const dl = await fetch(`https://generativelanguage.googleapis.com/v1beta/files/${fileId}:download?alt=media`, { headers: { 'x-goog-api-key': KEY } });
+        if (!dl.ok) return res.status(502).json({ error: `영상 다운로드 실패 (${dl.status})` });
+        buf = Buffer.from(await dl.arrayBuffer());
+      } else {
+        return res.status(502).json({ error: '영상 출력(data/uri)이 비어 있습니다.' });
+      }
+      const cacheId = crypto.createHash('md5').update(buf).digest('hex').slice(0, 12) + '.mp4';
+      const cachePath = path.join(CACHE_DIR, cacheId);
+      if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, buf);
+      console.log(`[Gemini] ok — interaction ${data.id}, ${(buf.length / 1048576).toFixed(2)}MB → ${cacheId}`);
+      res.json({ id: data.id, status: data.status || 'completed', videoUrl: `/api/cache/${cacheId}`, usage: data.usage });
+    } catch (error: any) { console.error('[Gemini] fetch error', error.message); res.status(500).json({ error: error.message }); }
+  });
+
   // BytePlus API — Create Task
   app.post('/api/byteplus/tasks', async (req, res) => {
     console.log('[BytePlus API] Creating task...');
+
+    // Pull the app-only `project` (billing/tracking) out — BytePlus must never
+    // receive it (unknown top-level fields can 400). The rest is forwarded as-is.
+    const { project: billingProject, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
 
     try {
       const response = await fetch('https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify(byteplusBody)
       });
 
       const text = await response.text();
@@ -536,6 +697,12 @@ async function startServer() {
         }
       }
 
+      // Remember which billing project this task belongs to (read at report time).
+      if (response.ok && data?.id && typeof billingProject === 'string' && billingProject) {
+        taskToProject.set(data.id, billingProject);
+        console.log(`[Tracker] task ${data.id} → project "${billingProject}"`);
+      }
+
       console.log(`[BytePlus API] Create (${response.status}):`, JSON.stringify(data).substring(0, 500));
       res.status(response.status).json(data);
     } catch (error: any) {
@@ -563,6 +730,7 @@ async function startServer() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             team: TEAM_NAME,
+            project: taskToProject.get(req.params.id) || '', // billing project (may be '')
             task_id: req.params.id,
             total_tokens: data.usage.total_tokens,
             completion_tokens: data.usage.completion_tokens,
@@ -578,6 +746,7 @@ async function startServer() {
       // client stops asking) doesn't fire duplicate DeleteObjects.
       if (data?.status === 'succeeded' || data?.status === 'failed' || data?.status === 'expired') {
         scheduleR2Delete(req.params.id);
+        taskToProject.delete(req.params.id); // report (above) already read it
       }
 
       res.status(response.status).json(data);

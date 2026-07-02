@@ -147,6 +147,9 @@ export interface GenerationSettings {
   output_count: number;
   use_asset_id: boolean;
   mode: GenerationMode;
+  // Gemini Omni only — explicit task (text_to_video|image_to_video|reference_to_video|edit). Seedance ignores it.
+  // Reuses `ratio` (aspect 16:9/9:16) and `duration` (3–10s) from above.
+  omniTask?: string;
 }
 
 export interface ChatMessage {
@@ -186,6 +189,13 @@ interface AppState {
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
   setAutoDownload: (v: boolean) => void;
+  // Billing/tracking project (시트 연동). Session-only + app-global: picked once per
+  // launch, survives local-project switches AND queue sends, NOT persisted (restart
+  // → must re-pick). Distinct from the local `projects` sidebar workspaces.
+  billingProject: string;
+  billingProjects: { project: string; status: string }[];
+  setBillingProject: (p: string) => void;
+  setBillingProjects: (list: { project: string; status: string }[]) => void;
   // Transient (NOT persisted): # of images from elements currently @mentioned in
   // the active prompt. ChatArea writes it; SettingsPanel reads it to show the
   // shared "panel + element" image budget in the Reference Assets hint.
@@ -232,6 +242,7 @@ export const defaultSettings: GenerationSettings = {
   output_count: 1,
   use_asset_id: false,
   mode: 'text_to_video',
+  omniTask: 'text_to_video', // Omni task is always explicit (no "Unspecified"/auto-infer)
 };
 
 // ── Seedance 2.0 model catalog ──────────────────────────────────────────────
@@ -239,13 +250,22 @@ export const defaultSettings: GenerationSettings = {
 // 2.0 supports 1080p. Single source of truth shared by the settings UI, the
 // hydration clamp, and the send-time guard so a model never receives an
 // unsupported resolution. Default model is the flagship (dreamina-seedance-2-0-260128).
-export const MODELS: { id: string; name: string }[] = [
+export const MODELS: { id: string; name: string; provider?: 'byteplus' | 'gemini' }[] = [
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini' },
+  { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini' },
 ];
 
+// Which backend a model routes to. Gemini Omni → Interactions API (server
+// /api/gemini/*, key NANOBANANA_STUDIO_KEY); everything else → BytePlus. This is
+// the single switch the send path / settings UI branch on. Default byteplus.
+export function modelProvider(model: string): 'byteplus' | 'gemini' {
+  return MODELS.find(m => m.id === model)?.provider || 'byteplus';
+}
+
 export function modelResolutions(model: string): string[] {
+  if (modelProvider(model) === 'gemini') return ['720p']; // Omni is 720p only
   return (model.includes('fast') || model.includes('mini'))
     ? ['480p', '720p']
     : ['480p', '720p', '1080p'];
@@ -259,6 +279,10 @@ export const useAppStore = create<AppState>()(
       currentProjectId: null,
       autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
+      billingProject: '',
+      billingProjects: [],
+      setBillingProject: (p) => set({ billingProject: p }),
+      setBillingProjects: (list) => set({ billingProjects: list }),
       mentionedElementImages: 0,
       setMentionedElementImages: (n) => set({ mentionedElementImages: n }),
       // ─── Element library state + actions ───
@@ -616,11 +640,15 @@ export const useAppStore = create<AppState>()(
           const state = useAppStore.getState();
           const patched = state.projects.map(p => {
             const s = { ...defaultSettings, ...p.settings };
-            // Clamp duration to seedance 2.0 range (4–15); -1 = Auto (model
-            // picks the length itself — valid API value, don't clamp it)
+            // Clamp duration to the provider's range: Omni 3–10, Seedance 4–15.
+            // -1 = Auto (Seedance only; model picks the length — valid, don't clamp).
             if (s.duration !== -1) {
-              if (s.duration < 4) s.duration = 4;
-              if (s.duration > 15) s.duration = 15;
+              if (modelProvider(s.model) === 'gemini') {
+                s.duration = Math.max(3, Math.min(10, s.duration));
+              } else {
+                if (s.duration < 4) s.duration = 4;
+                if (s.duration > 15) s.duration = 15;
+              }
             }
             // Unknown/legacy model → flagship default
             if (!validModelIds.includes(s.model)) s.model = defaultSettings.model;

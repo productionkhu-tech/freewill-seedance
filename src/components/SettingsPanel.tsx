@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelResolutions } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelResolutions, modelProvider } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -12,6 +12,16 @@ const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '1080p', name: '1080p' },
 ];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
+// Gemini Omni Flash — its own knobs (see gemini-omni-flash-preview spec).
+// The 4 real API tasks only. "Unspecified" (omit task → model infers) is intentionally
+// NOT offered: task must be an explicit user choice, never auto-derived.
+const OMNI_TASKS: { id: string; name: string }[] = [
+  { id: 'text_to_video', name: 'Text to Video' },
+  { id: 'image_to_video', name: 'Image to Video' },
+  { id: 'reference_to_video', name: 'Reference to Video' },
+  { id: 'edit', name: 'Edit Video' },
+];
+const OMNI_RATIOS: { id: string; name: string }[] = [{ id: '16:9', name: '16:9' }, { id: '9:16', name: '9:16' }];
 
 // File picker accept filter per asset type (used by per-asset replace).
 const acceptFor = (type: 'image_url' | 'video_url' | 'audio_url') =>
@@ -112,9 +122,11 @@ const RETURN_LAST_FRAME_MODES: GenerationMode[] = [
   'extend_video',
 ];
 
-function CustomSelect({ value, options, onChange }: { value: string, options: {id: string, name: string}[], onChange: (val: string) => void }) {
+function CustomSelect({ value, options, onChange, placeholder }: { value: string, options: {id: string, name: string}[], onChange: (val: string) => void, placeholder?: string }) {
   const [isOpen, setIsOpen] = useState(false);
-  const selected = options.find(o => o.id === value) || options[0];
+  // With a placeholder, an unmatched value (e.g. '') shows the greyed placeholder text
+  // instead of silently falling back to the first option (which would look "selected").
+  const selected = options.find(o => o.id === value) || (placeholder ? null : options[0]);
 
   return (
     <div className="relative">
@@ -122,7 +134,7 @@ function CustomSelect({ value, options, onChange }: { value: string, options: {i
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center justify-between px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[14px] focus:outline-none focus:border-[#0071e3] transition-colors"
       >
-        <span className="truncate">{selected.name}</span>
+        <span className={`truncate ${selected ? '' : 'text-gray-400'}`}>{selected ? selected.name : placeholder}</span>
         <ChevronDown size={16} className={`transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
       </button>
       <AnimatePresence>
@@ -166,7 +178,8 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProject, billingProjects, setBillingProject } = useAppStore();
+  const needsBillingSelection = !billingProject; // strict: no project → block generation
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
@@ -185,16 +198,26 @@ export function SettingsPanel() {
 
   if (!project) return null;
   const { settings, assets } = project;
+  const isOmni = modelProvider(settings.model) === 'gemini'; // Gemini Omni → different settings surface
   const namedAssets = getAssetNames(assets);
   const boundCollectionName = currentProjectId ? assetCollections.find(c => c.id === projectCollectionId[currentProjectId])?.name : undefined;
 
   const availableTypes = useMemo(() => {
+    if (isOmni) {
+      // Omni: no audio ever; text→none, edit→video, else images. Coerce any empty/legacy
+      // task to text_to_video (Unspecified was removed — task is always explicit).
+      const t = OMNI_TASKS.some(x => x.id === settings.omniTask) ? settings.omniTask : 'text_to_video';
+      if (t === 'text_to_video') return [];
+      if (t === 'edit') return ['video_url'];
+      if (t === 'reference_to_video') return ['image_url', 'video_url']; // images (≥1) + optional 1 video ref
+      return ['image_url']; // image_to_video
+    }
     if (settings.mode === 'extend_video') return ['video_url'];
     if (settings.mode === 'edit_video') return ['image_url', 'video_url', 'audio_url'];
     if (settings.mode === 'multimodal_reference') return ['image_url', 'video_url', 'audio_url'];
     if (settings.mode === 'image_to_video_first' || settings.mode === 'image_to_video_first_last') return ['image_url'];
     return [];
-  }, [settings.mode]);
+  }, [settings.mode, isOmni, settings.omniTask]);
 
   useEffect(() => {
     if (availableTypes.length > 0 && !availableTypes.includes(assetIdType)) {
@@ -261,7 +284,13 @@ export function SettingsPanel() {
     let currentCount = assets.filter(a => a.type === type).length;
     let maxAllowed = Infinity;
 
-    if (settings.mode === 'multimodal_reference') {
+    if (isOmni) {
+      // Omni limits (per task): images ≤10; video = edit(1 source) / reference(≤3 refs) / else none;
+      // no audio. No Seedance-style 15s total-duration rule (that cap is skipped below).
+      if (type === 'image_url') maxAllowed = 10;
+      else if (type === 'video_url') maxAllowed = (settings.omniTask === 'edit' || settings.omniTask === 'reference_to_video') ? 1 : 0; // Edit source / 1 reference video
+      else maxAllowed = 0;
+    } else if (settings.mode === 'multimodal_reference') {
       if (type === 'image_url') maxAllowed = 9;
       if (type === 'video_url') maxAllowed = 3;
       if (type === 'audio_url') maxAllowed = 3;
@@ -301,14 +330,26 @@ export function SettingsPanel() {
             const cacheId = await cacheFile(file);
             addAsset(project.id, { type, url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } else {
-            const vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+            let vErr: string | null;
+            if (type === 'video_url' && isOmni) {
+              // Omni edit source: only size (≤50MB) + format matter. No duration/dimension
+              // caps (Seedance's 2–15s / 300–6000px rules don't apply); output is always 720p.
+              const sizeMB = file.size / (1024 * 1024);
+              const okFmt = /\.(mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv)$/i.test(file.name) || /^video\//i.test(file.type);
+              vErr = sizeMB > 50 ? `비디오 크기 초과: ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)` : !okFmt ? '지원하지 않는 형식 (mp4·mov·webm·mpeg·wmv·3gpp·flv)' : null;
+            } else {
+              vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+            }
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
             // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s
             // total. Read fresh assets — earlier loop iterations add to them.
+            // Omni has no 15s rule (edit source can be longer, capped only by 50MB), so skip it there.
             const durationSec = await getMediaDurationSec(file, type === 'video_url' ? 'video' : 'audio');
-            const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
-            const totErr = totalDurationError(freshAssets, type, durationSec);
-            if (totErr) { rejected.push(`${file.name}: ${totErr}`); continue; }
+            if (!isOmni) {
+              const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
+              const totErr = totalDurationError(freshAssets, type, durationSec);
+              if (totErr) { rejected.push(`${file.name}: ${totErr}`); continue; }
+            }
             const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
             const cacheId = await cacheFile(file);
             addAsset(project.id, { type, url: '', role, file_name: file.name, cacheId, ...(durationSec != null ? { durationSec } : {}), ...(thumbnailUrl ? { thumbnailUrl } : {}), ...(originalPath ? { originalPath } : {}) });
@@ -428,6 +469,26 @@ export function SettingsPanel() {
       </div>
 
       <div className="p-4 space-y-6">
+        {/* 프로젝트 (시트 연동) — Generation Settings 위. 생성하려면 반드시 선택(strict:
+            없으면 생성 불가). 언제든 변경 가능. 큐 전송/로컬 프로젝트 전환엔 안 바뀌고,
+            진행→종료되면 자동 해제 후 재선택 요구. */}
+        <div className={`bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection ? 'ring-2 ring-amber-400' : ''}`}>
+          <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">프로젝트</label>
+          {billingProjects.length === 0 ? (
+            <p className="text-[12px] text-amber-600">등록된 프로젝트가 없습니다. PM에게 문의하세요.<br />(프로젝트를 선택하기 전까지 생성할 수 없습니다)</p>
+          ) : (
+            <>
+              <CustomSelect
+                value={billingProject}
+                onChange={(val) => setBillingProject(val)}
+                options={billingProjects.map(p => ({ id: p.project, name: p.project }))}
+                placeholder="프로젝트 선택…"
+              />
+              {needsBillingSelection && <p className="text-[11px] text-amber-600">생성하려면 프로젝트를 선택하세요.</p>}
+            </>
+          )}
+        </div>
+
         {/* Generation Mode */}
         <div className="bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">
           <div className="flex items-center justify-between border-b border-gray-100 pb-2">
@@ -445,15 +506,25 @@ export function SettingsPanel() {
                 // Switching model may drop the current resolution (Fast/Mini have
                 // no 1080p) — clamp it in the SAME update so the two never disagree.
                 const res = modelResolutions(val).includes(settings.resolution) ? settings.resolution : '720p';
-                updateProjectSettings(project.id, { model: val, resolution: res });
+                const patch: any = { model: val, resolution: res };
+                // Omni only accepts 16:9/9:16 + duration 3–10s — clamp when switching in.
+                if (modelProvider(val) === 'gemini') {
+                  if (settings.ratio !== '16:9' && settings.ratio !== '9:16') patch.ratio = '16:9';
+                  if (settings.duration === -1 || settings.duration < 3 || settings.duration > 10) patch.duration = 5;
+                  // Task is always explicit — normalize any empty/legacy value to a real task.
+                  if (!OMNI_TASKS.some(t => t.id === settings.omniTask)) patch.omniTask = 'text_to_video';
+                }
+                updateProjectSettings(project.id, patch);
               }}
               options={MODELS}
             />
           </div>
 
           <div className="space-y-2">
-            <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Generation Mode</label>
-            <CustomSelect value={settings.mode} onChange={(val) => handleModeChange(val as GenerationMode)} options={MODES} />
+            <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">{isOmni ? 'Video task' : 'Generation Mode'}</label>
+            {isOmni
+              ? <CustomSelect value={OMNI_TASKS.some(t => t.id === settings.omniTask) ? (settings.omniTask as string) : 'text_to_video'} onChange={(val) => updateProjectSettings(project.id, { omniTask: val })} options={OMNI_TASKS} />
+              : <CustomSelect value={settings.mode} onChange={(val) => handleModeChange(val as GenerationMode)} options={MODES} />}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -463,10 +534,28 @@ export function SettingsPanel() {
             </div>
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Ratio</label>
-              <CustomSelect value={settings.ratio} onChange={(val) => updateProjectSettings(project.id, { ratio: val })} options={RATIOS.map(r => ({ id: r, name: r }))} />
+              {isOmni && settings.omniTask === 'edit'
+                ? <div className="text-[12px] text-gray-400 py-1.5 px-1">원본 영상 따라감</div>
+                : <CustomSelect value={settings.ratio} onChange={(val) => updateProjectSettings(project.id, { ratio: val })} options={isOmni ? OMNI_RATIOS : RATIOS.map(r => ({ id: r, name: r }))} />}
             </div>
           </div>
 
+          {isOmni ? (
+            settings.omniTask === 'edit' ? (
+              <div className="space-y-2">
+                <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
+                <div className="text-[12px] text-gray-400 px-1">원본 영상 길이 그대로 (편집은 길이 지정 불가)</div>
+              </div>
+            ) : (
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
+                <span className="text-[12px] text-gray-500">{Math.max(3, Math.min(10, settings.duration || 5))}s</span>
+              </div>
+              <input type="range" min="3" max="10" value={Math.max(3, Math.min(10, settings.duration || 5))} onChange={(e) => updateProjectSettings(project.id, { duration: parseInt(e.target.value) })} className="w-full accent-[#0071e3]" />
+            </div>
+            )
+          ) : (
           <div className="space-y-2">
             <div className="flex justify-between items-center">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
@@ -482,6 +571,7 @@ export function SettingsPanel() {
             <input type="range" min="4" max="15" value={settings.duration === -1 ? 5 : settings.duration} disabled={settings.duration === -1} onChange={(e) => updateProjectSettings(project.id, { duration: parseInt(e.target.value) })} className={`w-full accent-[#0071e3] ${settings.duration === -1 ? 'opacity-40 cursor-not-allowed' : ''}`} />
             {settings.duration === -1 && <p className="text-[11px] text-gray-400">모델이 콘텐츠에 맞는 길이(4~15초)를 자동 선택합니다. 길이에 따라 과금이 달라지니 주의.</p>}
           </div>
+          )}
 
           <div className="space-y-2">
             <div className="flex justify-between">
@@ -491,6 +581,11 @@ export function SettingsPanel() {
             <input type="range" min="1" max="3" value={settings.output_count || 1} onChange={(e) => updateProjectSettings(project.id, { output_count: parseInt(e.target.value) })} className="w-full accent-[#0071e3]" />
           </div>
 
+          {isOmni ? (
+            <div className="pt-2 text-[11px] text-gray-400 leading-relaxed">
+              Thinking <span className="text-gray-600 font-medium">High</span> 고정 · 오디오 자동 생성 · 720p · SynthID 워터마크
+            </div>
+          ) : (
           <div className="space-y-3 pt-2">
             <div>
               <label className={`flex items-center gap-2 ${settings.return_last_frame ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
@@ -512,6 +607,7 @@ export function SettingsPanel() {
             )}
             </AnimatePresence>
           </div>
+          )}
         </div>
 
         {/* Assets */}
@@ -552,22 +648,82 @@ export function SettingsPanel() {
 
           <AnimatePresence mode="wait">
             <motion.div key={settings.mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.15 }} className="space-y-2 pt-2">
-              {settings.mode === 'text_to_video' && (
+              {/* ── Gemini Omni asset UI (mirrors the Seedance per-mode pattern, Omni values) ── */}
+              {isOmni && (
+                <div className="space-y-2">
+                  {settings.omniTask === 'text_to_video' ? (
+                    <p className="text-xs text-gray-500 text-center">Text to Video는 에셋을 사용하지 않습니다.</p>
+                  ) : settings.omniTask === 'edit' ? (
+                    <>
+                      {(() => {
+                        const vidCount = assets.filter(a => a.type === 'video_url').length;
+                        return (
+                          <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">
+                            <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
+                            <span className={`w-12 shrink-0 tabular-nums ${vidCount > 1 ? 'text-red-500' : 'text-gray-700'}`}>{vidCount}/1</span>
+                            <span className="text-gray-400 min-w-0 break-keep">편집할 소스 영상 1개 · 개당 50MB · mp4·mov·webm</span>
+                          </div>
+                        );
+                      })()}
+                      {(() => {
+                        const existingVideo = assets.find(a => a.type === 'video_url');
+                        return existingVideo
+                          ? renderReplaceButton('영상 교체', existingVideo, 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm')
+                          : renderUploadButton('영상 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm', false, assets.filter(a => a.type === 'video_url').length >= 1);
+                      })()}
+                      <p className="text-[10px] text-gray-400 leading-snug break-keep">프롬프트에 <b>어떻게 편집할지</b> 적어주세요 (예: 눈 내리는 효과 추가). 길이·비율은 원본 영상을 그대로 따라갑니다.</p>
+                    </>
+                  ) : settings.omniTask === 'image_to_video' ? (
+                    <p className="text-xs text-gray-500 text-center">프레임은 위 입력창 슬롯에서 넣어주세요.</p>
+                  ) : (
+                    <>
+                      {(() => {
+                        const imgCount = assets.filter(a => a.type === 'image_url').length + mentionedElementImages;
+                        const vidCount = assets.filter(a => a.type === 'video_url').length;
+                        return (
+                          <>
+                            <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">
+                              <span className="w-10 shrink-0 font-semibold text-gray-600">이미지</span>
+                              <span className={`w-12 shrink-0 tabular-nums ${imgCount > 10 ? 'text-red-500' : imgCount === 10 ? 'text-amber-600' : 'text-gray-700'}`}>{imgCount}/10</span>
+                              <span className="text-gray-400 min-w-0 break-keep">png·jpeg·webp·heic·heif · 멘션 합산</span>
+                            </div>
+                            <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">
+                              <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
+                              <span className={`w-12 shrink-0 tabular-nums ${vidCount > 1 ? 'text-red-500' : 'text-gray-700'}`}>{vidCount}/1</span>
+                              <span className="text-gray-400 min-w-0 break-keep">개당 50MB · 선택(이미지와 함께)</span>
+                            </div>
+                          </>
+                        );
+                      })()}
+                      {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/png,image/jpeg,image/webp,image/heic,image/heif', true, (assets.filter(a => a.type === 'image_url').length + mentionedElementImages) >= 10)}
+                      {(() => {
+                        const existingVideo = assets.find(a => a.type === 'video_url');
+                        return existingVideo
+                          ? renderReplaceButton('영상 교체', existingVideo, 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm')
+                          : renderUploadButton('영상 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm', false, false);
+                      })()}
+                      <p className="text-[10px] text-gray-400 leading-snug break-keep">비디오는 <b>이미지 1장 이상과 함께</b>일 때만 참조로 쓸 수 있어요(영상만은 불가).</p>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {!isOmni && settings.mode === 'text_to_video' && (
                 <p className="text-xs text-gray-500 text-center">Text to Video 모드에서는 에셋을 사용하지 않습니다.</p>
               )}
 
-              {settings.mode === 'image_to_video_first' && (
+              {!isOmni && settings.mode === 'image_to_video_first' && (
                 renderUploadButton('Upload First Frame', 'first_frame', 'image_url', 'image/*', false, assets.length >= 1)
               )}
 
-              {settings.mode === 'image_to_video_first_last' && (
+              {!isOmni && settings.mode === 'image_to_video_first_last' && (
                 <>
                   {renderUploadButton('Upload First Frame', 'first_frame', 'image_url', 'image/*', false, assets.some(a => a.role === 'first_frame'))}
                   {renderUploadButton('Upload Last Frame', 'last_frame', 'image_url', 'image/*', false, assets.some(a => a.role === 'last_frame'))}
                 </>
               )}
 
-              {settings.mode === 'multimodal_reference' && (
+              {!isOmni && settings.mode === 'multimodal_reference' && (
                 <div className="space-y-2">
                   <div className="text-[11px] leading-snug space-y-1">
                     {(() => {
@@ -598,7 +754,7 @@ export function SettingsPanel() {
                 </div>
               )}
 
-              {settings.mode === 'edit_video' && (
+              {!isOmni && settings.mode === 'edit_video' && (
                 <div className="space-y-2">
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
                   {(() => {
@@ -611,7 +767,7 @@ export function SettingsPanel() {
                 </div>
               )}
 
-              {settings.mode === 'extend_video' && (
+              {!isOmni && settings.mode === 'extend_video' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
                     비디오: {assets.filter(a => a.type === 'video_url').length}/3 (최대 3개 이어붙이기)
@@ -623,7 +779,7 @@ export function SettingsPanel() {
           </AnimatePresence>
 
           <AnimatePresence>
-          {settings.mode !== 'text_to_video' && (
+          {!isOmni && settings.mode !== 'text_to_video' && (
             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.15 }} className="overflow-hidden">
             <div className="space-y-3 pt-2 border-t border-gray-100 mt-4">
               <label className="flex items-center gap-2 cursor-pointer">
