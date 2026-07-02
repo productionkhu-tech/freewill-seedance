@@ -659,7 +659,11 @@ export function ChatArea() {
   // in modes that actually take reference images (others can't carry them).
   const boundCollectionId = currentProjectId ? projectCollectionId[currentProjectId] : undefined;
   const boundCollectionName = boundCollectionId ? assetCollections.find(c => c.id === boundCollectionId)?.name : undefined;
-  const elementMentionEnabled = project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video';
+  // For Omni, element @mentions are image references → enable on reference_to_video (they
+  // become <IMAGE_REF_N>). Never key this off the stale Seedance `mode` when on Omni.
+  const elementMentionEnabled = isOmni
+    ? omniTask === 'reference_to_video'
+    : (project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video');
   const collectionElements = useMemo(
     () => (elementMentionEnabled && boundCollectionId ? elementAssets.filter(a => a.collectionId === boundCollectionId) : []),
     [elementAssets, boundCollectionId, elementMentionEnabled]
@@ -716,7 +720,10 @@ export function ChatArea() {
     const mode = project.settings.mode;
     const allFiles = Array.from(e.dataTransfer.files);
     if (allFiles.length === 0) return;
-    if (mode === 'text_to_video') {
+    // Seedance-only guard: for Omni the stale `mode` is irrelevant (Omni routes by omniTask
+    // in the loop below). After 초기화 mode resets to 'text_to_video', which would otherwise
+    // wrongly block an Omni Edit/Reference drop with a "Text to Video" message.
+    if (!isOmni && mode === 'text_to_video') {
       warn('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
       return;
     }
@@ -1126,6 +1133,36 @@ export function ChatArea() {
       return; // plain text without matching refs → default paste
     }
     e.preventDefault(); // 이미지가 프롬프트 HTML에 박히는 것 차단
+
+    // ── Gemini Omni: route pasted images by the selected Video task (NOT the stale Seedance
+    // `mode`, which resets to text_to_video on 초기화 and would wrongly block the paste). ──
+    if (isOmni) {
+      const task = useAppStore.getState().projects.find(p => p.id === project.id)?.settings.omniTask || 'text_to_video';
+      if (task === 'text_to_video') { warn('Text to Video는 이미지를 사용하지 않습니다.'); return; }
+      if (task === 'edit') { warn('Edit Video는 편집할 소스 영상만 씁니다 (이미지 X).'); return; }
+      for (const raw of imageFiles) {
+        const ext = (raw.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+        const file = new File([raw], `clipboard-${stamp}-${Math.random().toString(36).slice(2, 5)}.${ext}`, { type: raw.type });
+        const sizeErr = validateImageFile(file);
+        if (sizeErr) { warn(sizeErr); continue; }
+        const assets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
+        let role: any = 'reference_image';
+        if (task === 'image_to_video') {
+          if (!assets.some(a => a.role === 'first_frame')) role = 'first_frame';
+          else if (!assets.some(a => a.role === 'last_frame')) role = 'last_frame';
+          else { warn('Image to Video는 시작·끝 프레임 2장까지입니다.'); continue; }
+        } else if (assets.filter(a => a.type === 'image_url').length >= 10) {
+          warn('이미지 한도 10장 초과'); continue;
+        }
+        try {
+          const thumbnailUrl = await createThumbnail(file);
+          const cacheId = await cacheFile(file);
+          addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl });
+        } catch (err: any) { warn(`이미지 처리 실패: ${err.message || ''}`); }
+      }
+      return;
+    }
 
     const mode = project.settings.mode;
     if (mode === 'text_to_video') { warn('Text to Video 모드에서는 이미지를 첨부할 수 없습니다.'); return; }

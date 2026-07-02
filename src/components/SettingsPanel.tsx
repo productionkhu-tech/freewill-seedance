@@ -665,7 +665,7 @@ export function SettingsPanel() {
           </div>
 
           <AnimatePresence mode="wait">
-            <motion.div key={settings.mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.15 }} className="space-y-2 pt-2">
+            <motion.div key={isOmni ? `omni-${settings.omniTask}` : settings.mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.15 }} className="space-y-2 pt-2">
               {/* ── Gemini Omni asset UI (mirrors the Seedance per-mode pattern, Omni values) ── */}
               {isOmni && (
                 <div className="space-y-2">
