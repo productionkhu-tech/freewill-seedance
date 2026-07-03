@@ -175,16 +175,31 @@ async function startServer() {
       if (cl) res.setHeader('Content-Length', cl);
 
       if (!response.body) return res.status(500).end();
-      // IMPORTANT: piping the undici web-stream straight to the Express `res` throttles the
-      // download to ~70KB/s, even though the SAME fetch streams to a file at 4–6MB/s — a
-      // pathology in the web-stream → http.ServerResponse backpressure adapter. Reading the
-      // body fully first (fetch pulls at full speed) then sending it as one write is ~60× faster.
       res.on('close', () => { if (!res.writableEnded) { try { upstreamController.abort(); } catch {} } });
-      const buf = Buffer.from(await response.arrayBuffer());
-      res.end(buf);
+
+      // Pump the web-stream reader MANUALLY to the client. Two constraints must both hold:
+      //  1) FULL SPEED — `Readable.fromWeb(response.body).pipe(res)` throttles to ~70KB/s (a
+      //     pathology in the web-stream → http.ServerResponse backpressure adapter). Manual
+      //     `reader.read()` + `res.write()` avoids that adapter entirely → ~4MB/s.
+      //  2) PROGRESSIVE — bytes must start flowing immediately. Buffering the whole file first
+      //     (`await response.arrayBuffer()`) delayed the FIRST byte until the entire upstream
+      //     download finished. Under Electron `webContents.downloadURL`, the response headers
+      //     then arrived only at the very end, so `will-download` never fired early → no progress
+      //     gauge, and large/slow videos timed out mid-wait → download silently failed.
+      // Manual streaming satisfies both: full speed AND first byte out immediately.
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!res.write(Buffer.from(value))) {
+          await new Promise<void>(resolve => res.once('drain', () => resolve()));
+        }
+      }
+      res.end();
     } catch (error: any) {
       console.error('[Download] fetch error:', error.message);
       if (!res.headersSent) res.status(500).json({ error: error.message });
+      else { try { res.end(); } catch {} }
     }
   });
 
