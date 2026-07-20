@@ -190,6 +190,12 @@ const textToHtml = (text: string, assets: any[]) => {
   }).join('');
 };
 
+// Block-level tags that occupy their own line when the prompt HTML is serialized.
+// contentEditable writes <div> per line; pasted rich text can add <p>/<li>/headings.
+const BLOCK_TAGS = new Set(['DIV', 'P', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'BLOCKQUOTE', 'PRE', 'SECTION', 'ARTICLE', 'TABLE', 'TR', 'TBODY', 'FIGURE', 'DL', 'DT', 'DD',
+  'MAIN', 'HEADER', 'FOOTER', 'NAV', 'ASIDE']);
+
 // elementTagMap (send only): element-pill id → "[Image N]" reference marker.
 // When given, element mentions become the BytePlus positional marker so the
 // model binds the name to its reference image (same as panel [Image N]). When
@@ -210,11 +216,45 @@ const getPlainText = (html: string, elementTagMap?: Map<string, string>, mention
     const tag = id ? elementTagMap?.get(id) : undefined;
     pill.replaceWith(tag != null ? tag : (pill.getAttribute('data-name') || ''));
   });
-  temp.style.cssText = 'position:absolute;left:-9999px;white-space:pre-wrap;';
-  document.body.appendChild(temp);
-  const text = temp.innerText;
-  document.body.removeChild(temp);
-  return text.replace(/\n$/, '');
+  // Serialize by walking the DOM — deliberately NOT innerText. innerText emitted one
+  // newline for the block boundary AND another for the placeholder <br> Chromium puts
+  // inside an empty <div>, so every intentional blank line came back doubled (a 3300-char
+  // prompt copied out as ~3800, and the model was fed the doubled version too). Walking
+  // gives exactly one line per block, so blank lines survive as the user wrote them —
+  // one stays one, three stay three. No layout needed either (no body append/reflow).
+  const lines: string[] = [''];
+  const walk = (parent: Node) => {
+    parent.childNodes.forEach(node => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const data = node.nodeValue || '';
+        // Whitespace-only text containing a newline is markup indentation from pasted
+        // HTML, never user content — our editor stores blank lines as empty blocks.
+        if (/^\s*$/.test(data) && /[\n\r]/.test(data)) return;
+        lines[lines.length - 1] += data;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const el = node as HTMLElement;
+      if (el.tagName === 'BR') {
+        // A <br> with no next sibling is Chromium's filler for an empty/last line; the
+        // block boundary already accounts for it. Only a real mid-block break adds one.
+        if (el.nextSibling) lines.push('');
+        return;
+      }
+      if (BLOCK_TAGS.has(el.tagName)) {
+        if (lines[lines.length - 1] !== '') lines.push('');
+        walk(el);
+        lines.push('');
+        return;
+      }
+      walk(el);
+    });
+  };
+  walk(temp);
+  // NBSP → plain space: contentEditable stores runs of spaces as alternating
+  // "&nbsp; &nbsp; ", so this restores the exact spacing the user typed (and keeps
+  // platforms that choke on U+00A0 happy). Trailing blank lines are structural.
+  return lines.join('\n').replace(/\n+$/, '').replace(/\u00A0/g, ' ');
 };
 
 const OMNI_TASK_LABELS: Record<string, string> = {
@@ -422,13 +462,14 @@ export function ChatArea() {
   // alert() de-activates the Electron renderer window — which drops the prompt caret and
   // wedges the Korean IME until you alt-tab back (the exact bug users hit). A toast never
   // touches focus, so the caret stays and typing keeps working right after a warning.
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; ok?: boolean } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
-  const warn = (msg: string) => {
-    setToast(msg);
+  const showToast = (msg: string, ok = false) => {
+    setToast({ msg, ok });
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToast(null), 5000);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), ok ? 2200 : 5000);
   };
+  const warn = (msg: string) => showToast(msg, false);
   // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적.
   // 슬롯 id를 함께 저장해서, 슬롯이 다른 경로(피커·삭제 후 재추가·프로젝트
   // 전환)로 바뀌었으면 사이클을 버리고 무조건 first부터 다시 시작한다.
@@ -1113,6 +1154,101 @@ export function ChatArea() {
     syncMentionCount();
   };
 
+  // Right-click an attached reference image → copy it to the clipboard. Old queues stay
+  // usable: the R2/BytePlus URL dies after ~24h, but the original bytes also live in the
+  // server media-cache (/api/cache/:cacheId), so that is tried first. The stored thumbnail
+  // is the last resort — a wiped cache then still copies something instead of failing.
+  // Sources are tried in order; the first one that decodes wins.
+  const copyImageToClipboard = async (
+    sources: { src?: string | null | false; fromPath?: string; original?: boolean }[],
+    label = '이미지',
+  ) => {
+    let got: Blob | null = null;
+    let wasOriginal = false;
+    for (const cand of sources) {
+      let src = typeof cand.src === 'string' && cand.src ? cand.src : '';
+      if (!src && cand.fromPath) {
+        // media-cache entry gone (cache cleared) but the source file is still on disk →
+        // re-cache it server-side, which hands back a fresh id for the untouched original.
+        try {
+          const r = await fetch('/api/cache-from-path', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ originalPath: cand.fromPath }),
+          });
+          const j = await r.json();
+          if (j?.cacheId) src = `/api/cache/${j.cacheId}`;
+        } catch { /* try the next source */ }
+      }
+      if (!src) continue;
+      let objUrl: string | null = null;
+      try {
+        const res = await fetch(src);
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        // Always decode through an <img> instead of trusting the MIME type: the media
+        // cache serves originals as application/octet-stream, so a `type` check would
+        // reject the very file we want and silently fall back to the 80px thumbnail.
+        // A non-image just fails to decode and moves on to the next candidate. This
+        // also re-encodes to PNG — the only image type Chromium's clipboard accepts.
+        objUrl = URL.createObjectURL(blob);
+        const url = objUrl;
+        const png = await new Promise<Blob>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = img.naturalWidth; c.height = img.naturalHeight;
+            const ctx = c.getContext('2d');
+            if (!ctx) { reject(new Error('canvas 컨텍스트 없음')); return; }
+            ctx.drawImage(img, 0, 0);
+            c.toBlob(b => b ? resolve(b) : reject(new Error('PNG 변환 실패')), 'image/png');
+          };
+          img.onerror = () => reject(new Error('이미지 디코드 실패'));
+          img.src = url;
+        });
+        got = png;
+        wasOriginal = !!cand.original;
+        break;
+      } catch { got = null; /* fall through to the next source */ }
+      finally { if (objUrl) URL.revokeObjectURL(objUrl); }
+    }
+    if (!got) { warn(`${label} 복사 실패 — 이미지를 불러오지 못했습니다. 캐시가 정리되었거나 원본이 사라졌을 수 있어요.`); return; }
+    // Report the actual pixel size, and never pass a thumbnail off as the original —
+    // the whole point is a full-res copy, so a fallback must announce itself.
+    let dim = '';
+    try { const bmp = await createImageBitmap(got); dim = ` · ${bmp.width}×${bmp.height}`; bmp.close?.(); } catch { /* 크기 표시만 생략 */ }
+    // The clipboard write stays OUT of the retry loop: if it is refused (window not
+    // focused, permission denied) that must report itself, not masquerade as
+    // "image not found" and send us re-fetching the other candidates.
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': got })]);
+      if (wasOriginal) showToast(`${label} 원본 복사됨${dim}`, true);
+      else warn(`${label} — 원본을 찾지 못해 썸네일만 복사했습니다${dim} (저화질)`);
+    } catch (e: any) {
+      warn(`${label} 클립보드 쓰기 실패: ${e?.message || e}`);
+    }
+  };
+
+  // Copy/cut OUT of the prompt box: put ONLY clean plain text on the clipboard. The
+  // editor stores each line as a <div>, and apps that render <div> as a spaced
+  // paragraph turned that into an extra blank line per line when pasted (a 3300-char
+  // prompt landed as ~3800). Dropping the text/html flavor makes what you paste
+  // identical to what you see — any target app, any mix of ko/ja/zh/en.
+  const writePlainClipboard = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    const holder = document.createElement('div');
+    holder.appendChild(sel.getRangeAt(0).cloneContents());
+    e.clipboardData.setData('text/plain', getPlainText(holder.innerHTML));
+    e.preventDefault(); // suppresses the default text/html flavor
+    return true;
+  };
+  const handlePromptCopy = (e: React.ClipboardEvent<HTMLDivElement>) => { writePlainClipboard(e); };
+  const handlePromptCut = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    // preventDefault cancels the native delete too, so remove the selection ourselves.
+    // execCommand keeps the undo stack intact and still fires the input handler.
+    if (writePlainClipboard(e)) document.execCommand('delete');
+  };
+
   // Clipboard image paste into the prompt box. Default contentEditable
   // behavior inlines the image into the prompt HTML (disaster) — intercept and
   // route to the asset list per mode instead. Text paste falls through.
@@ -1581,7 +1717,7 @@ export function ChatArea() {
     // usedAssets (panel refs) because reuse restores usedAssets to the panel,
     // whereas element images must ride the mention, not the panel. Thumbnails only.
     const usedElementImages = mentionedElements.flatMap(el =>
-      el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, url: img.thumbnailUrl || img.url }))
+      el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, url: img.thumbnailUrl || img.url }))
     );
 
     for (let i = 0; i < outputCount; i++) {
@@ -1788,7 +1924,7 @@ export function ChatArea() {
         generation_config: { video_config: { task: effTask }, thinking_level: 'high' },
       };
       usedImgAssets = [firstFrame, lastFrame, ...refImgs, ...refVideos].filter(Boolean).map((a: any) => ({ ...a, url: a.thumbnailUrl || a.url }));
-      usedElementImages = mentionedElements.flatMap(el => el.images.map(img => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, url: img.thumbnailUrl || img.url })));
+      usedElementImages = mentionedElements.flatMap(el => el.images.map(img => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, url: img.thumbnailUrl || img.url })));
     }
 
     const settingsSnapshot = { ...s };
@@ -1870,10 +2006,12 @@ export function ChatArea() {
             transition={{ duration: 0.18, ease: 'easeOut' }}
             className="fixed top-4 left-1/2 -translate-x-1/2 z-[70] w-[min(92%,28rem)]"
           >
-            <div className="flex items-start gap-2.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl shadow-lg px-3.5 py-2.5">
-              <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />
-              <p className="text-[13px] leading-snug whitespace-pre-line flex-1">{toast}</p>
-              <button onClick={() => setToast(null)} className="shrink-0 text-amber-400 hover:text-amber-700 -mt-0.5"><X size={15} /></button>
+            <div className={`flex items-start gap-2.5 border rounded-xl shadow-lg px-3.5 py-2.5 ${toast.ok ? 'bg-emerald-50 border-emerald-300 text-emerald-900' : 'bg-amber-50 border-amber-300 text-amber-900'}`}>
+              {toast.ok
+                ? <Check size={16} className="text-emerald-500 shrink-0 mt-0.5" />
+                : <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />}
+              <p className="text-[13px] leading-snug whitespace-pre-line flex-1">{toast.msg}</p>
+              <button onClick={() => setToast(null)} className={`shrink-0 -mt-0.5 ${toast.ok ? 'text-emerald-400 hover:text-emerald-700' : 'text-amber-400 hover:text-amber-700'}`}><X size={15} /></button>
             </div>
           </motion.div>
         )}
@@ -1998,7 +2136,18 @@ export function ChatArea() {
                   <p className="text-[12px] font-semibold text-gray-500 mb-2">래퍼런스</p>
                   <div className="flex gap-2 flex-wrap">
                     {(previewItem.usedAssets || []).map((a: any, i: number) => (
-                      <div key={i} className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
+                      <div key={i}
+                        title={a.type === 'image_url' ? `${a.file_name || '이미지'} · 우클릭: 이미지 복사` : undefined}
+                        onContextMenu={(e) => {
+                          if (a.type !== 'image_url') return;
+                          e.preventDefault();
+                          copyImageToClipboard([
+                            { src: a.cacheId && `/api/cache/${a.cacheId}`, original: true },
+                            { fromPath: a.originalPath, original: true },
+                            { src: a.url }, { src: a.thumbnailUrl },
+                          ], a.file_name || '이미지');
+                        }}
+                        className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
                         {a.type === 'image_url' ? (
                           <HoverZoom className="block w-full h-full" src={a.url} fullSrc={a.cacheId ? `/api/cache/${a.cacheId}` : undefined}>
                             <img src={a.url} className="w-full h-full object-cover cursor-zoom-in" />
@@ -2020,7 +2169,13 @@ export function ChatArea() {
                       const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
                       const full = elementAssets.find(e => e.id === ei.elementId)?.images.find((im: any) => im.id === ei.imageId)?.url;
                       return (
-                        <div key={ei.id} title={ei.name} className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50" style={{ border: `2px solid ${meta.border}` }}>
+                        <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
+                          onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
+                                      { src: full, original: true },
+                                      { src: ei.cacheId && `/api/cache/${ei.cacheId}`, original: true },
+                                      { src: ei.url },
+                                    ], ei.name || '이미지'); }}
+                          className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50" style={{ border: `2px solid ${meta.border}` }}>
                           <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full && full !== ei.url ? full : undefined}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                         </div>
                       );
@@ -2110,7 +2265,19 @@ export function ChatArea() {
                           {(msg.usedAssets?.length > 0 || (msg.usedElementImages as any)?.length > 0) && (
                             <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
                               {(msg.usedAssets || []).map((asset: any, i: number) => (
-                                <div key={asset.id || i} className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white relative group shrink-0">
+                                <div key={asset.id || i}
+                                  title={String(asset.type).startsWith('image') ? `${asset.file_name || asset.name || '이미지'} · 우클릭: 이미지 복사` : undefined}
+                                  onContextMenu={(e) => {
+                                    if (!String(asset.type).startsWith('image')) return; // 영상/오디오는 기본 동작 유지
+                                    e.preventDefault();
+                                    // 원본(미디어캐시) → 디스크 원본 재캐시 → (없으면) 썸네일
+                                    copyImageToClipboard([
+                                      { src: asset.cacheId && `/api/cache/${asset.cacheId}`, original: true },
+                                      { fromPath: asset.originalPath, original: true },
+                                      { src: asset.url }, { src: asset.thumbnailUrl },
+                                    ], asset.file_name || asset.name || '이미지');
+                                  }}
+                                  className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white relative group shrink-0">
                                   {asset.type.startsWith('video') ? (
                                     asset.thumbnailUrl
                                       ? <HoverZoom className="block w-full h-full" src={asset.thumbnailUrl}><img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
@@ -2129,7 +2296,13 @@ export function ChatArea() {
                                 const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
                                 const full = elementAssets.find(e => e.id === ei.elementId)?.images.find((im: any) => im.id === ei.imageId)?.url;
                                 return (
-                                  <div key={ei.id} title={ei.name} className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
+                                  <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
+                                    onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
+                                      { src: full, original: true },
+                                      { src: ei.cacheId && `/api/cache/${ei.cacheId}`, original: true },
+                                      { src: ei.url },
+                                    ], ei.name || '이미지'); }}
+                                    className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
                                     <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full && full !== ei.url ? full : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                                     <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
                                   </div>
@@ -2346,7 +2519,7 @@ export function ChatArea() {
               )}
               </AnimatePresence>
               <div className="flex items-end gap-2 w-full">
-                <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown} onPaste={handlePromptPaste}
+                <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown} onPaste={handlePromptPaste} onCopy={handlePromptCopy} onCut={handlePromptCut}
                   style={{ minHeight: 44, maxHeight: `min(${promptHeight}px, 70vh)` }}
                   className="w-full overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                   data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
