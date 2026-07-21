@@ -458,6 +458,12 @@ export function ChatArea() {
   const [mentionState, setMentionState] = useState<{ active: boolean, query: string }>({ active: false, query: '' });
   const mentionIndexRef = useRef(0);
   const contentEditableRef = useRef<HTMLDivElement>(null);
+  // Scroll container WRAPPING the contentEditable. The editable must not own the
+  // scrollbar: with our custom ::-webkit-scrollbar styling Chromium paints the
+  // element's hover cursor over the scrollbar too, so an editable-owned scrollbar
+  // showed the text I-beam instead of the arrow. A plain wrapper owns the scroll
+  // (arrow over scrollbar), the editable inside keeps the I-beam over text.
+  const promptScrollRef = useRef<HTMLDivElement>(null);
   // Validation warnings show as a NON-BLOCKING in-app toast, not window.alert(). A native
   // alert() de-activates the Electron renderer window — which drops the prompt caret and
   // wedges the Korean IME until you alt-tab back (the exact bug users hit). A toast never
@@ -966,7 +972,7 @@ export function ChatArea() {
     // the cursor below the visible area and users can't see what they're typing.
     // Run in rAF so layout is finalized before measuring.
     requestAnimationFrame(() => {
-      const container = contentEditableRef.current;
+      const container = promptScrollRef.current; // the wrapper scrolls, not the editable
       const s = window.getSelection();
       if (!container || !s?.rangeCount) return;
       const r = s.getRangeAt(0).cloneRange();
@@ -2527,10 +2533,12 @@ export function ChatArea() {
               )}
               </AnimatePresence>
               <div className="flex items-end gap-2 w-full">
-                <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown} onPaste={handlePromptPaste} onCopy={handlePromptCopy} onCut={handlePromptCut}
-                  style={{ minHeight: 44, maxHeight: `min(${promptHeight}px, 70vh)` }}
-                  className="w-full overflow-y-auto bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
-                  data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
+                <div ref={promptScrollRef} style={{ maxHeight: `min(${promptHeight}px, 70vh)` }} className="w-full overflow-y-auto">
+                  <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown} onPaste={handlePromptPaste} onCopy={handlePromptCopy} onCut={handlePromptCut}
+                    style={{ minHeight: 44 }}
+                    className="w-full bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
+                    data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
+                </div>
                 <button onClick={handleSend} disabled={!hasText || isGenerating || needsBillingSelection}
                   title={needsBillingSelection ? '프로젝트를 먼저 선택하세요' : '전송'}
                   className="shrink-0 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all duration-200 mb-0.5 mr-0.5 active:scale-95">
