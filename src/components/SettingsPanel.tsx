@@ -184,6 +184,14 @@ export function SettingsPanel() {
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
   const [elementOpen, setElementOpen] = useState(false);
+  // Slider drafts: while dragging, the value lives in local state (re-renders this
+  // panel only) and is committed to the store ONCE on release. Writing the store per
+  // drag-tick re-serialized the whole persisted blob + re-rendered the entire app
+  // dozens of times a second — the duration/output gauges visibly stuttered.
+  const [draftDuration, setDraftDuration] = useState<number | null>(null);
+  const [draftOutput, setDraftOutput] = useState<number | null>(null);
+  // A project switch mid-drag must not carry a stale draft over.
+  useEffect(() => { setDraftDuration(null); setDraftOutput(null); }, [currentProjectId]);
 
   // Clear the per-row replace highlight when a drag ends anywhere (ESC-cancel
   // or drop), so an abandoned drag doesn't leave a row stuck highlighted.
@@ -199,6 +207,9 @@ export function SettingsPanel() {
   if (!project) return null;
   const { settings, assets } = project;
   const isOmni = modelProvider(settings.model) === 'gemini'; // Gemini Omni → different settings surface
+  // Single store write on slider release (no-op if nothing is in flight).
+  const commitDuration = () => { if (draftDuration != null) { updateProjectSettings(project.id, { duration: draftDuration }); setDraftDuration(null); } };
+  const commitOutput = () => { if (draftOutput != null) { updateProjectSettings(project.id, { output_count: draftOutput }); setDraftOutput(null); } };
   const namedAssets = getAssetNames(assets);
   const boundCollectionName = currentProjectId ? assetCollections.find(c => c.id === projectCollectionId[currentProjectId])?.name : undefined;
 
@@ -568,9 +579,9 @@ export function SettingsPanel() {
             <div className="space-y-2">
               <div className="flex justify-between items-center">
                 <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
-                <span className="text-[12px] text-gray-500">{Math.max(3, Math.min(10, settings.duration || 5))}s</span>
+                <span className="text-[12px] text-gray-500">{draftDuration ?? Math.max(3, Math.min(10, settings.duration || 5))}s</span>
               </div>
-              <input type="range" min="3" max="10" value={Math.max(3, Math.min(10, settings.duration || 5))} onChange={(e) => updateProjectSettings(project.id, { duration: parseInt(e.target.value) })} className="w-full accent-[#0071e3]" />
+              <input type="range" min="3" max="10" value={draftDuration ?? Math.max(3, Math.min(10, settings.duration || 5))} onChange={(e) => setDraftDuration(parseInt(e.target.value))} onPointerUp={commitDuration} onKeyUp={commitDuration} onBlur={commitDuration} className="w-full accent-[#0071e3]" />
             </div>
             )
           ) : (
@@ -583,10 +594,10 @@ export function SettingsPanel() {
                   onClick={() => updateProjectSettings(project.id, { duration: settings.duration === -1 ? 5 : -1 })}
                   className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${settings.duration === -1 ? 'bg-[#0071e3] text-white border-[#0071e3]' : 'bg-white text-gray-400 border-gray-300 hover:border-gray-400 hover:text-gray-600'}`}
                 >Auto</button>
-                <span className="text-[12px] text-gray-500">{settings.duration === -1 ? '모델 자동' : `${settings.duration}s`}</span>
+                <span className="text-[12px] text-gray-500">{settings.duration === -1 ? '모델 자동' : `${draftDuration ?? settings.duration}s`}</span>
               </div>
             </div>
-            <input type="range" min="4" max="15" value={settings.duration === -1 ? 5 : settings.duration} disabled={settings.duration === -1} onChange={(e) => updateProjectSettings(project.id, { duration: parseInt(e.target.value) })} className={`w-full accent-[#0071e3] ${settings.duration === -1 ? 'opacity-40 cursor-not-allowed' : ''}`} />
+            <input type="range" min="4" max="15" value={settings.duration === -1 ? 5 : (draftDuration ?? settings.duration)} disabled={settings.duration === -1} onChange={(e) => setDraftDuration(parseInt(e.target.value))} onPointerUp={commitDuration} onKeyUp={commitDuration} onBlur={commitDuration} className={`w-full accent-[#0071e3] ${settings.duration === -1 ? 'opacity-40 cursor-not-allowed' : ''}`} />
             {settings.duration === -1 && <p className="text-[11px] text-gray-400">모델이 콘텐츠에 맞는 길이(4~15초)를 자동 선택합니다. 길이에 따라 과금이 달라지니 주의.</p>}
           </div>
           )}
@@ -594,9 +605,9 @@ export function SettingsPanel() {
           <div className="space-y-2">
             <div className="flex justify-between">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Output Count</label>
-              <span className="text-[12px] text-gray-500">{settings.output_count || 1}</span>
+              <span className="text-[12px] text-gray-500">{draftOutput ?? (settings.output_count || 1)}</span>
             </div>
-            <input type="range" min="1" max="3" value={settings.output_count || 1} onChange={(e) => updateProjectSettings(project.id, { output_count: parseInt(e.target.value) })} className="w-full accent-[#0071e3]" />
+            <input type="range" min="1" max="3" value={draftOutput ?? (settings.output_count || 1)} onChange={(e) => setDraftOutput(parseInt(e.target.value))} onPointerUp={commitOutput} onKeyUp={commitOutput} onBlur={commitOutput} className="w-full accent-[#0071e3]" />
           </div>
 
           {isOmni ? (
