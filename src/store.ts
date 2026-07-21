@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist, StateStorage, createJSONStorage } from 'zustand/middleware';
+import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename } from './lib/utils';
@@ -10,7 +10,11 @@ const DEBOUNCE_MS = 1500;
 // Latest snapshot waiting for the debounce timer. Kept so critical updates
 // (e.g. downloadedAt) and window-hide/quit can flush to disk immediately —
 // otherwise a quit within DEBOUNCE_MS silently drops the write.
-let pendingWrite: { name: string; value: string } | null = null;
+// Holds the partialized state OBJECT (immutable zustand snapshot), NOT a string:
+// JSON.stringify of the whole blob (projects + base64 elementAssets, easily MBs)
+// used to run synchronously on EVERY set() — each settings commit froze frames.
+// Serialization now happens only at flush time, at most once per debounce window.
+let pendingWrite: { name: string; value: StorageValue<unknown> } | null = null;
 
 // External backup mirror to Documents/Freewill Seedance Backup/seedance-backup.json.
 // Survives any userData loss (app-name rename, uninstall+reinstall, AppData cleanup).
@@ -18,10 +22,20 @@ let pendingWrite: { name: string; value: string } | null = null;
 let backupTimer: ReturnType<typeof setTimeout> | null = null;
 const BACKUP_DEBOUNCE_MS = 5 * 60 * 1000;
 
-const idbStorage: StateStorage = {
-  getItem: async (name: string): Promise<string | null> => {
+// Custom PersistStorage (replaces createJSONStorage(() => idbStorage)) so that
+// serialization is DEFERRED into the debounce. createJSONStorage stringified the
+// entire partialized blob synchronously inside every set() — the debounce only
+// covered the IDB write, not the stringify — so each slider commit / send / poll
+// write blocked the main thread for the full stringify of a multi-MB blob.
+// On-disk format is unchanged (same JSON string under the same key), so this is
+// fully backward/forward compatible with data written by older versions.
+const idbPersistStorage: PersistStorage<unknown> = {
+  getItem: async (name: string): Promise<StorageValue<unknown> | null> => {
+    const parse = (raw: string): StorageValue<unknown> | null => {
+      try { return JSON.parse(raw); } catch { console.warn('[Persist] corrupt JSON — starting empty'); return null; }
+    };
     const fromIdb = await get(name);
-    if (fromIdb) return fromIdb;
+    if (fromIdb) return parse(fromIdb);
     // IDB empty — likely fresh install OR userData was wiped. Try external backup.
     try {
       const api = (window as any).electronAPI;
@@ -32,7 +46,7 @@ const idbStorage: StateStorage = {
           // doesn't race the restored state.
           await set(name, result.content);
           console.log(`[Backup] Restored ${(result.bytes / 1024).toFixed(1)}KB from ${result.path}`);
-          return result.content;
+          return parse(result.content);
         }
       }
     } catch (err) {
@@ -40,17 +54,23 @@ const idbStorage: StateStorage = {
     }
     return null;
   },
-  setItem: async (name: string, value: string): Promise<void> => {
+  setItem: (name: string, value: StorageValue<unknown>): void => {
+    // `value.state` is zustand's immutable snapshot — safe to hold by reference
+    // until the timer fires (updates replace objects, never mutate them).
     pendingWrite = { name, value };
     if (writeTimer) clearTimeout(writeTimer);
-    writeTimer = setTimeout(() => { pendingWrite = null; set(name, value); }, DEBOUNCE_MS);
+    writeTimer = setTimeout(() => {
+      const w = pendingWrite; pendingWrite = null;
+      if (w) set(w.name, JSON.stringify(w.value));
+    }, DEBOUNCE_MS);
 
-    // Mirror to external backup file (long debounce — 5 min)
+    // Mirror to external backup file (long debounce — 5 min). Stringifies its own
+    // snapshot at fire time (once per 5 min, not per set).
     if (backupTimer) clearTimeout(backupTimer);
     backupTimer = setTimeout(() => {
       const api = (window as any).electronAPI;
       if (!api?.backupSave) return;
-      api.backupSave(value)
+      api.backupSave(JSON.stringify(value))
         .then((r: any) => {
           if (r?.ok) console.log(`[Backup] Saved ${(r.bytes / 1024 / 1024).toFixed(2)}MB → ${r.path}`);
           else console.warn('[Backup] Save failed:', r?.error);
@@ -72,7 +92,7 @@ export function flushPersist(): Promise<void> {
   if (!pendingWrite) return Promise.resolve();
   const w = pendingWrite;
   pendingWrite = null;
-  return set(w.name, w.value);
+  return set(w.name, JSON.stringify(w.value));
 }
 
 // Safety net: flush whenever the window hides (minimize/tray) or unloads
@@ -632,7 +652,7 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: 'seedance-app-storage',
-      storage: createJSONStorage(() => idbStorage),
+      storage: idbPersistStorage,
       partialize: (state) => ({
         projects: state.projects,
         currentProjectId: state.currentProjectId,
