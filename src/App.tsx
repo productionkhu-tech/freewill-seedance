@@ -53,7 +53,12 @@ export default function App() {
         const active = j.projects
           .filter((p: any) => p && p.status === '진행')
           .map((p: any) => ({ project: String(p.project), status: String(p.status) }));
-        useAppStore.getState().setBillingProjects(active);
+        // Skip the store write (re-renders subscribers + re-serializes the persisted
+        // blob) when the active list is unchanged — this runs every 60s.
+        const prev = useAppStore.getState().billingProjects;
+        const changed = prev.length !== active.length ||
+          active.some((p: any, i: number) => p.project !== prev[i]?.project || p.status !== prev[i]?.status);
+        if (changed) useAppStore.getState().setBillingProjects(active);
         const sel = useAppStore.getState().billingProject;
         if (sel && !active.some((p: any) => p.project === sel)) {
           useAppStore.getState().setBillingProject('');
@@ -89,7 +94,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.7.2001
+        v26.7.2101
       </div>
     </div>
   );

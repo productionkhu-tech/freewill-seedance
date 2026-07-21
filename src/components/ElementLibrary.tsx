@@ -322,6 +322,14 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
     addElementAsset, updateElementAsset, deleteElementAsset, setProjectCollection,
   } = useAppStore();
 
+  // Per-collection asset counts in one O(n) pass, instead of elementAssets.filter().length
+  // per collection row per render (O(collections × elementAssets) on every re-render).
+  const collectionCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const a of elementAssets) m[a.collectionId] = (m[a.collectionId] || 0) + 1;
+    return m;
+  }, [elementAssets]);
+
   const boundId = projectCollectionId[projectId] || null;
   const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(boundId);
   const [categoryFilter, setCategoryFilter] = useState<AssetCategory | 'all'>('all');
@@ -472,7 +480,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                 <p className="text-[11px] text-gray-400 text-center px-2 py-5 leading-relaxed">컬렉션이 없습니다.<br />＋ 로 만들어 주세요.</p>
               )}
               {assetCollections.map(c => {
-                const count = elementAssets.filter(a => a.collectionId === c.id).length;
+                const count = collectionCounts[c.id] || 0;
                 const active = c.id === selectedCollectionId;
                 return (
                   <div key={c.id}
@@ -558,7 +566,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                             className="text-left bg-white rounded-xl border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all group cursor-pointer">
                             <div className="aspect-square bg-gray-50 relative overflow-hidden">
                               {cover
-                                ? <img src={cover.url} alt="" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
+                                ? <img src={cover.thumbnailUrl || cover.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
                                 : <div className="w-full h-full flex items-center justify-center text-gray-300"><ImageIcon size={28} /></div>}
                               <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ background: meta.bg, color: meta.text }}><CatIcon size={10} /> {meta.name}</span>
                               {a.images.length > 1 && <span className="absolute bottom-1.5 right-1.5 text-[10px] font-medium text-white bg-black/55 px-1.5 py-0.5 rounded-full">{a.images.length}장</span>}

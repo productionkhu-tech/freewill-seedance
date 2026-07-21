@@ -595,10 +595,18 @@ export const useAppStore = create<AppState>()(
             });
             showNotification('영상 생성 실패', { body: errorData?.message || '오류가 발생했습니다.' });
           } else {
-            get().updateMessage(projectId, messageId, {
-              content: `Task ${taskId} — ${status}`,
-              status: status === 'queued' ? 'queued' : 'running',
-            });
+            // Poll returned a still-in-progress status. Only write when it ACTUALLY
+            // changed (e.g. queued→running); a running→running (or queued→queued) write
+            // would rebuild the whole projects array + re-serialize the persisted blob
+            // every 10s for zero visible change, re-rendering the entire UI. `content`
+            // derives purely from status+taskId, so identical status ⇒ identical write.
+            const nextStatus = status === 'queued' ? 'queued' : 'running';
+            if (message.status !== nextStatus) {
+              get().updateMessage(projectId, messageId, {
+                content: `Task ${taskId} — ${status}`,
+                status: nextStatus,
+              });
+            }
           }
         } catch (error: any) {
           if (error.name === 'AbortError') console.warn(`[Poll] ${taskId} timed out after 8s — will retry`);

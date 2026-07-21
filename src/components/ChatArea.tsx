@@ -630,6 +630,14 @@ export function ChatArea() {
   // runs before the `if (!project) return null` guard, so referencing it any
   // later would hit its temporal dead zone during render (blank-screen crash).
   const elementById = useMemo(() => new Map(elementAssets.map(e => [e.id, e] as const)), [elementAssets]);
+  // O(1) full-res URL lookup by "${elementId}__${imageId}" (== usedElementImages[].id) so
+  // message/preview cards don't linear-scan elementAssets.find().images.find() per image
+  // per render (which re-ran on every store write, worst when many elements are in use).
+  const elementImageUrlById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of elementAssets) for (const im of e.images) m.set(`${e.id}__${im.id}`, im.url);
+    return m;
+  }, [elementAssets]);
 
   // Element-pill counterpart — tracks library mentions (.element-pill) by their
   // data-element-id. Separate from the panel-asset effect above (which only
@@ -949,8 +957,8 @@ export function ChatArea() {
         // whitespace so a stray "@" in prose doesn't keep the menu open forever.
         const match = range.startContainer.textContent?.slice(0, range.startOffset).match(/@([^\s@]*)$/);
         if (match) { mentionIndexRef.current = 0; setMentionState({ active: true, query: match[1] }); }
-        else setMentionState(s => ({ ...s, active: false }));
-      } else { setMentionState(s => ({ ...s, active: false })); }
+        else setMentionState(s => s.active ? { ...s, active: false } : s);
+      } else { setMentionState(s => s.active ? { ...s, active: false } : s); }
     }
 
     // Auto-scroll caret into view. contentEditable does NOT do this natively
@@ -2167,7 +2175,7 @@ export function ChatArea() {
                     ))}
                     {((previewItem.usedElementImages as any) || []).map((ei: any) => {
                       const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
-                      const full = elementAssets.find(e => e.id === ei.elementId)?.images.find((im: any) => im.id === ei.imageId)?.url;
+                      const full = elementImageUrlById.get(`${ei.elementId}__${ei.imageId}`);
                       return (
                         <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
                           onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
@@ -2294,7 +2302,7 @@ export function ChatArea() {
                               ))}
                               {((msg.usedElementImages as any) || []).map((ei: any) => {
                                 const meta = CATEGORY_META[ei.category as AssetCategory] || { border: '#ddd6fe' };
-                                const full = elementAssets.find(e => e.id === ei.elementId)?.images.find((im: any) => im.id === ei.imageId)?.url;
+                                const full = elementImageUrlById.get(`${ei.elementId}__${ei.imageId}`);
                                 return (
                                   <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
                                     onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
