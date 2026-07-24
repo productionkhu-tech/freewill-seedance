@@ -22,6 +22,72 @@ let pendingWrite: { name: string; value: StorageValue<unknown> } | null = null;
 let backupTimer: ReturnType<typeof setTimeout> | null = null;
 const BACKUP_DEBOUNCE_MS = 5 * 60 * 1000;
 
+// ─── Element library: its own IndexedDB key ───
+// elementAssets carry FULL-RESOLUTION base64 images (~12MB each; measured 368MB for
+// 29 images). While they sat inside the main persisted blob, EVERY ordinary write
+// (a poll status change, a settings tweak, a new message) had to re-serialize the
+// whole ~385MB — a multi-second main-thread freeze, which is what made the app feel
+// permanently laggy. They now live in a dedicated key that is written ONLY when the
+// library itself changes, so ordinary writes serialize ~17MB instead.
+// The images themselves are untouched (still full-res base64), so send / share /
+// import / 원본 복사 behave exactly as before.
+const ELEMENTS_KEY = 'seedance-element-assets';
+let elementsTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingElements: ElementAsset[] | null = null;
+// Last array reference we persisted. Every mutation (add / update / delete /
+// deleteCollection / import) builds a NEW array, so a reference check catches all
+// of them — no per-action wiring to forget.
+let lastElements: ElementAsset[] | null = null;
+
+function scheduleElementsSave(assets: ElementAsset[]) {
+  pendingElements = assets;
+  if (elementsTimer) clearTimeout(elementsTimer);
+  elementsTimer = setTimeout(() => {
+    const a = pendingElements; pendingElements = null;
+    if (a) void set(ELEMENTS_KEY, JSON.stringify(a));
+  }, DEBOUNCE_MS);
+}
+
+// Flush the element library NOW (quit / window hide), same contract as flushPersist.
+export function flushElements(): Promise<void> {
+  if (elementsTimer) { clearTimeout(elementsTimer); elementsTimer = null; }
+  if (!pendingElements) return Promise.resolve();
+  const a = pendingElements; pendingElements = null;
+  return set(ELEMENTS_KEY, JSON.stringify(a));
+}
+
+// Load the library, migrating from the legacy in-blob copy on first run after update.
+// `legacy` = whatever zustand/persist restored from the old blob (persist merges any
+// stored key back into state even though partialize no longer writes it), so the
+// migration source is already in memory — no second 385MB parse needed.
+// Migration is copy → verify → only then treated as migrated; on any failure we keep
+// the assets in memory and retry on the next change, so nothing is ever dropped.
+async function loadElementAssets(legacy: ElementAsset[]): Promise<ElementAsset[]> {
+  try {
+    const raw = await get(ELEMENTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as ElementAsset[];
+    }
+  } catch (err) {
+    console.warn('[Elements] dedicated store unreadable, falling back to legacy blob:', err);
+  }
+  if (legacy && legacy.length) {
+    try {
+      const payload = JSON.stringify(legacy);
+      await set(ELEMENTS_KEY, payload);
+      const back = await get(ELEMENTS_KEY);
+      if (back !== payload) throw new Error('verify mismatch');
+      console.log(`[Elements] migrated ${legacy.length} asset(s) → ${ELEMENTS_KEY} (${(payload.length / 1048576).toFixed(1)}MB)`);
+    } catch (err) {
+      // Keep them in memory; the change-subscriber retries the write later.
+      console.error('[Elements] migration failed — keeping in memory, will retry:', err);
+      scheduleElementsSave(legacy);
+    }
+  }
+  return legacy || [];
+}
+
 // Custom PersistStorage (replaces createJSONStorage(() => idbStorage)) so that
 // serialization is DEFERRED into the debounce. createJSONStorage stringified the
 // entire partialized blob synchronously inside every set() — the debounce only
@@ -70,7 +136,27 @@ const idbPersistStorage: PersistStorage<unknown> = {
     backupTimer = setTimeout(() => {
       const api = (window as any).electronAPI;
       if (!api?.backupSave) return;
-      api.backupSave(JSON.stringify(value))
+      // Re-attach elementAssets so the disaster-recovery mirror still covers the
+      // library after it moved out of partialize. Keeping them nested under
+      // `state` means the on-disk backup format is IDENTICAL to before, so old
+      // backups restore unchanged and the restore path needs no versioning.
+      //
+      // ★ SAFETY: never write a backup before the library has loaded. Backing up an
+      // empty/half-loaded elementAssets would OVERWRITE a good backup with one that
+      // has no library — destroying the very safety net this mirror exists to be.
+      // Skipping is safe: the previous good backup stays on disk and the next write
+      // (post-hydration) reschedules this timer.
+      let st;
+      try { st = useAppStore.getState(); } catch { return; }
+      if (!st || !st._elementsHydrated) {
+        console.warn('[Backup] skipped — element library not hydrated yet (keeping previous backup)');
+        return;
+      }
+      const withElements = {
+        ...(value as any),
+        state: { ...((value as any)?.state || {}), elementAssets: st.elementAssets },
+      };
+      api.backupSave(JSON.stringify(withElements))
         .then((r: any) => {
           if (r?.ok) console.log(`[Backup] Saved ${(r.bytes / 1024 / 1024).toFixed(2)}MB → ${r.path}`);
           else console.warn('[Backup] Save failed:', r?.error);
@@ -100,9 +186,9 @@ export function flushPersist(): Promise<void> {
 // in Chromium/Electron; pagehide covers real navigation/quit.
 if (typeof window !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') void flushPersist();
+    if (document.visibilityState === 'hidden') { void flushPersist(); void flushElements(); }
   });
-  window.addEventListener('pagehide', () => { void flushPersist(); });
+  window.addEventListener('pagehide', () => { void flushPersist(); void flushElements(); });
 }
 
 export type AssetRole = 'reference_image' | 'reference_video' | 'reference_audio' | 'first_frame' | 'last_frame';
@@ -205,6 +291,10 @@ export interface Project {
 
 interface AppState {
   _hasHydrated: boolean;
+  // Element library loads from its own IDB key AFTER main hydration. Until this is
+  // true the library may still be empty — element-dependent UI (@mention list, send)
+  // must wait on it rather than act on a half-loaded library.
+  _elementsHydrated: boolean;
   projects: Project[];
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
@@ -295,6 +385,7 @@ export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
       _hasHydrated: false,
+      _elementsHydrated: false,
       projects: [],
       currentProjectId: null,
       autoDownload: false,
@@ -653,12 +744,15 @@ export const useAppStore = create<AppState>()(
     {
       name: 'seedance-app-storage',
       storage: idbPersistStorage,
+      // elementAssets is deliberately NOT here — it lives in its own IDB key
+      // (ELEMENTS_KEY) so ordinary writes don't re-serialize 368MB of base64.
+      // NOTE: persist still MERGES a stored `elementAssets` back into state on
+      // read, which is exactly how the one-time migration gets its source.
       partialize: (state) => ({
         projects: state.projects,
         currentProjectId: state.currentProjectId,
         autoDownload: state.autoDownload,
         assetCollections: state.assetCollections,
-        elementAssets: state.elementAssets,
         projectCollectionId: state.projectCollectionId,
       }),
       onRehydrateStorage: () => {
@@ -686,8 +780,33 @@ export const useAppStore = create<AppState>()(
             return { ...p, settings: s, draftPrompt: '' };
           });
           useAppStore.setState({ projects: patched, _hasHydrated: true });
+
+          // Element library loads from its own key (and migrates out of the legacy
+          // blob on first run). Async, so the UI gates element-dependent surfaces on
+          // `_elementsHydrated` — without that gate the @mention list would look empty
+          // for a moment after launch and a send in that window could drop references.
+          const legacy = useAppStore.getState().elementAssets || [];
+          void loadElementAssets(legacy).then(assets => {
+            lastElements = assets;             // seed BEFORE the flag so the subscriber
+            useAppStore.setState({ elementAssets: assets, _elementsHydrated: true });
+          }).catch(err => {
+            console.error('[Elements] load failed — keeping legacy copy in memory:', err);
+            lastElements = legacy;
+            useAppStore.setState({ _elementsHydrated: true });
+          });
         };
       },
     }
   )
 );
+
+// Persist the element library whenever it actually changes. Covers every mutation
+// path at once (addElementAsset / updateElementAsset / deleteElementAsset /
+// deleteCollection / 가져오기), because each rebuilds the array. Gated on
+// _elementsHydrated so the empty pre-load state can never overwrite stored assets.
+useAppStore.subscribe((state) => {
+  if (!state._elementsHydrated) return;
+  if (state.elementAssets === lastElements) return;
+  lastElements = state.elementAssets;
+  scheduleElementsSave(state.elementAssets);
+});

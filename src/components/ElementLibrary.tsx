@@ -564,9 +564,13 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                         return (
                           <div key={a.id} onClick={() => setEditing(a)} role="button"
                             className="text-left bg-white rounded-xl border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all group cursor-pointer">
+                            {/* Cover uses the FULL-RES url: the 80px/q0.5 thumbnailUrl was far too
+                                small for this ~270px card and rendered visibly mushy (v26.7.2101
+                                regression). loading="lazy" + decoding="async" is what actually fixed
+                                the modal-open jank — only on-screen covers decode, off the main thread. */}
                             <div className="aspect-square bg-gray-50 relative overflow-hidden">
                               {cover
-                                ? <img src={cover.thumbnailUrl || cover.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
+                                ? <img src={cover.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
                                 : <div className="w-full h-full flex items-center justify-center text-gray-300"><ImageIcon size={28} /></div>}
                               <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ background: meta.bg, color: meta.text }}><CatIcon size={10} /> {meta.name}</span>
                               {a.images.length > 1 && <span className="absolute bottom-1.5 right-1.5 text-[10px] font-medium text-white bg-black/55 px-1.5 py-0.5 rounded-full">{a.images.length}장</span>}
