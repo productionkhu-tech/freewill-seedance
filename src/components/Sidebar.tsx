@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown } from 'lucide-react';
-import { motion } from 'motion/react';
+import { createPortal } from 'react-dom';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, AlertTriangle } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { useAppStore } from '../store';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
 
@@ -23,6 +24,28 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // Download folder — session-only. Resets to OS Downloads on every app restart.
   const [downloadDir, setDownloadDir] = useState<string>('');
   const [isDefaultDir, setIsDefaultDir] = useState(true);
+  // Delete confirmation. Deleting a project drops every message + generated video in it
+  // and there is no undo, so it can't be a bare click. A custom modal rather than
+  // confirm(): a native dialog de-activates the Electron window, which drops the prompt
+  // caret and wedges the Korean IME (the same reason alert() was removed app-wide, §6-3).
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
+  const deleteBtnRef = useRef<HTMLButtonElement>(null);
+  // Focus the destructive button on open so Enter confirms (asked for explicitly) and
+  // the dialog is keyboard-reachable. Escape cancels.
+  useEffect(() => {
+    if (!pendingDelete) return;
+    const t = setTimeout(() => deleteBtnRef.current?.focus(), 30);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); setPendingDelete(null); }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        deleteProject(pendingDelete.id);
+        setPendingDelete(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => { clearTimeout(t); window.removeEventListener('keydown', onKey); };
+  }, [pendingDelete, deleteProject]);
 
   useEffect(() => {
     const refresh = async () => {
@@ -203,7 +226,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 <button onClick={(e) => { e.stopPropagation(); setEditingId(project.id); setEditName(project.name); }} className="p-1 text-white/40 hover:text-white transition-colors" title="Rename">
                   <Edit2 size={14} />
                 </button>
-                <button onClick={(e) => { e.stopPropagation(); deleteProject(project.id); }} className="p-1 text-white/40 hover:text-[#ff3b30] transition-colors" title="Delete">
+                <button onClick={(e) => { e.stopPropagation(); setPendingDelete({ id: project.id, name: project.name }); }} className="p-1 text-white/40 hover:text-[#ff3b30] transition-colors" title="Delete">
                   <Trash2 size={14} />
                 </button>
               </div>
@@ -256,6 +279,75 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       </div>
       </>
     )}
+
+    {/* Delete confirmation — irreversible, so it states exactly what is lost.
+        Rendered through a portal: the sidebar wrapper is overflow-hidden AND runs a
+        width animation, and an animated ancestor can establish a containing block that
+        clips position:fixed children. Portaling to <body> sidesteps that entirely. */}
+    {createPortal(
+    <AnimatePresence>
+      {pendingDelete && (() => {
+        const target = projects.find(p => p.id === pendingDelete.id);
+        const videoCount = target?.messages.filter(m => m.status === 'succeeded' && m.videoUrl).length ?? 0;
+        return (
+          <motion.div
+            key="del-backdrop"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            onClick={() => setPendingDelete(null)}
+            className="fixed inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.94, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 12 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-[min(92vw,26rem)] bg-white rounded-2xl shadow-2xl overflow-hidden text-gray-900"
+            >
+              <div className="p-5 space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="shrink-0 w-9 h-9 rounded-full bg-red-50 flex items-center justify-center">
+                    <AlertTriangle size={18} className="text-[#ff3b30]" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-[16px] font-semibold tracking-tight leading-snug">프로젝트를 삭제할까요?</h3>
+                    <p className="text-[13px] text-gray-500 mt-0.5 break-all">{pendingDelete.name}</p>
+                  </div>
+                </div>
+                <div className="rounded-xl bg-red-50/70 border border-red-100 px-3.5 py-2.5">
+                  <p className="text-[12.5px] text-red-700 leading-relaxed">
+                    이 작업은 <span className="font-semibold">되돌릴 수 없습니다.</span><br />
+                    프롬프트 기록{videoCount > 0 && <> 과 생성된 영상 <span className="font-semibold">{videoCount}개</span></>}가 모두 사라집니다.
+                  </p>
+                </div>
+                {videoCount > 0 && (
+                  <p className="text-[11px] text-gray-400 leading-snug">
+                    이미 다운로드한 파일은 지워지지 않습니다.
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-2 px-5 pb-5">
+                <button
+                  onClick={() => setPendingDelete(null)}
+                  className="flex-1 px-4 py-2.5 rounded-xl text-[14px] font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors"
+                >
+                  취소
+                </button>
+                <button
+                  ref={deleteBtnRef}
+                  onClick={() => { deleteProject(pendingDelete.id); setPendingDelete(null); }}
+                  className="flex-1 px-4 py-2.5 rounded-xl text-[14px] font-semibold text-white bg-[#ff3b30] hover:bg-[#e0332a] transition-colors focus:outline-none focus:ring-2 focus:ring-[#ff3b30]/40 focus:ring-offset-2"
+                >
+                  삭제
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        );
+      })()}
+    </AnimatePresence>,
+    document.body)}
     </motion.div>
   );
 }
