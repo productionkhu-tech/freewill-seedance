@@ -303,9 +303,12 @@ interface AppState {
   // launch, survives local-project switches AND queue sends, NOT persisted (restart
   // → must re-pick). Distinct from the local `projects` sidebar workspaces.
   billingProject: string;
-  billingProjects: { project: string; status: string }[];
+  // allow4k mirrors the tracker sheet's Project_Status F column ("4K 허용"), refreshed
+  // by the same 60s poll that carries status. Kept on this list rather than in its own
+  // store field so a permission flip costs zero extra writes/renders.
+  billingProjects: { project: string; status: string; allow4k?: boolean }[];
   setBillingProject: (p: string) => void;
-  setBillingProjects: (list: { project: string; status: string }[]) => void;
+  setBillingProjects: (list: { project: string; status: string; allow4k?: boolean }[]) => void;
   // Transient (NOT persisted): # of images from elements currently @mentioned in
   // the active prompt. ChatArea writes it; SettingsPanel reads it to show the
   // shared "panel + element" image budget in the Reference Assets hint.
@@ -356,10 +359,10 @@ export const defaultSettings: GenerationSettings = {
 };
 
 // ── Seedance 2.0 model catalog ──────────────────────────────────────────────
-// Fast & Mini cap at 720p (no 1080p/4k per BytePlus spec); only the flagship
-// 2.0 supports 1080p. Single source of truth shared by the settings UI, the
-// hydration clamp, and the send-time guard so a model never receives an
-// unsupported resolution. Default model is the flagship (dreamina-seedance-2-0-260128).
+// Only the flagship 2.0 supports 1080p and 4k; Fast and Mini cap lower (see
+// modelResolutions below for the measured matrix). Single source of truth shared by
+// the settings UI, the hydration clamp, and the send-time guard so a model never
+// receives an unsupported resolution. Default is the flagship (dreamina-seedance-2-0-260128).
 export const MODELS: { id: string; name: string; provider?: 'byteplus' | 'gemini' }[] = [
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
@@ -374,11 +377,59 @@ export function modelProvider(model: string): 'byteplus' | 'gemini' {
   return MODELS.find(m => m.id === model)?.provider || 'byteplus';
 }
 
+// ── Resolution: three layers, deliberately separate ─────────────────────────
+// Mixing them is what makes this kind of gate rot. Keep them apart:
+//   modelResolutions   — what the model can EVER do (structural, no policy)
+//   allowedResolutions — structural ∩ per-project 4k permission (UI + send)
+//   clampResolution    — walk an invalid value DOWN to the nearest allowed one
+
+// Structural capability. Verified live against the API 2026-07-27 (BytePlus validates
+// `resolution` before creating a task, so this was probed at zero cost):
+//   flagship 2.0 → 480p/720p/1080p/4k   ·   fast → no 4k   ·   mini → no 1080p
+// The docs also state "4k: Only supported by Seedance 2.0".
+//
+// ★ The hydration clamp MUST use this one, never allowedResolutions. Hydration runs at
+// boot, and billingProject is session-only (starts empty) → the 4k permission is always
+// false at that moment. Clamping against policy there would wipe a saved '4k' setting on
+// every single restart. Structural validity is the right question for stored data; the
+// live permission gate belongs at render + send time.
 export function modelResolutions(model: string): string[] {
   if (modelProvider(model) === 'gemini') return ['720p']; // Omni is 720p only
-  return (model.includes('fast') || model.includes('mini'))
-    ? ['480p', '720p']
-    : ['480p', '720p', '1080p'];
+  if (model.includes('fast') || model.includes('mini')) return ['480p', '720p'];
+  return ['480p', '720p', '1080p', '4k'];
+}
+
+// Structural ∩ policy. 4k is gated on the billing project's "4K 허용" column in the
+// tracker sheet. Nothing else is affected: '4k' only exists in the flagship's structural
+// list, so Fast/Mini/Omni can never gain it no matter what allow4k says.
+export function allowedResolutions(model: string, allow4k: boolean): string[] {
+  return modelResolutions(model).filter(r => r !== '4k' || allow4k);
+}
+
+// Step DOWN to the nearest allowed tier (4k→1080p→720p→480p) rather than snapping to a
+// hardcoded '720p'. Losing 4k permission should land the user on 1080p — the next thing
+// down — not two tiers below where they were.
+export function clampResolution(model: string, res: string, allow4k: boolean): string {
+  const ok = allowedResolutions(model, allow4k);
+  if (ok.includes(res)) return res;
+  const ladder = ['4k', '1080p', '720p', '480p'];
+  const from = ladder.indexOf(res);
+  // Unknown/legacy value → app default, never a silent promotion to a higher tier.
+  if (from < 0) return ok.includes('720p') ? '720p' : ok[ok.length - 1];
+  for (let i = from + 1; i < ladder.length; i++) if (ok.includes(ladder[i])) return ladder[i];
+  return ok[ok.length - 1] || '720p';
+}
+
+// Is 4k unlocked for the CURRENTLY selected billing project? Always derived, never
+// stored — so a grant/revoke in the sheet takes effect the moment the poll lands, with
+// no second copy of the truth to keep in sync. Fail-closed: no project selected, project
+// missing from the list, or field absent (older tracker) → false.
+export function isFourKAllowed(state: {
+  billingProject: string;
+  billingProjects: { project: string; allow4k?: boolean }[];
+}): boolean {
+  if (!state.billingProject) return false;
+  return state.billingProjects.find(p => p.project === state.billingProject)?.allow4k === true;
 }
 
 export const useAppStore = create<AppState>()(
@@ -727,9 +778,39 @@ export const useAppStore = create<AppState>()(
           pollingSet.delete(taskId);
         }
       },
+      // BytePlus only allows deleting a task that is still QUEUED. Once it flips to
+      // running the DELETE is refused with 409 InvalidAction.RunningTaskDeletion —
+      // measured 2026-07-27: a task goes queued→running within seconds, so most
+      // cancel clicks land on a running task.
+      //
+      // We used to ignore the response and mark the message failed regardless. That
+      // was actively harmful: BytePlus kept generating and BILLED the tokens, but the
+      // message left running/queued so App.tsx stopped polling it — which meant the
+      // server's credit-tracker POST (fired from GET /tasks/:id on success) never ran.
+      // Result: money spent, nothing in the sheet, and the finished video discarded.
+      // At 4k (~196k tokens/sec, ~4x 1080p) that silent leak gets expensive fast.
+      //
+      // Now: only mark cancelled when the API actually accepted it. On 409 we keep the
+      // message polling so it completes normally — the user gets the video they paid
+      // for and the tracker records it.
       cancelTask: async (projectId, messageId, taskId) => {
         try {
           const res = await fetch(`/api/byteplus/tasks/${taskId}`, { method: 'DELETE' });
+          if (!res.ok) {
+            let code = '';
+            try { code = (await res.json())?.error?.code || ''; } catch { /* body may be empty */ }
+            const running = res.status === 409 || code.includes('RunningTaskDeletion');
+            // Leave status untouched (still running/queued) so polling continues.
+            window.dispatchEvent(new CustomEvent('seedance:cancel-failed', {
+              detail: {
+                taskId,
+                message: running
+                  ? '이미 생성이 시작되어 취소할 수 없습니다. 완료될 때까지 진행됩니다 (크레딧은 소모됩니다).'
+                  : `취소 실패 (${res.status}). 작업은 계속 진행됩니다.`,
+              },
+            }));
+            return;
+          }
           get().updateMessage(projectId, messageId, {
             content: `Task ${taskId} cancelled.`,
             status: 'failed',
@@ -737,7 +818,12 @@ export const useAppStore = create<AppState>()(
             endTime: Date.now(),
           });
         } catch (error: any) {
+          // Network failure — we don't know whether it cancelled. Keep polling rather
+          // than lying; the next poll reflects the real state.
           console.error('Cancel task error:', error);
+          window.dispatchEvent(new CustomEvent('seedance:cancel-failed', {
+            detail: { taskId, message: '취소 요청이 실패했습니다. 작업 상태를 계속 확인합니다.' },
+          }));
         }
       },
     }),

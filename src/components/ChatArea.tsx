@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, modelResolutions, MODELS, modelProvider } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, MODELS, modelProvider } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -31,7 +31,10 @@ function translateError(error: string): string {
   if (error.includes('rate limit') || error.includes('429')) return 'API 요청 한도 초과: 잠시 후 다시 시도해주세요.';
   if (error.includes('No task ID')) return 'Task ID를 받지 못했습니다. API 응답을 확인해주세요.';
   if (error.includes('1080p is not supported for this account')) return '1080p는 현재 계정에서 사용할 수 없습니다. BytePlus 콘솔에서 1080p 권한을 활성화하거나 480p/720p를 사용해주세요.';
+  if (error.includes('4k is not supported for this account')) return '4K는 현재 팀의 API 키에서 사용할 수 없습니다. BytePlus 콘솔에서 4K를 활성화하거나 1080p 이하를 사용해주세요.';
   if (error.includes('not supported for this account')) return `현재 계정에서 사용할 수 없는 옵션입니다: ${error}`;
+  // 4k is flagship-only: Fast/Mini reject it at parameter validation, before a task exists.
+  if (error.includes('parameter resolution') && error.includes('not valid')) return '이 모델은 선택한 해상도를 지원하지 않습니다. 4K는 Seedance 2.0(플래그십) 전용입니다.';
   if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;
   if (error.includes('timeout') || error.includes('ETIMEDOUT')) return '요청 시간 초과: 네트워크 연결을 확인해주세요.';
   if (error.includes('Failed to fetch') || error.includes('NetworkError')) return '네트워크 오류: 인터넷 연결을 확인해주세요.';
@@ -39,7 +42,20 @@ function translateError(error: string): string {
 }
 
 /* ─── Video player: lazy mount + blob fetch (single GET → smooth playback over high-latency CDN) ─── */
-function VideoPlayer({ src, className, eager }: { src: string; className?: string; eager?: boolean }) {
+// Can this machine decode the 4k output at all? BytePlus encodes 4k as H.265/HEVC
+// **Main10 (10-bit)** — verified on a real output 2026-07-27 (hvc1, yuv420p10le). Chromium
+// ships no software HEVC decoder (licensing), so this depends entirely on the OS/GPU
+// platform decoder: on Windows that means the HEVC Video Extensions being installed.
+// Probe Main10 at 4k level specifically — the 8-bit Main string ("hvc1.1.6…") can report
+// supported on machines that still can't handle this content.
+const CAN_PLAY_HEVC = (() => {
+  try {
+    return document.createElement('video')
+      .canPlayType('video/mp4; codecs="hvc1.2.4.L150.B0"') !== '';
+  } catch { return false; }
+})();
+
+function VideoPlayer({ src, className, eager, is4k }: { src: string; className?: string; eager?: boolean; is4k?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(eager === true);
@@ -88,8 +104,13 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
   };
 
   // Use shared blob cache (populated by store on success). Fetch + cache if missing.
+  // 4k is the exception: we stream the URL directly instead of downloading the whole
+  // file first. Measured on a real 4k clip — blob path 7.6s to first frame vs 1.36s
+  // streaming, because the blob route must pull all ~8MB before the <video> gets
+  // anything. (moov sits at the end of these files, but Chromium's range requests
+  // handle that fine — measured, not assumed.)
   useEffect(() => {
-    if (!mounted || !src) return;
+    if (!mounted || !src || is4k) return;
     const cached = getCachedBlob(src);
     if (cached) {
       const url = URL.createObjectURL(cached);
@@ -138,16 +159,32 @@ function VideoPlayer({ src, className, eager }: { src: string; className?: strin
       className={`${className} aspect-video bg-black flex items-center justify-center relative`}
     >
       {!mounted && <Play size={40} className="text-white/30" />}
-      {mounted && loading && !blobSrc && (
+      {mounted && loading && !blobSrc && !is4k && (
         <Loader2 size={32} className="text-white/60 animate-spin" />
       )}
-      {mounted && (blobSrc || failed) && (
+      {/* 4k is HEVC — a machine without the platform decoder renders a black frame and
+          no error a user can act on. Say so plainly and point at the two things that
+          actually work: download it, or install the free codec. The video still exists
+          and is still downloadable; only in-app preview is unavailable. */}
+      {mounted && is4k && !CAN_PLAY_HEVC ? (
+        <div className="w-full h-full flex flex-col items-center justify-center gap-2 px-4 text-center">
+          <p className="text-[13px] text-white/80 leading-snug">
+            이 PC에서는 4K(HEVC) 미리보기를 재생할 수 없습니다.
+          </p>
+          <p className="text-[11px] text-white/50 leading-snug">
+            영상은 정상 생성되었습니다 — 다운로드해서 확인하세요.<br />
+            (Microsoft Store의 무료 &ldquo;HEVC Video Extensions&rdquo; 설치 시 재생 가능)
+          </p>
+        </div>
+      ) : mounted && (blobSrc || failed || is4k) && (
         <video
           ref={videoRef}
           src={blobSrc || src}
           controls
           playsInline
-          preload="auto"
+          // 4k streams straight from the CDN, so only ask for metadata up-front instead
+          // of eagerly buffering ~8MB per card that scrolls near the viewport.
+          preload={is4k ? 'metadata' : 'auto'}
           className="w-full h-full object-contain"
         />
       )}
@@ -270,7 +307,9 @@ const settingsTagList = (us: any): string[] => {
     const dur = us.omniTask === 'edit' ? '원본 길이' : `${Math.max(3, Math.min(10, us.duration || 5))}s`;
     return [modelName, OMNI_TASK_LABELS[us.omniTask] || us.omniTask || 'Text→Video', '720p', us.ratio, dur];
   }
-  return [modelName, us.mode, us.resolution, us.ratio, us.duration === -1 ? 'Auto' : `${us.duration}s`];
+  // API value is lowercase '4k'; display it as "4K" to match the Resolution dropdown.
+  const res = us.resolution === '4k' ? '4K' : us.resolution;
+  return [modelName, us.mode, res, us.ratio, us.duration === -1 ? 'Auto' : `${us.duration}s`];
 };
 
 const renderMessageContent = (content: string, namedAssets: any[]) => {
@@ -538,6 +577,15 @@ export function ChatArea() {
     };
     window.addEventListener('seedance:download-instant', onInstant);
     return () => window.removeEventListener('seedance:download-instant', onInstant);
+  }, []);
+
+  // A cancel the API refused (task already running → 409). store.cancelTask leaves the
+  // message polling in that case, so the user needs to be told the work is still going
+  // and will still be billed — silently doing nothing would look like a dead button.
+  useEffect(() => {
+    const onCancelFailed = (e: Event) => warn((e as CustomEvent).detail?.message || '취소하지 못했습니다.');
+    window.addEventListener('seedance:cancel-failed', onCancelFailed);
+    return () => window.removeEventListener('seedance:cancel-failed', onCancelFailed);
   }, []);
 
   // Save draft for previous project, load draft for new project
@@ -1638,11 +1686,27 @@ export function ChatArea() {
     }
 
     const currentSettings = { ...project.settings };
-    // Clamp resolution to what the chosen model supports (Fast/Mini have no
-    // 1080p) up-front, so the payload, the stored usedSettings, the card tag,
-    // and reuse all agree on the actually-sent value. The UI already gates this;
-    // this is the last line of defense against a stale/migrated setting.
-    if (!modelResolutions(currentSettings.model).includes(currentSettings.resolution)) currentSettings.resolution = '720p';
+    // Clamp resolution up-front so the payload, the stored usedSettings, the card tag,
+    // and 재사용 all agree on the value actually sent. Two things are enforced here:
+    //   · model capability (Fast/Mini have no 1080p; 4k is flagship-only)
+    //   · the live per-project 4k permission from the tracker sheet
+    // This is the ONLY place the 4k grant is enforced. The settings panel deliberately
+    // never rewrites the setting when permission disappears — doing that mid-typing
+    // would yank the config out from under the user. Instead it shows a locked chip and
+    // we clamp here, at the moment the queue is fired, exactly as intended.
+    {
+      const { billingProject: bp, billingProjects: bps } = useAppStore.getState();
+      const allow4k = isFourKAllowed({ billingProject: bp, billingProjects: bps });
+      const clamped = clampResolution(currentSettings.model, currentSettings.resolution, allow4k);
+      if (clamped !== currentSettings.resolution) {
+        const was4k = currentSettings.resolution === '4k';
+        currentSettings.resolution = clamped;
+        // Write back ONLY now, so the panel visibly returns to the allowed tier once the
+        // user actually sends — never while they're still composing.
+        useAppStore.getState().updateProjectSettings(project.id, { resolution: clamped });
+        if (was4k) warn(`4K 권한이 해제되어 ${clamped}로 전송합니다.`);
+      }
+    }
     const currentAssets = [...project.assets];
 
     // Pre-flight: legacy data URL safety check (only matters for old assets pre-URL migration)
@@ -2138,7 +2202,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer src={previewItem.videoUrl} className="w-full h-full" eager />
+              <VideoPlayer src={previewItem.videoUrl} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -2232,7 +2296,7 @@ export function ChatArea() {
               {galleryVideos.map((item, idx) => (
                 <div key={item.id} className="bg-white rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200 animate-fade-in-up" >
                   <div className="aspect-video bg-black relative group">
-                    <VideoPlayer src={item.videoUrl!} className="w-full h-full" />
+                    <VideoPlayer src={item.videoUrl!} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
                   </div>
                   <div className="p-3 space-y-2">
                     <p className="text-[11px] font-semibold text-indigo-500">{project.name}</p>
@@ -2390,7 +2454,7 @@ export function ChatArea() {
                       ) : msg.status === 'succeeded' && (msg.videoUrl || msg.imageUrl) ? (
                         <div className="space-y-3">
                           {msg.videoUrl && (
-                            <VideoPlayer src={msg.videoUrl} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" />
+                            <VideoPlayer src={msg.videoUrl} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
                           )}
                           {msg.imageUrl && (
                             <div className="rounded-xl overflow-hidden border border-gray-200/80 bg-black">

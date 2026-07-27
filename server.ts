@@ -736,6 +736,13 @@ async function startServer() {
             task_id: req.params.id,
             total_tokens: data.usage.total_tokens,
             completion_tokens: data.usage.completion_tokens,
+            // Sent but NOT currently logged: the tracker deliberately drops these to keep
+            // usage_log thin (it's past 20k rows and gets fully re-read every 30 min).
+            // Costs a few bytes here and means turning resolution breakdown back on is a
+            // one-line change in the Apps Script, with no app redeploy. BytePlus echoes
+            // both on the succeeded response — verified 2026-07-27.
+            resolution: data.resolution || '',
+            model: data.model || '',
             source: 'app',
             timestamp: Date.now(),
           }),

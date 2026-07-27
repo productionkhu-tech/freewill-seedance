@@ -52,12 +52,20 @@ export default function App() {
         if (!j || j.ok !== true || !Array.isArray(j.projects)) return; // couldn't fetch → keep state untouched
         const active = j.projects
           .filter((p: any) => p && p.status === '진행')
-          .map((p: any) => ({ project: String(p.project), status: String(p.status) }));
+          // allow4k comes from Project_Status column F ("4K 허용") — an axis independent
+          // of 진행/종료, so a project can be active without 4k. Strict === true keeps it
+          // fail-closed for older trackers that don't send the field at all.
+          .map((p: any) => ({ project: String(p.project), status: String(p.status), allow4k: p.allow4k === true }));
         // Skip the store write (re-renders subscribers + re-serializes the persisted
         // blob) when the active list is unchanged — this runs every 60s.
+        // ★ allow4k MUST be in this comparison. Without it a pure permission flip leaves
+        // the list "unchanged", the write is skipped, and the grant/revoke never reaches
+        // the UI — the feature would silently never work.
         const prev = useAppStore.getState().billingProjects;
         const changed = prev.length !== active.length ||
-          active.some((p: any, i: number) => p.project !== prev[i]?.project || p.status !== prev[i]?.status);
+          active.some((p: any, i: number) => p.project !== prev[i]?.project
+            || p.status !== prev[i]?.status
+            || p.allow4k !== prev[i]?.allow4k);
         if (changed) useAppStore.getState().setBillingProjects(active);
         const sel = useAppStore.getState().billingProject;
         if (sel && !active.some((p: any) => p.project === sel)) {
@@ -68,7 +76,19 @@ export default function App() {
     };
     loadProjects();
     const id = setInterval(loadProjects, 60000); // 60s — near real-time 종료 detection
-    return () => clearInterval(id);
+    // Event-driven top-ups so a 4K grant/revoke feels immediate without shortening the
+    // interval. Tightening the poll would triple GAS traffic AND triple the cost of the
+    // store write, which re-renders every message card (no selectors / no memo yet).
+    // Refetch when the user comes back to the window, or deliberately asks for it
+    // (project dropdown opened / resolution dropdown opened — see SettingsPanel).
+    const onFocus = () => loadProjects();
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('seedance:refresh-projects', onFocus);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('seedance:refresh-projects', onFocus);
+    };
   }, [_hasHydrated]);
 
   if (!_hasHydrated || !currentProjectId) {
@@ -94,7 +114,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.7.2401
+        v26.7.2701
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelResolutions, modelProvider } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -10,6 +10,9 @@ const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '480p', name: '480p' },
   { id: '720p', name: '720p' },
   { id: '1080p', name: '1080p' },
+  // 4k only appears when the selected billing project has "4K 허용" in the tracker
+  // sheet — see allowedResolutions(). Flagship Seedance 2.0 only.
+  { id: '4k', name: '4K' },
 ];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
 // Gemini Omni Flash — its own knobs (see gemini-omni-flash-preview spec).
@@ -207,6 +210,20 @@ export function SettingsPanel() {
   if (!project) return null;
   const { settings, assets } = project;
   const isOmni = modelProvider(settings.model) === 'gemini'; // Gemini Omni → different settings surface
+  // Live 4k permission for the selected billing project (sheet column F). Derived every
+  // render, so a grant/revoke lands as soon as the poll updates billingProjects.
+  const allow4k = isFourKAllowed({ billingProject, billingProjects });
+  const resOptions = RESOLUTIONS.filter(r => allowedResolutions(settings.model, allow4k).includes(r.id));
+  // '4k' is still the saved setting but isn't currently permitted. We deliberately do NOT
+  // rewrite settings here — that would mutate the project out from under someone who may
+  // be mid-prompt. Show the state instead; handleSend does the actual clamp to 1080p when
+  // the queue is fired (and only then writes back).
+  const fourKBlocked = settings.resolution === '4k' && !allow4k;
+  // Two very different situations, and calling both "권한 해제" would be wrong. On a fresh
+  // launch billingProject is always empty (session-only), so a saved 4k setting lands here
+  // every single restart — telling the user their access was revoked would be alarming and
+  // false. Picking their project restores 4k immediately.
+  const fourKBlockedReason = !billingProject ? 'no-project' : 'no-permission';
   // Single store write on slider release (no-op if nothing is in flight).
   const commitDuration = () => { if (draftDuration != null) { updateProjectSettings(project.id, { duration: draftDuration }); setDraftDuration(null); } };
   const commitOutput = () => { if (draftOutput != null) { updateProjectSettings(project.id, { output_count: draftOutput }); setDraftOutput(null); } };
@@ -525,9 +542,11 @@ export function SettingsPanel() {
             <CustomSelect
               value={settings.model}
               onChange={(val) => {
-                // Switching model may drop the current resolution (Fast/Mini have
-                // no 1080p) — clamp it in the SAME update so the two never disagree.
-                const res = modelResolutions(val).includes(settings.resolution) ? settings.resolution : '720p';
+                // Switching model may drop the current resolution (Fast/Mini have no
+                // 1080p, and 4k is flagship-only) — clamp it in the SAME update so the
+                // two never disagree. Steps down one tier at a time, so 4k → Fast lands
+                // on 720p via 1080p rather than snapping straight to a hardcoded value.
+                const res = clampResolution(val, settings.resolution, allow4k);
                 const patch: any = { model: val, resolution: res };
                 // Omni only accepts 16:9/9:16 + duration 3–10s — clamp when switching in.
                 if (modelProvider(val) === 'gemini') {
@@ -559,7 +578,20 @@ export function SettingsPanel() {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Resolution</label>
-              <CustomSelect value={settings.resolution} onChange={(val) => updateProjectSettings(project.id, { resolution: val })} options={RESOLUTIONS.filter(r => modelResolutions(settings.model).includes(r.id))} />
+              {/* When 4k isn't permitted the saved value is missing from the option list.
+                  CustomSelect falls back to options[0] ("480p") in that case — a flat lie
+                  about what's stored — so pass a placeholder, which it renders instead.
+                  The dropdown stays FULLY USABLE: replacing it with a static notice would
+                  strand the user, unable to pick 720p/480p without sending first. */}
+              <div onPointerDown={() => window.dispatchEvent(new CustomEvent('seedance:refresh-projects'))}>
+                <CustomSelect
+                  value={settings.resolution}
+                  onChange={(val) => updateProjectSettings(project.id, { resolution: val })}
+                  options={resOptions}
+                  // Short on purpose — this column is ~140px, so anything longer truncates.
+                  placeholder={fourKBlocked ? '4K 잠김' : undefined}
+                />
+              </div>
             </div>
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Ratio</label>
@@ -568,6 +600,16 @@ export function SettingsPanel() {
                 : <CustomSelect value={settings.ratio} onChange={(val) => updateProjectSettings(project.id, { ratio: val })} options={isOmni ? OMNI_RATIOS : RATIOS.map(r => ({ id: r, name: r }))} />}
             </div>
           </div>
+
+          {/* Full width, OUTSIDE the 2-column grid. Inside the Resolution cell this wrapped
+              to 3 lines and stretched that column, knocking it out of alignment with Ratio. */}
+          {fourKBlocked && (
+            <p className="text-[11px] text-amber-600 leading-snug -mt-2">
+              {fourKBlockedReason === 'no-project'
+                ? '프로젝트를 선택하면 4K가 복원됩니다.'
+                : '이 프로젝트는 4K 권한이 없습니다 · 전송 시 1080p'}
+            </p>
+          )}
 
           {isOmni ? (
             settings.omniTask === 'edit' ? (
