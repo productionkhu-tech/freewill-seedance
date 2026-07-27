@@ -277,6 +277,9 @@ export interface ChatMessage {
   usedElementImages?: { id: string; elementId: string; imageId: string; name: string; category: string; url: string }[]; // element-mention images shown on the card reference strip (url = thumbnail; full-res for hover-zoom is looked up live by elementId+imageId)
   downloadedAt?: number; // last time the user downloaded this video — flips the
                          // download button to "다시 다운로드" styling
+  starred?: boolean; // 채택된 컷. Selecting takes is the core of the editing workflow and
+                     // a project can hold thousands of clips, so this is just a flag +
+                     // a gallery filter. One boolean per message — no storage concern.
   downloadedPath?: string; // absolute path it was saved to, for "폴더에서 보기".
                            // Stored rather than recomputed at click time because the
                            // download folder is a session-only override — resolving it

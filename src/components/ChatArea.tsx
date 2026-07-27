@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, MODELS, modelProvider } from '../store';
 import { HoverZoom } from './HoverZoom';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
@@ -490,6 +490,9 @@ export function ChatArea() {
   const [isDragging, setIsDragging] = useState(false);
   const [headerSearch, setHeaderSearch] = useState('');
   const [showGallery, setShowGallery] = useState(false);
+  // 갤러리 "채택만" 필터. 세션 한정(저장 안 함) — 필터 상태까지 영속화하면 다음에 열었을 때
+  // 영상이 사라진 것처럼 보인다.
+  const [starredOnly, setStarredOnly] = useState(false);
   const [previewItem, setPreviewItem] = useState<any>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -803,7 +806,11 @@ export function ChatArea() {
 
   const galleryVideos = useMemo(() => project.messages
     .filter(m => m.status === 'succeeded' && m.videoUrl)
-    .sort((a, b) => b.timestamp - a.timestamp), [project.messages]);
+    .filter(m => !starredOnly || m.starred)
+    .sort((a, b) => b.timestamp - a.timestamp), [project.messages, starredOnly]);
+  const starredCount = useMemo(
+    () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && m.starred).length,
+    [project.messages]);
 
   // filename → messageId, for downloads whose save path only arrives with the
   // 'download-done' event. A ref (not state) so filling it never re-renders.
@@ -821,6 +828,11 @@ export function ChatArea() {
     warn(r?.reason === 'missing'
       ? `파일을 찾을 수 없습니다 — 이동·이름변경·삭제된 것 같습니다.\n${filePath}`
       : '폴더를 열지 못했습니다.');
+  };
+
+  // 컷 채택 토글. downloadedAt과 같은 경로(updateMessage)라 별도 배선이 없다.
+  const toggleStar = (msgId: string, next: boolean) => {
+    useAppStore.getState().updateMessage(project.id, msgId, { starred: next });
   };
 
   // Download + mark the message so the button flips to "다시 다운로드".
@@ -2331,10 +2343,25 @@ export function ChatArea() {
       {/* Gallery */}
       {showGallery ? (
         <div className="flex-1 overflow-y-auto p-6 bg-[#f5f5f7]">
+          {/* 채택만 보기 — 채택된 컷이 하나도 없으면 굳이 노출하지 않는다 */}
+          {starredCount > 0 && (
+            <div className="flex items-center gap-2 mb-4">
+              <button onClick={() => setStarredOnly(v => !v)}
+                className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors ${starredOnly
+                  ? 'text-amber-700 bg-amber-50 border-amber-300'
+                  : 'text-gray-500 bg-white border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
+                <Star size={13} className={starredOnly ? 'fill-amber-400 text-amber-500' : ''} />
+                채택만 <span className="font-mono opacity-70">{starredCount}</span>
+              </button>
+            </div>
+          )}
           {galleryVideos.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3 animate-fade-in">
               <LayoutGrid size={48} className="text-gray-300" />
-              <p className="text-lg">아직 생성된 영상이 없습니다.</p>
+              <p className="text-lg">{starredOnly ? '채택한 컷이 없습니다.' : '아직 생성된 영상이 없습니다.'}</p>
+              {starredOnly && (
+                <button onClick={() => setStarredOnly(false)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">전체 보기</button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
@@ -2342,6 +2369,14 @@ export function ChatArea() {
                 <div key={item.id} className="bg-white rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200 animate-fade-in-up" >
                   <div className="aspect-video bg-black relative group">
                     <VideoPlayer src={item.videoUrl!} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
+                    <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}
+                      title={item.starred ? '채택 해제' : '컷 채택'}
+                      className={`absolute top-2 right-2 z-10 p-1.5 rounded-full backdrop-blur-sm transition-all ${item.starred
+                        ? 'bg-black/45 text-amber-400 opacity-100'
+                        : 'bg-black/45 text-white/70 hover:text-amber-400 opacity-0 group-hover:opacity-100'}`}>
+                      <Star size={15} className={item.starred ? 'fill-amber-400' : ''} />
+                    </button>
                   </div>
                   <div className="p-3 space-y-2">
                     <p className="text-[11px] font-semibold text-indigo-500">{project.name}</p>
@@ -2514,6 +2549,15 @@ export function ChatArea() {
                           )}
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
+                              {(msg.videoUrl || msg.imageUrl) && (
+                                <button onClick={() => toggleStar(msg.id, !msg.starred)}
+                                  title={msg.starred ? '채택 해제' : '컷 채택'}
+                                  className={`flex items-center justify-center w-9 h-9 rounded-lg border transition-all shrink-0 ${msg.starred
+                                    ? 'text-amber-500 bg-amber-50 border-amber-200 hover:bg-amber-100'
+                                    : 'text-gray-400 hover:text-amber-500 bg-gray-50 hover:bg-amber-50 border-gray-200 hover:border-amber-200'}`}>
+                                  <Star size={15} className={msg.starred ? 'fill-amber-400' : ''} />
+                                </button>
+                              )}
                               {msg.videoUrl && (
                                 <button onClick={() => handleVideoDownload(msg.id, msg.videoUrl!, msg.taskId || 'unknown')}
                                   className={`flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all whitespace-nowrap shrink-0 ${msg.downloadedAt
