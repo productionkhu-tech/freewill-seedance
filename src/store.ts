@@ -277,6 +277,11 @@ export interface ChatMessage {
   usedElementImages?: { id: string; elementId: string; imageId: string; name: string; category: string; url: string }[]; // element-mention images shown on the card reference strip (url = thumbnail; full-res for hover-zoom is looked up live by elementId+imageId)
   downloadedAt?: number; // last time the user downloaded this video — flips the
                          // download button to "다시 다운로드" styling
+  downloadedPath?: string; // absolute path it was saved to, for "폴더에서 보기".
+                           // Stored rather than recomputed at click time because the
+                           // download folder is a session-only override — resolving it
+                           // later would point at the wrong folder. Empty when the
+                           // browser picked the location (dev/anchor fallback).
 }
 
 export interface Project {

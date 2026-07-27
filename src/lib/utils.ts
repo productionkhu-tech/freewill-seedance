@@ -457,7 +457,11 @@ export function clearBlobCache() {
   blobCache.clear();
 }
 
-export async function downloadViaProxy(remoteUrl: string, filename: string) {
+// Returns the absolute saved path when it's known synchronously (the blob fast path,
+// where main writes the file itself). The Electron download path can't know it here —
+// the file isn't written yet — so it returns '' and the caller picks the path up from
+// the 'download-done' event instead.
+export async function downloadViaProxy(remoteUrl: string, filename: string): Promise<string> {
   // Fast path: serve from in-memory blob (instant, no CDN round-trip)
   const cached = blobCache.get(remoteUrl);
   if (cached) {
@@ -471,7 +475,7 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
         const r = await api.saveBlob({ filename, buffer });
         if (r?.ok) {
           window.dispatchEvent(new CustomEvent('seedance:download-instant', { detail: { filename, size: cached.size } }));
-          return;
+          return r.path || '';
         }
         // saveBlob failed → fall through to anchor download
       } catch { /* fall through to anchor download */ }
@@ -490,7 +494,7 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
     setTimeout(() => URL.revokeObjectURL(blobUrl), 5 * 60 * 1000);
     // Notify ChatArea for instant-completion toast
     window.dispatchEvent(new CustomEvent('seedance:download-instant', { detail: { filename, size: cached.size } }));
-    return;
+    return ''; // anchor download → browser chose the folder, we never learn the path
   }
 
   // Cold cache: download THROUGH the local proxy, not straight from the CDN. Chromium's
@@ -501,7 +505,7 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
   if (api?.download) {
     const proxied = `${location.origin}/api/download?url=${encodeURIComponent(remoteUrl)}&filename=${encodeURIComponent(filename)}`;
     await api.download({ url: proxied, filename });
-    return;
+    return ''; // path arrives later via 'download-done'
   }
   // Browser/dev fallback
   const params = new URLSearchParams({ url: remoteUrl, filename });
@@ -511,6 +515,7 @@ export async function downloadViaProxy(remoteUrl: string, filename: string) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+  return '';
 }
 
 export function buildDownloadFilename(taskId: string, ext: string = '.mp4', prefix: string = 'dreamina'): string {

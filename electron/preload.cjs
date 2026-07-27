@@ -5,6 +5,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clearCache: () => ipcRenderer.invoke('clear-cache'),
   getCacheSize: () => ipcRenderer.invoke('get-cache-size'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  // Opens the containing folder with the file selected. Returns { ok:false, reason:'missing' }
+  // when the file was moved/deleted so the UI can say so instead of doing nothing.
+  revealFile: (filePath) => ipcRenderer.invoke('reveal-file', filePath),
   // Electron 32+ removed File.path; webUtils.getPathForFile is the replacement.
   // Returns the absolute on-disk path of a File object so we can re-read the
   // original later if the server cache + tmpfiles URL are both gone.

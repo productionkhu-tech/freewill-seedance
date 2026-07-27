@@ -89,7 +89,10 @@ function createWindow() {
       try { mainWindow?.webContents.send('download-progress', { filename, received: item.getReceivedBytes(), total: item.getTotalBytes(), state }); } catch {}
     });
     item.on('done', (_e, state) => {
-      try { mainWindow?.webContents.send('download-done', { filename, state }); } catch {}
+      // savePath rides along so the renderer can offer "폴더에서 보기" later. The
+      // download folder is a session-only override, so resolving the path at click
+      // time would break for anything downloaded before the folder was changed.
+      try { mainWindow?.webContents.send('download-done', { filename, state, path: savePath }); } catch {}
     });
   });
 
@@ -293,6 +296,22 @@ ipcMain.handle('open-external', async (_event, url) => {
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
+  }
+});
+
+// ─── IPC: reveal a downloaded file in the OS file manager ───
+// shell.showItemInFolder opens the containing folder WITH the file selected, which is
+// the whole point — the user wants to see which clip this was. It fails silently when
+// the file is gone (moved/renamed/deleted/emptied trash), so check first and report
+// back instead, letting the UI say so rather than looking like a dead button.
+ipcMain.handle('reveal-file', async (_event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return { ok: false, reason: 'nopath' };
+  try {
+    if (!fs.existsSync(filePath)) return { ok: false, reason: 'missing' };
+    shell.showItemInFolder(filePath);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: 'error', error: err.message };
   }
 });
 

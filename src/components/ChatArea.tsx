@@ -557,7 +557,19 @@ export function ChatArea() {
       api.onDownloadProgress(({ filename, received, total, state }: any) => {
         setDownloads(d => ({ ...d, [filename]: { received, total, state } }));
       });
-      api.onDownloadDone(({ filename, state }: any) => {
+      api.onDownloadDone(({ filename, state, path }: any) => {
+        // Main sends the save path here — this is the only point the Electron download
+        // path can report it. Record it on the originating message so "폴더에서 보기"
+        // survives restarts.
+        if (state === 'completed' && path) {
+          const msgId = pendingRevealRef.current.get(filename);
+          if (msgId) {
+            pendingRevealRef.current.delete(filename);
+            const st = useAppStore.getState();
+            const owner = st.projects.find(p => p.messages.some(m => m.id === msgId));
+            if (owner) st.updateMessage(owner.id, msgId, { downloadedPath: path });
+          }
+        }
         setDownloads(d => {
           const next = { ...d };
           if (state === 'completed') {
@@ -793,6 +805,24 @@ export function ChatArea() {
     .filter(m => m.status === 'succeeded' && m.videoUrl)
     .sort((a, b) => b.timestamp - a.timestamp), [project.messages]);
 
+  // filename → messageId, for downloads whose save path only arrives with the
+  // 'download-done' event. A ref (not state) so filling it never re-renders.
+  const pendingRevealRef = useRef<Map<string, string>>(new Map());
+
+  // Open the containing folder with the file selected, so the user can see WHICH clip
+  // this was. The file may be long gone (moved into an edit project, renamed, deleted) —
+  // main checks existence and reports back so we can say so instead of doing nothing.
+  const revealDownloaded = async (filePath?: string) => {
+    if (!filePath) { warn('저장 경로를 알 수 없습니다. 다시 다운로드해주세요.'); return; }
+    const api = (window as any).electronAPI;
+    if (!api?.revealFile) { warn('이 환경에서는 폴더 열기를 지원하지 않습니다.'); return; }
+    const r = await api.revealFile(filePath);
+    if (r?.ok) return;
+    warn(r?.reason === 'missing'
+      ? `파일을 찾을 수 없습니다 — 이동·이름변경·삭제된 것 같습니다.\n${filePath}`
+      : '폴더를 열지 못했습니다.');
+  };
+
   // Download + mark the message so the button flips to "다시 다운로드".
   // Marked only after downloadViaProxy resolves (= download handed off OK).
   const handleVideoDownload = async (msgId: string, videoUrl: string, taskId: string) => {
@@ -803,8 +833,16 @@ export function ChatArea() {
       const filename = isOmniMsg
         ? buildDownloadFilename((videoUrl.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId), '.mp4', 'omni')
         : buildDownloadFilename(taskId);
-      await downloadViaProxy(videoUrl, filename);
-      useAppStore.getState().updateMessage(project.id, msgId, { downloadedAt: Date.now() });
+      // Remember which message this filename belongs to. The Electron download path only
+      // learns the save path once 'download-done' fires, long after this call returns.
+      pendingRevealRef.current.set(filename, msgId);
+      const savedPath = await downloadViaProxy(videoUrl, filename);
+      useAppStore.getState().updateMessage(project.id, msgId, {
+        downloadedAt: Date.now(),
+        // Blob fast path knows the path immediately; otherwise the done-listener fills it.
+        ...(savedPath ? { downloadedPath: savedPath } : {}),
+      });
+      if (savedPath) pendingRevealRef.current.delete(filename);
       // Force the mark to disk now — the 1.5s debounced write would be lost
       // if the app quits (or auto-update restarts) right after the download.
       await flushPersist();
@@ -812,6 +850,7 @@ export function ChatArea() {
   };
   // previewItem is a useState snapshot — read downloadedAt live from the store
   const previewDownloaded = previewItem ? project.messages.find(m => m.id === previewItem.id)?.downloadedAt : undefined;
+  const previewDownloadedPath = previewItem ? project.messages.find(m => m.id === previewItem.id)?.downloadedPath : undefined;
 
   /* ─── Drag & Drop ─── */
   const handleDragEnter = (e: React.DragEvent) => { e.preventDefault(); dragCounter.current += 1; if (e.dataTransfer.items?.length) setIsDragging(true); };
@@ -2273,6 +2312,12 @@ export function ChatArea() {
                   className={`flex items-center gap-1.5 px-4 py-2 text-white text-[13px] font-medium rounded-lg transition-colors ${previewDownloaded ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-indigo-500 hover:bg-indigo-600'}`}>
                   {previewDownloaded ? <RefreshCw size={14} /> : <Download size={14} />} {previewDownloaded ? '다시 다운로드' : '다운로드'}
                 </button>
+                {previewDownloadedPath && (
+                  <button onClick={() => revealDownloaded(previewDownloadedPath)} title={previewDownloadedPath}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-gray-100 text-gray-700 text-[13px] font-medium rounded-lg hover:bg-gray-200 transition-colors">
+                    <FolderOpen size={14} /> 폴더에서 보기
+                  </button>
+                )}
                 <button onClick={() => scrollToMessage(previewItem.id)}
                   className="flex items-center gap-1.5 px-4 py-2 bg-gray-100 text-gray-700 text-[13px] font-medium rounded-lg hover:bg-gray-200 transition-colors">
                   <Search size={14} /> 프롬프트 찾기
@@ -2308,6 +2353,12 @@ export function ChatArea() {
                           : 'text-gray-500 hover:text-indigo-600 hover:bg-indigo-50'}`}>
                         {item.downloadedAt ? <RefreshCw size={12} /> : <Download size={12} />} {item.downloadedAt ? '다시 다운로드' : '다운로드'}
                       </button>
+                      {item.downloadedPath && (
+                        <button onClick={() => revealDownloaded(item.downloadedPath)} title={item.downloadedPath}
+                          className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
+                          <FolderOpen size={12} /> 폴더
+                        </button>
+                      )}
                       <button onClick={() => setPreviewItem(item)}
                         className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
                         <Eye size={12} /> 상세
@@ -2469,6 +2520,12 @@ export function ChatArea() {
                                     ? 'text-emerald-600 hover:text-emerald-700 bg-emerald-50/70 hover:bg-emerald-50 border-emerald-200'
                                     : 'text-gray-500 hover:text-indigo-600 bg-gray-50 hover:bg-indigo-50 border-gray-200 hover:border-indigo-200'}`}>
                                   {msg.downloadedAt ? <RefreshCw size={14} /> : <Download size={14} />} {msg.downloadedAt ? '다시 다운로드' : '영상 다운로드'}
+                                </button>
+                              )}
+                              {msg.downloadedPath && (
+                                <button onClick={() => revealDownloaded(msg.downloadedPath)} title={msg.downloadedPath}
+                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
+                                  <FolderOpen size={14} /> 폴더에서 보기
                                 </button>
                               )}
                               {msg.imageUrl && (
