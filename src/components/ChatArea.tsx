@@ -1743,6 +1743,19 @@ export function ChatArea() {
         return;
       }
     }
+    // Same story for video/audio COUNT. Attach-time already caps these, but a model switch
+    // can strand assets that were legal under the previous model (2.5 allows 10 videos,
+    // 2.0 only 3) — without this the request goes out and BytePlus 400s with an English
+    // message the user can't act on. Reference mode only: edit/extend have their own
+    // structural counts (1 source / 1–3 clips) that don't vary by model.
+    if (mode === 'multimodal_reference') {
+      const vCount = project.assets.filter(a => a.type === 'video_url').length;
+      const aCount = project.assets.filter(a => a.type === 'audio_url').length;
+      const vCap = modelVideoMax(project.settings.model);
+      const aCap = modelAudioMax(project.settings.model);
+      if (vCount > vCap) { warn(`비디오 ${vCount}개 — 최대 ${vCap}개까지만 보낼 수 있습니다.\n비디오를 줄이거나 모델을 바꿔주세요.`); return; }
+      if (aCount > aCap) { warn(`오디오 ${aCount}개 — 최대 ${aCap}개까지만 보낼 수 있습니다.\n오디오를 줄이거나 모델을 바꿔주세요.`); return; }
+    }
 
     const currentSettings = { ...project.settings };
     // Clamp resolution up-front so the payload, the stored usedSettings, the card tag,

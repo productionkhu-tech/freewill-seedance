@@ -833,12 +833,12 @@ export function SettingsPanel() {
                     })()}
                     <div className="flex items-baseline gap-2">
                       <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
-                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'video_url').length}/{vidMax}</span>
+                      <span className={`w-8 shrink-0 tabular-nums ${assets.filter(a => a.type === 'video_url').length > vidMax ? 'text-red-500' : 'text-gray-700'}`}>{assets.filter(a => a.type === 'video_url').length}/{vidMax}</span>
                       <span className="text-gray-400 whitespace-nowrap">개당 200MB · 2~{Math.floor(refVidSec)}초</span>
                     </div>
                     <div className="flex items-baseline gap-2">
                       <span className="w-10 shrink-0 font-semibold text-gray-600">오디오</span>
-                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'audio_url').length}/{audMax}</span>
+                      <span className={`w-8 shrink-0 tabular-nums ${assets.filter(a => a.type === 'audio_url').length > audMax ? 'text-red-500' : 'text-gray-700'}`}>{assets.filter(a => a.type === 'audio_url').length}/{audMax}</span>
                       <span className="text-gray-400 whitespace-nowrap">개당 15MB · 2~15초</span>
                     </div>
                   </div>
