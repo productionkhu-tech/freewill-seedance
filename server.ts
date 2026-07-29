@@ -371,7 +371,12 @@ async function startServer() {
   });
 
   // Cache file locally (for image/audio reuse) → returns { cacheId }
-  app.post('/api/cache', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
+  // 100mb was below what the app itself accepts: BytePlus allows video up to 200MB and
+  // validateVideoFile() lets it through, so a 100–200MB clip passed client validation and
+  // then died here with a 413 whose body is HTML — cacheFile() did res.json() on that and
+  // threw a parse error instead of anything actionable. Reported from the field and
+  // reproduced with a 114.9MB clip. 220mb leaves headroom over the 200MB asset cap.
+  app.post('/api/cache', express.raw({ type: '*/*', limit: '220mb' }), (req, res) => {
     const filename = decodeURIComponent((req.headers['x-filename'] as string) || 'file');
     const ext = path.extname(filename) || '';
     const hash = crypto.createHash('md5').update(req.body).digest('hex').slice(0, 12);

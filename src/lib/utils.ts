@@ -308,6 +308,15 @@ export async function cacheFile(file: File): Promise<string> {
     headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name) },
     body: buffer,
   });
+  // Express answers a body-size overrun with an HTML 413, so res.json() used to throw a
+  // JSON parse error and the user saw nothing they could act on. Check status first and
+  // say what actually happened.
+  if (!res.ok) {
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+    if (res.status === 413) throw new Error(`파일이 너무 큽니다: ${sizeMB}MB — 서버가 받을 수 있는 크기를 넘었습니다.`);
+    const detail = await res.text().catch(() => '');
+    throw new Error(`파일 캐시 실패 (${res.status}) ${detail.slice(0, 120)}`);
+  }
   const data = await res.json();
   return data.cacheId;
 }
