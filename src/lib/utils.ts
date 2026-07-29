@@ -123,7 +123,18 @@ export const API_LIMITS = {
   // nominal range, not a hard reject. px bounds 300~6000 ARE hard limits.
   image: { maxSizeMB: 30, minPx: 300, maxPx: 6000 },
   video: {
-    maxSizeMB: 200, minDuration: 2, maxDuration: 15, maxTotalDuration: 15,
+    // ★ Real API limit is 15.2s, not 15 — both per-clip and summed across all reference
+    // videos. Measured 2026-07-29 and stated verbatim by the API itself:
+    //   "video duration (seconds) ... must be less than or equal to 15.2"
+    //   "video total duration (seconds) ... must be less than or equal to 15.2"
+    // 15.167s (364f) is accepted, 15.208s (365f) is rejected. We were blocking at 15.0
+    // and losing that margin — a 15.04s clip (very common: 361 frames at 24fps) got
+    // rejected even though BytePlus takes it. Rejections happen at task-create time
+    // (HTTP 400, no task made), so there is nothing to lose by allowing the full range.
+    maxSizeMB: 200, minDuration: 2, maxDuration: 15.2, maxTotalDuration: 15.2,
+    // What we SHOW the user stays "15". Writing "최대 15.2초" in the UI just invites
+    // "why 15.2?" — the extra 0.2s is deliberately a silent tolerance, not a feature.
+    displayMaxDuration: 15,
     minPx: 300, maxPx: 6000, minRatio: 0.4, maxRatio: 2.5,
     // Total px must fall in [640×640=409600, 3326×2494=8295044] per the Seedance
     // 2.0 API (covers up to 4k input). Previously mis-capped at ~1080p (2086876),
@@ -195,7 +206,8 @@ export function validateVideoFile(file: File): Promise<string | null> {
       URL.revokeObjectURL(video.src);
       const d = video.duration;
       if (d < API_LIMITS.video.minDuration) { resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`); return; }
-      if (d > API_LIMITS.video.maxDuration) { resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.maxDuration}초)`); return; }
+      // Enforce the real limit (15.2) but quote the round number (15) — see displayMaxDuration.
+      if (d > API_LIMITS.video.maxDuration) { resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.displayMaxDuration}초)`); return; }
       // Check dimensions per API rules: each side 300–6000px, w/h ratio in
       // [0.4, 2.5], total pixels in [640×640, 3326×2494] (up to 4k input allowed)
       const h = video.videoHeight;
@@ -269,13 +281,16 @@ export function totalDurationError(
   type: 'video_url' | 'audio_url',
   addingSec: number | null,
 ): string | null {
-  const limit = type === 'video_url' ? API_LIMITS.video.maxTotalDuration : API_LIMITS.audio.maxTotalDuration;
+  const isVideo = type === 'video_url';
+  const limit = isVideo ? API_LIMITS.video.maxTotalDuration : API_LIMITS.audio.maxTotalDuration;
+  // Enforce the real cap, quote the round one (video: 15.2 enforced / 15 shown).
+  const shown = isVideo ? API_LIMITS.video.displayMaxDuration : API_LIMITS.audio.maxTotalDuration;
   const total = existing
     .filter(a => a.type === type && typeof a.durationSec === 'number')
     .reduce((sum, a) => sum + (a.durationSec as number), 0) + (addingSec ?? 0);
   if (total > limit + 0.001) {
-    const label = type === 'video_url' ? '비디오' : '오디오';
-    return `${label} 합산 길이 초과: ${total.toFixed(1)}초 (모든 ${label} 합산 최대 ${limit}초)`;
+    const label = isVideo ? '비디오' : '오디오';
+    return `${label} 합산 길이 초과: ${total.toFixed(1)}초 (모든 ${label} 합산 최대 ${shown}초)`;
   }
   return null;
 }
