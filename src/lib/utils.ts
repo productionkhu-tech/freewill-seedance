@@ -185,7 +185,9 @@ export function validateImageDimensions(source: File | string): Promise<string |
 }
 
 // Validate video file (size + duration + resolution + fps)
-export function validateVideoFile(file: File): Promise<string | null> {
+// maxSec: per-model reference-video cap. Omitted (every pre-existing caller) → the
+// original API_LIMITS value, so behaviour for 2.0/Fast/Mini/Omni is unchanged.
+export function validateVideoFile(file: File, maxSec?: number): Promise<string | null> {
   return new Promise((resolve) => {
     const sizeMB = file.size / (1024 * 1024);
     if (sizeMB > API_LIMITS.video.maxSizeMB) { resolve(`비디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${API_LIMITS.video.maxSizeMB}MB)`); return; }
@@ -207,7 +209,9 @@ export function validateVideoFile(file: File): Promise<string | null> {
       const d = video.duration;
       if (d < API_LIMITS.video.minDuration) { resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`); return; }
       // Enforce the real limit (15.2) but quote the round number (15) — see displayMaxDuration.
-      if (d > API_LIMITS.video.maxDuration) { resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.video.displayMaxDuration}초)`); return; }
+      const vMax = maxSec ?? API_LIMITS.video.maxDuration;
+      // Quote the round number, enforce the real one (15.2 → "15", 30.2 → "30").
+      if (d > vMax) { resolve(`비디오 너무 김: ${d.toFixed(1)}초 (최대 ${Math.floor(vMax)}초)`); return; }
       // Check dimensions per API rules: each side 300–6000px, w/h ratio in
       // [0.4, 2.5], total pixels in [640×640, 3326×2494] (up to 4k input allowed)
       const h = video.videoHeight;
@@ -280,11 +284,12 @@ export function totalDurationError(
   existing: { type: string; durationSec?: number }[],
   type: 'video_url' | 'audio_url',
   addingSec: number | null,
+  maxSec?: number,   // per-model video cap; omitted → original API_LIMITS behaviour
 ): string | null {
   const isVideo = type === 'video_url';
-  const limit = isVideo ? API_LIMITS.video.maxTotalDuration : API_LIMITS.audio.maxTotalDuration;
+  const limit = isVideo ? (maxSec ?? API_LIMITS.video.maxTotalDuration) : API_LIMITS.audio.maxTotalDuration;
   // Enforce the real cap, quote the round one (video: 15.2 enforced / 15 shown).
-  const shown = isVideo ? API_LIMITS.video.displayMaxDuration : API_LIMITS.audio.maxTotalDuration;
+  const shown = isVideo ? Math.floor(limit) : API_LIMITS.audio.maxTotalDuration;
   const total = existing
     .filter(a => a.type === type && typeof a.durationSec === 'number')
     .reduce((sum, a) => sum + (a.durationSec as number), 0) + (addingSec ?? 0);

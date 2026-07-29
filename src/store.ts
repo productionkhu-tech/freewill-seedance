@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del } from 'idb-keyval';
-import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename } from './lib/utils';
+import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS } from './lib/utils';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -371,12 +371,66 @@ export const defaultSettings: GenerationSettings = {
 // modelResolutions below for the measured matrix). Single source of truth shared by
 // the settings UI, the hydration clamp, and the send-time guard so a model never
 // receives an unsupported resolution. Default is the flagship (dreamina-seedance-2-0-260128).
-export const MODELS: { id: string; name: string; provider?: 'byteplus' | 'gemini' }[] = [
+// ── Per-model capability overrides ──────────────────────────────────────────
+// EVERY field below is optional and every reader falls back to the pre-existing
+// behaviour when it is absent. The 2.0 family and Omni carry none of them, so their
+// code paths are byte-for-byte what they were — adding a model cannot change them.
+// Only add a field when a model genuinely differs; don't fill these in "for clarity".
+//   res         allowed resolutions            (default: the modelResolutions() rules)
+//   dur         [min, max] output seconds      (default: Omni 3–10 / Seedance 4–15)
+//   imgMax      reference-image cap            (default: 9)
+//   vidMax      reference-video cap            (default: 3)
+//   audMax      reference-audio cap            (default: 3)
+//   refVideoSec max single reference-video sec (default: 15.2)
+//   demo        routed to a separate key/endpoint server-side, never billed to the sheet
+export const MODELS: {
+  id: string; name: string; provider?: 'byteplus' | 'gemini';
+  res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
+  refVideoSec?: number; demo?: boolean;
+}[] = [
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini' },
   { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini' },
+  // Seedance 2.5 (BytePlus demo endpoint — separate key, see server.ts). Every number
+  // here was measured against the live API 2026-07-29, not taken from the datasheet:
+  // 480p/720p only (1080p/2k/4k all rejected in both t2v and r2v), 4–30s output,
+  // reference video ≤30.2s, and 30 images / 10 videos / 10 audio (= the "50 assets").
+  // `[Image N]` markers, roles and ratios all behave exactly like 2.0 — verified by
+  // generating a clip whose three markers bound to the correct reference images.
+  // ★ The real endpoint id is NOT here on purpose: the demo terms forbid sharing it and
+  // this file ships to every team AND to a public repo. The server swaps this logical id
+  // for SEEDANCE_25_DEMO_ENDPOINT at request time.
+  { id: 'seedance-2-5-demo', name: 'Seedance 2.5 Demo',
+    res: ['480p', '720p'], dur: [4, 30],
+    imgMax: 30, vidMax: 10, audMax: 10,   // measured: 30/10/10 = the advertised "50 assets"
+    refVideoSec: 30.2, demo: true },
 ];
+
+// Capability lookups. Each returns the model's override when present, otherwise the
+// exact rule that was in force before per-model overrides existed.
+export function modelDurationRange(model: string): [number, number] {
+  const o = MODELS.find(m => m.id === model)?.dur;
+  if (o) return o;
+  return modelProvider(model) === 'gemini' ? [3, 10] : [4, 15];
+}
+export function modelImageMax(model: string): number {
+  return MODELS.find(m => m.id === model)?.imgMax ?? 9;
+}
+export function modelVideoMax(model: string): number {
+  return MODELS.find(m => m.id === model)?.vidMax ?? 3;
+}
+export function modelAudioMax(model: string): number {
+  return MODELS.find(m => m.id === model)?.audMax ?? 3;
+}
+export function modelRefVideoSec(model: string): number {
+  return MODELS.find(m => m.id === model)?.refVideoSec ?? API_LIMITS.video.maxDuration;
+}
+// Demo models are billed against a separate BytePlus key and are deliberately NOT
+// reported to the credit tracker; the server decides both, this just tells the UI.
+export function isDemoModel(model: string): boolean {
+  return MODELS.find(m => m.id === model)?.demo === true;
+}
 
 // Which backend a model routes to. Gemini Omni → Interactions API (server
 // /api/gemini/*, key NANOBANANA_STUDIO_KEY); everything else → BytePlus. This is
@@ -402,6 +456,8 @@ export function modelProvider(model: string): 'byteplus' | 'gemini' {
 // every single restart. Structural validity is the right question for stored data; the
 // live permission gate belongs at render + send time.
 export function modelResolutions(model: string): string[] {
+  const o = MODELS.find(m => m.id === model)?.res;
+  if (o) return o;                                        // explicit override wins
   if (modelProvider(model) === 'gemini') return ['720p']; // Omni is 720p only
   if (model.includes('fast') || model.includes('mini')) return ['480p', '720p'];
   return ['480p', '720p', '1080p', '4k'];
@@ -684,7 +740,11 @@ export const useAppStore = create<AppState>()(
 
         try {
           console.log(`[Poll] Checking ${taskId}...`);
-          const res = await fetch(`/api/byteplus/tasks/${taskId}`, { signal: ac.signal });
+          // Tell the server which BytePlus key this task belongs to. Derived from the
+          // message's own usedSettings, so it stays correct across app restarts.
+          // Empty string for every non-demo model → URL identical to before.
+          const demoQ = isDemoModel(message.usedSettings?.model || '') ? '?demo=1' : '';
+          const res = await fetch(`/api/byteplus/tasks/${taskId}${demoQ}`, { signal: ac.signal });
           if (!res.ok) {
             // Transient HTTP error (5xx, 502, etc.) — leave status unchanged so the next
             // interval retries. Only AbortError + JSON parse fall through to the catch.
@@ -803,7 +863,9 @@ export const useAppStore = create<AppState>()(
       // for and the tracker records it.
       cancelTask: async (projectId, messageId, taskId) => {
         try {
-          const res = await fetch(`/api/byteplus/tasks/${taskId}`, { method: 'DELETE' });
+          const msg = get().projects.find(p => p.id === projectId)?.messages.find(m => m.id === messageId);
+          const demoQ = isDemoModel(msg?.usedSettings?.model || '') ? '?demo=1' : '';
+          const res = await fetch(`/api/byteplus/tasks/${taskId}${demoQ}`, { method: 'DELETE' });
           if (!res.ok) {
             let code = '';
             try { code = (await res.json())?.error?.code || ''; } catch { /* body may be empty */ }
@@ -858,13 +920,13 @@ export const useAppStore = create<AppState>()(
             const s = { ...defaultSettings, ...p.settings };
             // Clamp duration to the provider's range: Omni 3–10, Seedance 4–15.
             // -1 = Auto (Seedance only; model picks the length — valid, don't clamp).
+            // Range is per-model now; for 2.0/Omni modelDurationRange returns exactly the
+            // numbers that were hardcoded here, so their stored settings are untouched.
+            // ★ Like the resolution clamp, this must stay STRUCTURAL — a saved 30s on 2.5
+            // has to survive a restart even before any capability/permission is known.
             if (s.duration !== -1) {
-              if (modelProvider(s.model) === 'gemini') {
-                s.duration = Math.max(3, Math.min(10, s.duration));
-              } else {
-                if (s.duration < 4) s.duration = 4;
-                if (s.duration > 15) s.duration = 15;
-              }
+              const [lo, hi] = modelDurationRange(s.model);
+              s.duration = Math.max(lo, Math.min(hi, s.duration));
             }
             // Unknown/legacy model → flagship default
             if (!validModelIds.includes(s.model)) s.model = defaultSettings.model;

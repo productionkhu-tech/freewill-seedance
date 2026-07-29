@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, MODELS, modelProvider } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, MODELS, modelProvider } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -945,7 +945,7 @@ export function ChatArea() {
         if (file.type.startsWith('image/')) {
           if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
           const imgCount = assets.filter(a => a.type === 'image_url').length;
-          const maxImg = mode === 'multimodal_reference' ? 9 : mode === 'edit_video' ? 9 : mode === 'image_to_video_first' ? 1 : mode === 'image_to_video_first_last' ? 2 : 0;
+          const maxImg = mode === 'multimodal_reference' ? modelImageMax(project.settings.model) : mode === 'edit_video' ? modelImageMax(project.settings.model) : mode === 'image_to_video_first' ? 1 : mode === 'image_to_video_first_last' ? 2 : 0;
           if (imgCount >= maxImg) { rejected.push(`${file.name}: 이미지 한도 ${maxImg}개 초과`); continue; }
           let role: any = 'reference_image';
           if (mode === 'image_to_video_first') role = 'first_frame';
@@ -973,7 +973,7 @@ export function ChatArea() {
           }
           const existingVideos = assets.filter(a => a.type === 'video_url');
           const vidCount = existingVideos.length;
-          const maxVid = mode === 'extend_video' ? 3 : mode === 'edit_video' ? 1 : mode === 'multimodal_reference' ? 3 : 0;
+          const maxVid = mode === 'extend_video' ? 3 : mode === 'edit_video' ? 1 : mode === 'multimodal_reference' ? modelVideoMax(project.settings.model) : 0;
           // edit_video has a 1-video cap. When the user drops a new video while one
           // is already attached, treat it as a replace (preserve asset id so any
           // "@[Video 1]" mention keeps pointing to the same slot) rather than
@@ -982,13 +982,13 @@ export function ChatArea() {
           if (!shouldReplace && vidCount >= maxVid) {
             rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue;
           }
-          const vidErr = await validateVideoFile(file);
+          const vidErr = await validateVideoFile(file, modelRefVideoSec(project.settings.model));
           if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
           const vidDuration = await getMediaDurationSec(file, 'video');
           // Combined cap: all reference videos in one request ≤ 15s total.
           // When replacing, the outgoing video's duration doesn't count.
           const vidOthers = shouldReplace ? assets.filter(a => a.id !== existingVideos[0].id) : assets;
-          const vidTotErr = totalDurationError(vidOthers, 'video_url', vidDuration);
+          const vidTotErr = totalDurationError(vidOthers, 'video_url', vidDuration, modelRefVideoSec(project.settings.model));
           if (vidTotErr) { rejected.push(`${file.name}: ${vidTotErr}`); continue; }
           try {
             const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
@@ -1012,7 +1012,7 @@ export function ChatArea() {
             rejected.push(`${file.name}: 이 모드에서는 오디오를 사용할 수 없습니다.`); continue;
           }
           const audCount = assets.filter(a => a.type === 'audio_url').length;
-          const maxAud = 3;
+          const maxAud = modelAudioMax(project.settings.model);
           if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
           const audErr = await validateAudioFile(file);
           if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
@@ -1158,7 +1158,7 @@ export function ChatArea() {
     const canConvert = (c: { kind: string; imgs: number; item: any }) => {
       if (c.kind !== 'element') return true;          // panel mention adds no images (already attached)
       if (usedEl.has(c.item.id)) return true;          // already counted (dedup)
-      if (usedImgs + c.imgs > 9) return false;         // would exceed shared cap → leave as text
+      if (usedImgs + c.imgs > modelImageMax(project.settings.model)) return false;  // exceeds shared cap → leave as text
       usedEl.add(c.item.id); usedImgs += c.imgs;
       return true;
     };
@@ -1245,7 +1245,7 @@ export function ChatArea() {
       const panelImgs = project.assets.filter(a => a.type === 'image_url').length;
       const { count, ids } = mentionedElementStats();
       const adding = ids.has(item.id) ? 0 : (elementById.get(item.id)?.images.length || 0);
-      if (panelImgs + count + adding > 9) {
+      if (panelImgs + count + adding > modelImageMax(project.settings.model)) {
         warn(`이미지 합산 9장을 넘습니다.\n패널 ${panelImgs}장 + 어셋 ${count}장${adding ? ` + ‘${item.name}’ ${adding}장` : ''} = ${panelImgs + count + adding}장.\n(어셋 이미지는 래퍼런스 패널과 9장을 나눠 씁니다)\n패널 이미지나 다른 어셋 멘션을 줄여주세요.`);
         setMentionState(s => ({ ...s, active: false }));
         return;
@@ -1466,10 +1466,11 @@ export function ChatArea() {
             pasteCycleRef.current = { firstId: first.id, lastId: last.id, next: targetRole === 'first_frame' ? 'last_frame' : 'first_frame' };
           }
         } else {
-          // multimodal_reference / edit_video — 레퍼런스 이미지 최대 9장, 초과 시 기존 유지
+          // multimodal_reference / edit_video — 레퍼런스 이미지는 모델별 상한, 초과 시 기존 유지
           const imgCount = assets.filter(a => a.type === 'image_url').length;
-          if (imgCount >= 9) {
-            warn('이미지는 최대 9장까지만 첨부할 수 있습니다.\n기존 이미지는 그대로 유지됩니다.');
+          const pasteCap = modelImageMax(project.settings.model);
+          if (imgCount >= pasteCap) {
+            warn(`이미지는 최대 ${pasteCap}장까지만 첨부할 수 있습니다.\n기존 이미지는 그대로 유지됩니다.`);
             break;
           }
           const thumbnailUrl = await createThumbnail(file);
@@ -1705,7 +1706,7 @@ export function ChatArea() {
     // Re-check combined reference durations at send time — assets can arrive
     // via reuse/restore without passing through the attach-time check.
     for (const refType of ['video_url', 'audio_url'] as const) {
-      const totErr = totalDurationError(project.assets, refType, null);
+      const totErr = totalDurationError(project.assets, refType, null, modelRefVideoSec(project.settings.model));
       if (totErr) { warn(totErr); return; }
     }
 
@@ -1728,10 +1729,17 @@ export function ChatArea() {
         warn('어셋 멘션은 Multimodal Reference 또는 Edit Video 모드에서만 레퍼런스로 전송됩니다.\n해당 모드로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.');
         return;
       }
+    }
+    // Image cap — deliberately OUTSIDE the mention branch above. It used to run only when
+    // element mentions existed, so a panel full of images sailed straight through to an
+    // API 400. That became reachable once caps differ per model: switch 2.5 (30 images)
+    // → 2.0 (9) and the leftovers are over the limit with no mention involved.
+    {
       const panelImageCount = project.assets.filter(a => a.type === 'image_url').length;
       const elementImageCount = mentionedElements.reduce((n, e) => n + e.images.length, 0);
-      if (panelImageCount + elementImageCount > 9) {
-        warn(`이미지 합산 ${panelImageCount + elementImageCount}장 — 최대 9장까지만 보낼 수 있습니다.\n(래퍼런스 패널 ${panelImageCount}장 + 어셋 멘션 ${elementImageCount}장)\n어셋 멘션이나 패널 이미지를 줄여주세요.`);
+      const cap = modelImageMax(project.settings.model);
+      if (panelImageCount + elementImageCount > cap) {
+        warn(`이미지 합산 ${panelImageCount + elementImageCount}장 — 최대 ${cap}장까지만 보낼 수 있습니다.\n(래퍼런스 패널 ${panelImageCount}장 + 어셋 멘션 ${elementImageCount}장)\n이미지를 줄이거나 모델을 바꿔주세요.`);
         return;
       }
     }
@@ -2618,11 +2626,12 @@ export function ChatArea() {
                   const panelImgs = project.assets.filter(a => a.type === 'image_url').length;
                   const elemImgs = elementMentionEnabled ? mentionedElementStats().count : 0;
                   const used = panelImgs + elemImgs;
+                  const imgCap = modelImageMax(project.settings.model);
                   return (
                     <div className="px-3 py-2 bg-gray-50 border-b border-gray-100">
                       <div className="flex items-center justify-between gap-2 text-xs">
                         <span className="font-semibold text-gray-500">에셋 선택</span>
-                        {elementMentionEnabled && <span className={`font-semibold tabular-nums ${used > 9 ? 'text-red-500' : used === 9 ? 'text-amber-600' : 'text-gray-400'}`} title="래퍼런스 패널 이미지 + 멘션한 어셋 이미지 합산 (최대 9장)">이미지 {used}/9</span>}
+                        {elementMentionEnabled && <span className={`font-semibold tabular-nums ${used > imgCap ? 'text-red-500' : used === imgCap ? 'text-amber-600' : 'text-gray-400'}`} title={`래퍼런스 패널 이미지 + 멘션한 어셋 이미지 합산 (최대 ${imgCap}장)`}>이미지 {used}/{imgCap}</span>}
                       </div>
                       {boundCollectionName && <div className="flex items-center gap-1 text-[10px] font-medium text-emerald-600 mt-1 truncate" title="현재 채팅에 사용 중인 어셋 컬렉션"><FolderOpen size={10} className="shrink-0" /> {boundCollectionName}{elementMentionEnabled ? ` · 패널 ${panelImgs} + 어셋 ${elemImgs}` : ''}</div>}
                     </div>

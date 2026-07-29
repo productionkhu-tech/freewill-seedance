@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -191,6 +191,13 @@ export function SettingsPanel() {
   // panel only) and is committed to the store ONCE on release. Writing the store per
   // drag-tick re-serialized the whole persisted blob + re-rendered the entire app
   // dozens of times a second — the duration/output gauges visibly stuttered.
+  // Whether this install has the 2.5 Demo credentials. Local state on purpose: it's a
+  // read-only server fact, so putting it in the store would add a write + a re-render
+  // of every message card for no gain.
+  const [demo25, setDemo25] = useState(false);
+  useEffect(() => {
+    fetch('/api/capabilities').then(r => r.json()).then(j => setDemo25(j?.demo25 === true)).catch(() => {});
+  }, []);
   const [draftDuration, setDraftDuration] = useState<number | null>(null);
   const [draftOutput, setDraftOutput] = useState<number | null>(null);
   // A project switch mid-drag must not carry a stale draft over.
@@ -219,6 +226,11 @@ export function SettingsPanel() {
   // be mid-prompt. Show the state instead; handleSend does the actual clamp to 1080p when
   // the queue is fired (and only then writes back).
   const fourKBlocked = settings.resolution === '4k' && !allow4k;
+  const [durMin, durMax] = modelDurationRange(settings.model);   // 2.0: 4–15 (unchanged)
+  const imgMax = modelImageMax(settings.model);                  // 2.0: 9 (unchanged)
+  const vidMax = modelVideoMax(settings.model);                  // 2.0: 3 (unchanged)
+  const audMax = modelAudioMax(settings.model);                  // 2.0: 3 (unchanged)
+  const refVidSec = modelRefVideoSec(settings.model);            // 2.0: 15.2 (unchanged)
   // Two very different situations, and calling both "권한 해제" would be wrong. On a fresh
   // launch billingProject is always empty (session-only), so a saved 4k setting lands here
   // every single restart — telling the user their access was revoked would be alarming and
@@ -297,13 +309,13 @@ export function SettingsPanel() {
     let currentCount = assets.filter(a => a.type === assetIdType).length;
     let maxAllowed = Infinity;
     if (settings.mode === 'multimodal_reference') {
-      if (assetIdType === 'image_url') maxAllowed = 9;
-      if (assetIdType === 'video_url') maxAllowed = 3;
-      if (assetIdType === 'audio_url') maxAllowed = 3;
+      if (assetIdType === 'image_url') maxAllowed = imgMax;
+      if (assetIdType === 'video_url') maxAllowed = vidMax;
+      if (assetIdType === 'audio_url') maxAllowed = audMax;
     } else if (settings.mode === 'edit_video') {
-      if (assetIdType === 'image_url') maxAllowed = 9;
+      if (assetIdType === 'image_url') maxAllowed = imgMax;
       if (assetIdType === 'video_url') maxAllowed = 1;
-      if (assetIdType === 'audio_url') maxAllowed = 3;
+      if (assetIdType === 'audio_url') maxAllowed = audMax;
     } else if (settings.mode === 'extend_video' && assetIdType === 'video_url') maxAllowed = 3;
 
     if (currentCount >= maxAllowed) return;
@@ -330,13 +342,13 @@ export function SettingsPanel() {
       else if (type === 'video_url') maxAllowed = (settings.omniTask === 'edit' || settings.omniTask === 'reference_to_video') ? 1 : 0; // Edit source / 1 reference video
       else maxAllowed = 0;
     } else if (settings.mode === 'multimodal_reference') {
-      if (type === 'image_url') maxAllowed = 9;
-      if (type === 'video_url') maxAllowed = 3;
-      if (type === 'audio_url') maxAllowed = 3;
+      if (type === 'image_url') maxAllowed = imgMax;
+      if (type === 'video_url') maxAllowed = vidMax;
+      if (type === 'audio_url') maxAllowed = audMax;
     } else if (settings.mode === 'edit_video') {
-      if (type === 'image_url') maxAllowed = 9;
+      if (type === 'image_url') maxAllowed = imgMax;
       if (type === 'video_url') maxAllowed = 1;
-      if (type === 'audio_url') maxAllowed = 3;
+      if (type === 'audio_url') maxAllowed = audMax;
     } else if (settings.mode === 'extend_video') {
       if (type === 'video_url') maxAllowed = 3;
     } else if (settings.mode === 'image_to_video_first' && type === 'image_url') {
@@ -377,7 +389,7 @@ export function SettingsPanel() {
               const okFmt = /\.(mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv)$/i.test(file.name) || /^video\//i.test(file.type);
               vErr = sizeMB > 50 ? `비디오 크기 초과: ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)` : !okFmt ? '지원하지 않는 형식 (mp4·mov·webm·mpeg·wmv·3gpp·flv)' : null;
             } else {
-              vErr = type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+              vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file);
             }
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
             // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s
@@ -386,7 +398,7 @@ export function SettingsPanel() {
             const durationSec = await getMediaDurationSec(file, type === 'video_url' ? 'video' : 'audio');
             if (!isOmni) {
               const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
-              const totErr = totalDurationError(freshAssets, type, durationSec);
+              const totErr = totalDurationError(freshAssets, type, durationSec, refVidSec);
               if (totErr) { rejected.push(`${file.name}: ${totErr}`); continue; }
             }
             const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
@@ -430,12 +442,12 @@ export function SettingsPanel() {
         updates.url = '';
         updates.cacheId = await cacheFile(file);
       } else {
-        const vErr = existing.type === 'video_url' ? await validateVideoFile(file) : await validateAudioFile(file);
+        const vErr = existing.type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file);
         if (vErr) { alert(vErr); return; }
         // Combined 15s cap — the asset being swapped out doesn't count
         const durationSec = await getMediaDurationSec(file, existing.type === 'video_url' ? 'video' : 'audio');
         const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
-        const totErr = totalDurationError(freshAssets.filter(a => a.id !== existing.id), existing.type, durationSec);
+        const totErr = totalDurationError(freshAssets.filter(a => a.id !== existing.id), existing.type, durationSec, refVidSec);
         if (totErr) { alert(totErr); return; }
         updates.durationSec = durationSec ?? undefined;
         if (existing.type === 'video_url') {
@@ -548,6 +560,16 @@ export function SettingsPanel() {
                 // on 720p via 1080p rather than snapping straight to a hardcoded value.
                 const res = clampResolution(val, settings.resolution, allow4k);
                 const patch: any = { model: val, resolution: res };
+                // Duration ranges differ per model (2.0: 4–15, 2.5: 4–30, Omni: 3–10), so a
+                // switch can strand an out-of-range value — 2.5@30s → 2.0 stayed at 30 and got
+                // rejected by the API at send. Clamp on EVERY switch, not just the Omni one.
+                // -1 = Auto is valid on both Seedance generations (verified on 2.5), so it is
+                // preserved here; only Omni (which has no Auto) rewrites it just below.
+                if (settings.duration !== -1) {
+                  const [dLo, dHi] = modelDurationRange(val);
+                  const dClamped = Math.max(dLo, Math.min(dHi, settings.duration));
+                  if (dClamped !== settings.duration) patch.duration = dClamped;
+                }
                 // Omni only accepts 16:9/9:16 + duration 3–10s — clamp when switching in.
                 if (modelProvider(val) === 'gemini') {
                   if (settings.ratio !== '16:9' && settings.ratio !== '9:16') patch.ratio = '16:9';
@@ -564,7 +586,8 @@ export function SettingsPanel() {
                 }
                 updateProjectSettings(project.id, patch);
               }}
-              options={MODELS}
+              options={MODELS.filter(m => !m.demo || demo25)}
+              placeholder={MODELS.find(m => m.id === settings.model)?.demo && !demo25 ? 'Seedance 2.5 Demo (키 없음)' : undefined}
             />
           </div>
 
@@ -639,8 +662,8 @@ export function SettingsPanel() {
                 <span className="text-[12px] text-gray-500">{settings.duration === -1 ? '모델 자동' : `${draftDuration ?? settings.duration}s`}</span>
               </div>
             </div>
-            <input type="range" min="4" max="15" value={settings.duration === -1 ? 5 : (draftDuration ?? settings.duration)} disabled={settings.duration === -1} onChange={(e) => setDraftDuration(parseInt(e.target.value))} onPointerUp={commitDuration} onKeyUp={commitDuration} onBlur={commitDuration} className={`w-full accent-[#0071e3] ${settings.duration === -1 ? 'opacity-40 cursor-not-allowed' : ''}`} />
-            {settings.duration === -1 && <p className="text-[11px] text-gray-400">모델이 콘텐츠에 맞는 길이(4~15초)를 자동 선택합니다. 길이에 따라 과금이 달라지니 주의.</p>}
+            <input type="range" min={durMin} max={durMax} value={settings.duration === -1 ? 5 : (draftDuration ?? settings.duration)} disabled={settings.duration === -1} onChange={(e) => setDraftDuration(parseInt(e.target.value))} onPointerUp={commitDuration} onKeyUp={commitDuration} onBlur={commitDuration} className={`w-full accent-[#0071e3] ${settings.duration === -1 ? 'opacity-40 cursor-not-allowed' : ''}`} />
+            {settings.duration === -1 && <p className="text-[11px] text-gray-400">{`모델이 콘텐츠에 맞는 길이(${durMin}~${durMax}초)를 자동 선택합니다.`} 길이에 따라 과금이 달라지니 주의.</p>}
           </div>
           )}
 
@@ -803,23 +826,23 @@ export function SettingsPanel() {
                       return (
                         <div className="flex items-baseline gap-2">
                           <span className="w-10 shrink-0 font-semibold text-gray-600">이미지</span>
-                          <span className={`w-8 shrink-0 tabular-nums ${total > 9 ? 'text-red-500' : total === 9 ? 'text-amber-600' : 'text-gray-700'}`}>{total}/9</span>
+                          <span className={`w-8 shrink-0 tabular-nums ${total > imgMax ? 'text-red-500' : total === imgMax ? 'text-amber-600' : 'text-gray-700'}`}>{total}/{imgMax}</span>
                           <span className="text-gray-400 whitespace-nowrap">개당 30MB · 300~6000px{mentionedElementImages > 0 ? ` · @어셋 ${mentionedElementImages}` : ''}</span>
                         </div>
                       );
                     })()}
                     <div className="flex items-baseline gap-2">
                       <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
-                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'video_url').length}/3</span>
-                      <span className="text-gray-400 whitespace-nowrap">개당 200MB · 2~15초</span>
+                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'video_url').length}/{vidMax}</span>
+                      <span className="text-gray-400 whitespace-nowrap">개당 200MB · 2~{Math.floor(refVidSec)}초</span>
                     </div>
                     <div className="flex items-baseline gap-2">
                       <span className="w-10 shrink-0 font-semibold text-gray-600">오디오</span>
-                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'audio_url').length}/3</span>
+                      <span className="w-8 shrink-0 tabular-nums text-gray-700">{assets.filter(a => a.type === 'audio_url').length}/{audMax}</span>
                       <span className="text-gray-400 whitespace-nowrap">개당 15MB · 2~15초</span>
                     </div>
                   </div>
-                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
+                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= imgMax)}
                   {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= 3)}
                   {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', true, assets.filter(a => a.type === 'audio_url').length >= 3)}
                 </div>
@@ -827,7 +850,7 @@ export function SettingsPanel() {
 
               {!isOmni && settings.mode === 'edit_video' && (
                 <div className="space-y-2">
-                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= 9)}
+                  {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= imgMax)}
                   {(() => {
                     const existingVideo = assets.find(a => a.type === 'video_url');
                     return existingVideo
@@ -879,7 +902,7 @@ export function SettingsPanel() {
                     />
                   </div>
                   {assetIdType === 'video_url' && (
-                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">비디오: MP4/MOV, 480p~4k, 2~15초, 200MB 이하, 24~60fps</p>
+                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">{`비디오: MP4/MOV, 480p~4k, 2~${Math.floor(refVidSec)}초, 200MB 이하, 24~60fps`}</p>
                   )}
                   {assetIdType === 'audio_url' && (
                     <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">오디오: WAV/MP3, 2~15초, 15MB 이하</p>
