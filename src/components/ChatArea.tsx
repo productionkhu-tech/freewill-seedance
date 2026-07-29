@@ -33,15 +33,22 @@ function translateError(error: string): string {
   if (error.includes('1080p is not supported for this account')) return '1080p는 현재 계정에서 사용할 수 없습니다. BytePlus 콘솔에서 1080p 권한을 활성화하거나 480p/720p를 사용해주세요.';
   if (error.includes('4k is not supported for this account')) return '4K는 현재 팀의 API 키에서 사용할 수 없습니다. BytePlus 콘솔에서 4K를 활성화하거나 1080p 이하를 사용해주세요.';
   if (error.includes('not supported for this account')) return `현재 계정에서 사용할 수 없는 옵션입니다: ${error}`;
-  // Seedance 2.5 re-classifies the task from the PROMPT TEXT, not from the mode we send.
-  // A multimodal_reference request whose prompt reads like an editing instruction ("use the
-  // original video as-is", "edit this clip"…) comes back as video-editing, and editing must
-  // inherit ratio/duration from the source video. Nothing on our side can predict this — the
-  // decision is semantic and happens server-side — so translate it into the exact two clicks
-  // that fix it. (Observed 2026-07-29 on 2.5 with a reference video at 16:9 / 7s.)
-  if (error.includes('identified your task as video editing')) {
-    return '프롬프트가 "영상 편집"으로 해석되었습니다.\n편집 작업은 비율·길이를 원본 영상에서 그대로 가져가므로 다음 두 가지를 바꿔주세요.\n  · Ratio → adaptive\n  · Duration → Auto\n(원본 영상은 4~30초여야 합니다. 편집이 아니라 레퍼런스로 쓰려면 프롬프트에서 "원본 영상을 그대로/직접 사용" 같은 표현을 빼주세요.)';
+  // 2.5 re-classifies the task from the PROMPT TEXT, not from the mode we send, and the
+  // label varies — "video editing", "video extension", possibly others. Whatever it picks,
+  // the output must inherit framing (and sometimes length) from the source clip, so `ratio`
+  // has to be `adaptive` and `duration` sometimes -1. Match the family, not one label, and
+  // read the required values out of the API's own "Issues:" list so the guidance is exactly
+  // what this request needs. (Seen 2026-07-29: editing → ratio+duration, extension → ratio.)
+  if (error.includes('identified your task as')) {
+    const kind = /identified your task as ([a-z ]+?) based/i.exec(error)?.[1] || '';
+    const ko = kind.includes('editing') ? '영상 편집' : kind.includes('extension') ? '영상 연장' : kind || '다른 작업';
+    const fixes: string[] = [];
+    if (/`ratio` must be `adaptive`/.test(error)) fixes.push('  · Ratio → adaptive');
+    if (/`duration` must be -1/.test(error)) fixes.push('  · Duration → Auto');
+    const what = fixes.length ? fixes.join('\n') : '  · Ratio → adaptive';
+    return `프롬프트가 "${ko}"으로 해석되었습니다.\n이 작업은 비율·길이를 원본 영상에서 그대로 가져가므로 아래를 바꿔주세요.\n${what}\n(레퍼런스로 쓰려던 거라면 프롬프트에서 "원본 영상을 그대로/이어서 사용" 같은 표현을 빼주세요.)`;
   }
+
   // 4k is flagship-only: Fast/Mini reject it at parameter validation, before a task exists.
   if (error.includes('parameter resolution') && error.includes('not valid')) return '이 모델은 선택한 해상도를 지원하지 않습니다. 4K는 Seedance 2.0(플래그십) 전용입니다.';
   if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;

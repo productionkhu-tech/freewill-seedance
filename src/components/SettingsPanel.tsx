@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, isDemoModel } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -231,6 +231,18 @@ export function SettingsPanel() {
   const vidMax = modelVideoMax(settings.model);                  // 2.0: 3 (unchanged)
   const audMax = modelAudioMax(settings.model);                  // 2.0: 3 (unchanged)
   const refVidSec = modelRefVideoSec(settings.model);            // 2.0: 15.2 (unchanged)
+  // 2.5 makes editing/extension inherit framing from the source clip, so `adaptive` is the
+  // only value it accepts — anything else comes back as "identified your task as …".
+  // 2.0 doesn't re-classify and happily takes a fixed ratio, so this is 2.5-only.
+  // (multimodal_reference can ALSO get re-classified by prompt wording, but that we can't
+  // predict from the mode — translateError handles that case instead.)
+  const ratioLockedToSource = isDemoModel(settings.model) &&
+    (settings.mode === 'edit_video' || settings.mode === 'extend_video');
+  useEffect(() => {
+    if (ratioLockedToSource && settings.ratio !== 'adaptive') {
+      updateProjectSettings(project.id, { ratio: 'adaptive' });
+    }
+  }, [ratioLockedToSource, settings.ratio, project.id]);
   // Two very different situations, and calling both "권한 해제" would be wrong. On a fresh
   // launch billingProject is always empty (session-only), so a saved 4k setting lands here
   // every single restart — telling the user their access was revoked would be alarming and
@@ -618,7 +630,7 @@ export function SettingsPanel() {
             </div>
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Ratio</label>
-              {isOmni && settings.omniTask === 'edit'
+              {(isOmni && settings.omniTask === 'edit') || ratioLockedToSource
                 ? <div className="text-[12px] text-gray-400 py-1.5 px-1">원본 영상 따라감</div>
                 : <CustomSelect value={settings.ratio} onChange={(val) => updateProjectSettings(project.id, { ratio: val })} options={isOmni ? OMNI_RATIOS : RATIOS.map(r => ({ id: r, name: r }))} />}
             </div>
