@@ -39,8 +39,11 @@ const acceptFor = (type: 'image_url' | 'video_url' | 'audio_url') =>
 // - Replace via native HTML5 file drop on the row (different event channel from
 //   framer's pointer drag, so the two never collide). id is preserved on both,
 //   so mention pills stay valid.
-function AssetRow({ asset, name, onReplaceFile, onRemove, dragOverId, setDragOverId }: {
-  asset: Asset; name: string;
+// - `locked` (Start/End frame modes): the grip is the ONLY way a drag can start
+//   (dragListener={false}), so not rendering it makes reordering impossible — no need
+//   to also neuter Reorder.Group. The slot keeps its width so rows don't shift.
+function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, setDragOverId }: {
+  asset: Asset; name: string; locked?: boolean;
   onReplaceFile: (a: Asset, f: File) => void;
   onRemove: (id: string) => void;
   dragOverId: string | null;
@@ -63,13 +66,15 @@ function AssetRow({ asset, name, onReplaceFile, onRemove, dragOverId, setDragOve
       className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] border-black/5'}`}
     >
       <div className="flex items-center gap-2 overflow-hidden">
-        <span
-          onPointerDown={(e) => controls.start(e)}
-          title="끌어서 순서 변경"
-          className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 shrink-0 -ml-0.5 select-none touch-none"
-        >
-          <GripVertical size={15} />
-        </span>
+        {locked
+          ? <span className="shrink-0 -ml-0.5 w-[15px]" aria-hidden />
+          : <span
+              onPointerDown={(e) => controls.start(e)}
+              title="끌어서 순서 변경"
+              className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 shrink-0 -ml-0.5 select-none touch-none"
+            >
+              <GripVertical size={15} />
+            </span>}
         {asset.type === 'image_url' && (
           thumb || asset.url.startsWith('data:image') || asset.url.startsWith('http')
             ? <HoverZoom className="shrink-0 inline-flex" src={thumb || asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}>
@@ -267,7 +272,25 @@ export function SettingsPanel() {
   // Single store write on slider release (no-op if nothing is in flight).
   const commitDuration = () => { if (draftDuration != null) { updateProjectSettings(project.id, { duration: draftDuration }); setDraftDuration(null); } };
   const commitOutput = () => { if (draftOutput != null) { updateProjectSettings(project.id, { output_count: draftOutput }); setDraftOutput(null); } };
-  const namedAssets = getAssetNames(assets);
+  // Start/End frames are ROLE-addressed in the payload (ChatArea sets content[].role
+  // from asset.role), so their position in this list means NOTHING to the API — it is
+  // pure display. But the user reads the list top-down as "start → end", so a pair that
+  // renders End-above-Start looks broken, and a ⠿ grip that lets you scramble a fixed
+  // pair is an affordance for a move with no meaning.
+  //   → When the panel holds only frames: pin the display order and drop the grip.
+  // Derived from asset.role, NOT from a mode/model list — so this covers Seedance 2.0 /
+  // 2.5 / mini / fast and Omni, plus any future frame mode, with nothing to keep in sync.
+  // The `every` guard is the safety belt: frame modes cap uploads at the 1-2 frames and
+  // reject other types, so a mixed list shouldn't exist — if one ever does, we leave the
+  // order completely alone rather than reshuffle someone's reference assets.
+  const FRAME_RANK: Record<string, number> = { first_frame: 0, last_frame: 1 };
+  const framesFixed = assets.length > 0 && assets.every(a => a.role in FRAME_RANK);
+  const displayAssets = framesFixed
+    ? [...assets].sort((a, b) => FRAME_RANK[a.role] - FRAME_RANK[b.role])
+    : assets;
+  // Names come from the SAME array that gets rendered — indexing a differently-ordered
+  // list would put the "Start Frame" label on the End Frame row.
+  const namedAssets = getAssetNames(displayAssets);
   const boundCollectionName = currentProjectId ? assetCollections.find(c => c.id === projectCollectionId[currentProjectId])?.name : undefined;
 
   const availableTypes = useMemo(() => {
@@ -751,12 +774,13 @@ export function SettingsPanel() {
           </div>
 
           <div className="space-y-2">
-            <Reorder.Group as="div" axis="y" values={assets} onReorder={(newOrder) => setAssetOrder(project.id, (newOrder as Asset[]).map(a => a.id))} className="space-y-2">
-              {assets.map((asset, i) => (
+            <Reorder.Group as="div" axis="y" values={displayAssets} onReorder={(newOrder) => setAssetOrder(project.id, (newOrder as Asset[]).map(a => a.id))} className="space-y-2">
+              {displayAssets.map((asset, i) => (
                 <AssetRow
                   key={asset.id}
                   asset={asset}
                   name={namedAssets[i]?.name ?? ''}
+                  locked={framesFixed}
                   onReplaceFile={handleReplaceFile}
                   onRemove={(id) => removeAsset(project.id, id)}
                   dragOverId={dragOverAssetId}
@@ -765,7 +789,7 @@ export function SettingsPanel() {
               ))}
             </Reorder.Group>
             {assets.length === 0 && <p className="text-xs text-gray-500 text-center py-2">No assets added yet.</p>}
-            {assets.length > 0 && <p className="text-[10px] text-gray-400 text-center pt-0.5">⠿ 잡아서 끌면 순서 변경 · ↻ 또는 파일 드롭으로 교체 (멘션 유지)</p>}
+            {assets.length > 0 && <p className="text-[10px] text-gray-400 text-center pt-0.5">{framesFixed ? '↻ 또는 파일 드롭으로 교체 (멘션 유지)' : '⠿ 잡아서 끌면 순서 변경 · ↻ 또는 파일 드롭으로 교체 (멘션 유지)'}</p>}
           </div>
 
           <AnimatePresence mode="wait">
