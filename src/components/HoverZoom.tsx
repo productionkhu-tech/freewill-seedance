@@ -19,7 +19,11 @@ export function HoverZoom({ src, fullSrc, videoSrc, className, children }: {
 }) {
   const [box, setBox] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLSpanElement>(null);
-  const SIZE = 256;
+  // Max box, not a fixed square. The media sizes itself inside it and keeps its own
+  // aspect: a 16:9 clip renders 360x203 instead of being letterboxed into 256x256.
+  // Positioning is computed against SIZE (the worst case) so the popup can never land
+  // off-screen even though the rendered box is usually smaller.
+  const SIZE = 360;
   const GAP = 10;
 
   const show = () => {
@@ -49,13 +53,13 @@ export function HoverZoom({ src, fullSrc, videoSrc, className, children }: {
               preload="metadata"
               muted
               playsInline
-              style={{ width: SIZE, height: SIZE, maxWidth: 'none', maxHeight: 'none', objectFit: 'contain', background: '#0b0b0d', borderRadius: 10, boxShadow: '0 10px 40px rgba(0,0,0,0.45)', border: '1px solid rgba(255,255,255,0.08)' }}
+              style={{ maxWidth: SIZE, maxHeight: SIZE, width: 'auto', height: 'auto', minWidth: 120, minHeight: 68, display: 'block', objectFit: 'contain', background: '#0b0b0d', borderRadius: 10, boxShadow: '0 10px 40px rgba(0,0,0,0.45)', border: '1px solid rgba(255,255,255,0.08)' }}
             />
           ) : (
             <img
               src={fullSrc || src}
               onError={(e) => { const el = e.currentTarget; if (fullSrc && el.src !== src) el.src = src; }}
-              style={{ width: SIZE, height: SIZE, maxWidth: 'none', maxHeight: 'none', objectFit: 'contain', background: '#0b0b0d', borderRadius: 10, boxShadow: '0 10px 40px rgba(0,0,0,0.45)', border: '1px solid rgba(255,255,255,0.08)' }}
+              style={{ maxWidth: SIZE, maxHeight: SIZE, width: 'auto', height: 'auto', minWidth: 120, minHeight: 68, display: 'block', objectFit: 'contain', background: '#0b0b0d', borderRadius: 10, boxShadow: '0 10px 40px rgba(0,0,0,0.45)', border: '1px solid rgba(255,255,255,0.08)' }}
             />
           )}
         </div>,

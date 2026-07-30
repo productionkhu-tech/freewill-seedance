@@ -300,6 +300,84 @@ export function totalDurationError(
   return null;
 }
 
+// Copy an image to the clipboard at the best resolution available.
+// Lives here (not in a component) because both the message cards and the Reference
+// Assets panel need it — duplicating this fallback chain in two places is how they
+// drift. Feedback is emitted as a 'seedance:toast' event so callers don't each need
+// their own toast UI; ChatArea owns the toast and renders whatever arrives.
+export async function copyImageToClipboard(
+  sources: { src?: string | null | false; fromPath?: string; original?: boolean }[],
+  label = '이미지',
+): Promise<boolean> {
+  const toast = (msg: string, ok: boolean) =>
+    window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { msg, ok } }));
+  let got: Blob | null = null;
+  let wasOriginal = false;
+  for (const cand of sources) {
+    let src = typeof cand.src === 'string' && cand.src ? cand.src : '';
+    if (!src && cand.fromPath) {
+      // media-cache entry gone (cache cleared) but the source file is still on disk →
+      // re-cache it server-side, which hands back a fresh id for the untouched original.
+      try {
+        const r = await fetch('/api/cache-from-path', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ originalPath: cand.fromPath }),
+        });
+        const j = await r.json();
+        if (j?.cacheId) src = `/api/cache/${j.cacheId}`;
+      } catch { /* try the next source */ }
+    }
+    if (!src) continue;
+    let objUrl: string | null = null;
+    try {
+      const res = await fetch(src);
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      // Always decode through an <img> instead of trusting the MIME type: the media
+      // cache serves originals as application/octet-stream, so a `type` check would
+      // reject the very file we want and silently fall back to the 80px thumbnail.
+      // A non-image just fails to decode and moves on. This also re-encodes to PNG —
+      // the only image type Chromium's clipboard accepts.
+      objUrl = URL.createObjectURL(blob);
+      const url = objUrl;
+      const png = await new Promise<Blob>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const c = document.createElement('canvas');
+          c.width = img.naturalWidth; c.height = img.naturalHeight;
+          const ctx = c.getContext('2d');
+          if (!ctx) { reject(new Error('canvas 컨텍스트 없음')); return; }
+          ctx.drawImage(img, 0, 0);
+          c.toBlob(b => b ? resolve(b) : reject(new Error('PNG 변환 실패')), 'image/png');
+        };
+        img.onerror = () => reject(new Error('이미지 디코드 실패'));
+        img.src = url;
+      });
+      got = png;
+      wasOriginal = !!cand.original;
+      break;
+    } catch { got = null; /* fall through to the next source */ }
+    finally { if (objUrl) URL.revokeObjectURL(objUrl); }
+  }
+  if (!got) { toast(`${label} 복사 실패 — 이미지를 불러오지 못했습니다. 캐시가 정리되었거나 원본이 사라졌을 수 있어요.`, false); return false; }
+  // Report the actual pixel size, and never pass a thumbnail off as the original —
+  // the whole point is a full-res copy, so a fallback must announce itself.
+  let dim = '';
+  try { const bmp = await createImageBitmap(got); dim = ` · ${bmp.width}×${bmp.height}`; bmp.close?.(); } catch { /* 크기 표시만 생략 */ }
+  // The clipboard write stays OUT of the retry loop: if it is refused (window not
+  // focused, permission denied) that must report itself, not masquerade as
+  // "image not found" and send us re-fetching the other candidates.
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': got })]);
+    if (wasOriginal) toast(`${label} 원본 복사됨${dim}`, true);
+    else toast(`${label} — 원본을 찾지 못해 썸네일만 복사했습니다${dim} (저화질)`, false);
+    return true;
+  } catch (e: any) {
+    toast(`${label} 클립보드 쓰기 실패: ${e?.message || e}`, false);
+    return false;
+  }
+}
+
 // Cache file locally on server (for reuse) → returns cacheId
 export async function cacheFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();

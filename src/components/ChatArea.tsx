@@ -5,7 +5,7 @@ import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as I
 import { getAssetNames } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
-import { downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl } from '../lib/utils';
+import { copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl } from '../lib/utils';
 
 // Resolve one element-library image to a fresh R2 URL for the API payload. Tries
 // the opportunistic media-cache id first; on miss (30-day LRU eviction) rebuilds
@@ -608,6 +608,17 @@ export function ChatArea() {
     };
     window.addEventListener('seedance:download-instant', onInstant);
     return () => window.removeEventListener('seedance:download-instant', onInstant);
+  }, []);
+
+  // Toast requests from non-component code (utils.copyImageToClipboard) and from panels
+  // that have no toast UI of their own. One owner for the toast, many senders.
+  useEffect(() => {
+    const onToast = (e: Event) => {
+      const d = (e as CustomEvent).detail || {};
+      showToast(d.msg || '', d.ok === true);
+    };
+    window.addEventListener('seedance:toast', onToast);
+    return () => window.removeEventListener('seedance:toast', onToast);
   }, []);
 
   // A cancel the API refused (task already running → 409). store.cancelTask leaves the
@@ -1283,79 +1294,7 @@ export function ChatArea() {
     syncMentionCount();
   };
 
-  // Right-click an attached reference image → copy it to the clipboard. Old queues stay
-  // usable: the R2/BytePlus URL dies after ~24h, but the original bytes also live in the
-  // server media-cache (/api/cache/:cacheId), so that is tried first. The stored thumbnail
-  // is the last resort — a wiped cache then still copies something instead of failing.
-  // Sources are tried in order; the first one that decodes wins.
-  const copyImageToClipboard = async (
-    sources: { src?: string | null | false; fromPath?: string; original?: boolean }[],
-    label = '이미지',
-  ) => {
-    let got: Blob | null = null;
-    let wasOriginal = false;
-    for (const cand of sources) {
-      let src = typeof cand.src === 'string' && cand.src ? cand.src : '';
-      if (!src && cand.fromPath) {
-        // media-cache entry gone (cache cleared) but the source file is still on disk →
-        // re-cache it server-side, which hands back a fresh id for the untouched original.
-        try {
-          const r = await fetch('/api/cache-from-path', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ originalPath: cand.fromPath }),
-          });
-          const j = await r.json();
-          if (j?.cacheId) src = `/api/cache/${j.cacheId}`;
-        } catch { /* try the next source */ }
-      }
-      if (!src) continue;
-      let objUrl: string | null = null;
-      try {
-        const res = await fetch(src);
-        if (!res.ok) continue;
-        const blob = await res.blob();
-        // Always decode through an <img> instead of trusting the MIME type: the media
-        // cache serves originals as application/octet-stream, so a `type` check would
-        // reject the very file we want and silently fall back to the 80px thumbnail.
-        // A non-image just fails to decode and moves on to the next candidate. This
-        // also re-encodes to PNG — the only image type Chromium's clipboard accepts.
-        objUrl = URL.createObjectURL(blob);
-        const url = objUrl;
-        const png = await new Promise<Blob>((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => {
-            const c = document.createElement('canvas');
-            c.width = img.naturalWidth; c.height = img.naturalHeight;
-            const ctx = c.getContext('2d');
-            if (!ctx) { reject(new Error('canvas 컨텍스트 없음')); return; }
-            ctx.drawImage(img, 0, 0);
-            c.toBlob(b => b ? resolve(b) : reject(new Error('PNG 변환 실패')), 'image/png');
-          };
-          img.onerror = () => reject(new Error('이미지 디코드 실패'));
-          img.src = url;
-        });
-        got = png;
-        wasOriginal = !!cand.original;
-        break;
-      } catch { got = null; /* fall through to the next source */ }
-      finally { if (objUrl) URL.revokeObjectURL(objUrl); }
-    }
-    if (!got) { warn(`${label} 복사 실패 — 이미지를 불러오지 못했습니다. 캐시가 정리되었거나 원본이 사라졌을 수 있어요.`); return; }
-    // Report the actual pixel size, and never pass a thumbnail off as the original —
-    // the whole point is a full-res copy, so a fallback must announce itself.
-    let dim = '';
-    try { const bmp = await createImageBitmap(got); dim = ` · ${bmp.width}×${bmp.height}`; bmp.close?.(); } catch { /* 크기 표시만 생략 */ }
-    // The clipboard write stays OUT of the retry loop: if it is refused (window not
-    // focused, permission denied) that must report itself, not masquerade as
-    // "image not found" and send us re-fetching the other candidates.
-    try {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': got })]);
-      if (wasOriginal) showToast(`${label} 원본 복사됨${dim}`, true);
-      else warn(`${label} — 원본을 찾지 못해 썸네일만 복사했습니다${dim} (저화질)`);
-    } catch (e: any) {
-      warn(`${label} 클립보드 쓰기 실패: ${e?.message || e}`);
-    }
-  };
+  // 우클릭 원본 복사 로직은 lib/utils.ts 의 copyImageToClipboard 로 이동(패널과 공유).
 
   // Copy/cut OUT of the prompt box: put ONLY clean plain text on the clipboard. The
   // editor stores each line as a <div>, and apps that render <div> as a spaced
@@ -2319,7 +2258,8 @@ export function ChatArea() {
                             <img src={a.url} className="w-full h-full object-cover cursor-zoom-in" />
                           </HoverZoom>
                         ) : a.type === 'video_url' && a.thumbnailUrl ? (
-                          <HoverZoom className="block w-full h-full" src={a.thumbnailUrl}>
+                          // thumbnail is a square crop → pass the clip so the zoom keeps aspect
+                          <HoverZoom className="block w-full h-full" src={a.thumbnailUrl} videoSrc={a.cacheId ? `/api/cache/${a.cacheId}` : undefined}>
                             <img src={a.thumbnailUrl} className="w-full h-full object-cover cursor-zoom-in" />
                           </HoverZoom>
                         ) : a.type === 'video_url' && a.cacheId ? (
@@ -2481,7 +2421,7 @@ export function ChatArea() {
                                   className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white relative group shrink-0">
                                   {asset.type.startsWith('video') ? (
                                     asset.thumbnailUrl
-                                      ? <HoverZoom className="block w-full h-full" src={asset.thumbnailUrl}><img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                                      ? <HoverZoom className="block w-full h-full" src={asset.thumbnailUrl} videoSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                                       : asset.cacheId
                                         ? <HoverZoom className="block w-full h-full" src="" videoSrc={`/api/cache/${asset.cacheId}`}><div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400 cursor-zoom-in"><Video size={14} /></div></HoverZoom>
                                         : <div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400"><Video size={14} /></div>

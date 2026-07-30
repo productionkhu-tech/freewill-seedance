@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, isDemoModel } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
-import { validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
+import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
 import { ElementLibrary } from './ElementLibrary';
 
@@ -73,13 +73,29 @@ function AssetRow({ asset, name, onReplaceFile, onRemove, dragOverId, setDragOve
         {asset.type === 'image_url' && (
           thumb || asset.url.startsWith('data:image') || asset.url.startsWith('http')
             ? <HoverZoom className="shrink-0 inline-flex" src={thumb || asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}>
-                <img src={thumb || asset.url} alt="asset" className="w-8 h-8 object-cover rounded border border-gray-200 cursor-zoom-in" />
+                <img src={thumb || asset.url} alt="asset" className="w-8 h-8 object-cover rounded border border-gray-200 cursor-zoom-in"
+                  title="우클릭: 원본 이미지 복사"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    // Same fallback order as the message cards: media-cache original first,
+                    // then re-cache from the on-disk path, and only then the 80px thumbnail
+                    // (which announces itself as low-res).
+                    copyImageToClipboard([
+                      { src: asset.cacheId && `/api/cache/${asset.cacheId}`, original: true },
+                      { fromPath: (asset as any).originalPath, original: true },
+                      { src: asset.url, original: !thumb },
+                      { src: thumb },
+                    ], '이미지');
+                  }} />
               </HoverZoom>
             : <ImageIcon size={14} className="text-blue-500 shrink-0" />
         )}
         {asset.type === 'video_url' && (
           thumb
-            ? <HoverZoom className="shrink-0 inline-flex" src={thumb}>
+            ? // Hand over the real clip even when a thumbnail exists: the thumbnail is a
+              // SQUARE CROP (createVideoThumbnail uses cover), so zooming it showed a
+              // cropped frame. videoSrc keeps the true aspect; thumb stays as the poster.
+              <HoverZoom className="shrink-0 inline-flex" src={thumb} videoSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}>
                 <img src={thumb} alt="video" className="w-8 h-8 object-cover rounded border border-gray-200 cursor-zoom-in" />
               </HoverZoom>
             : asset.cacheId
