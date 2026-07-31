@@ -338,7 +338,7 @@ function formatBytes(bytes: number | null): string {
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
-    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, toggleProjectGroup, setProjectGroup, moveProjectBefore, moveProjectToEnd,
+    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, moveProjectBefore, moveProjectToEnd,
     autoDownload, setAutoDownload } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
@@ -348,6 +348,28 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [pendingGroupDelete, setPendingGroupDelete] = useState<{ id: string; name: string; count: number } | null>(null);
+  // ── Why dropTarget is set through these two helpers ──────────────────────────
+  // HTML5 drag fires dragleave every time the pointer crosses into a CHILD of the row
+  // (icon button, name span, action buttons). Clearing on each of those made the
+  // insertion line strobe on and off while the cursor sat still over one row.
+  // So: a leave only *schedules* the clear, and the next dragover cancels it. The line
+  // then only disappears when the pointer has genuinely been off every target for a
+  // moment — which is also what makes moving between rows read as the line sliding.
+  const dropClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const aimAt = (key: string) => {
+    if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
+    setDropTarget(prev => (prev === key ? prev : key));
+  };
+  const releaseAim = () => {
+    if (dropClearRef.current) clearTimeout(dropClearRef.current);
+    dropClearRef.current = setTimeout(() => { setDropTarget(null); dropClearRef.current = null; }, 70);
+  };
+  const endDrag = () => {
+    if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
+    setDragId(null); setDropTarget(null);
+  };
+  useEffect(() => () => { if (dropClearRef.current) clearTimeout(dropClearRef.current); }, []);
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -497,13 +519,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     const on = dropTarget === key;
     return (
       <div
-        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDropTarget(key); }}
-        onDragLeave={() => setDropTarget(t => t === key ? null : t)}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); aimAt(key); }}
+        onDragLeave={releaseAim}
         onDrop={(e) => {
           e.preventDefault(); e.stopPropagation();
           const id = e.dataTransfer.getData('text/plain');
           if (id) moveProjectToEnd(id, groupId);
-          setDragId(null); setDropTarget(null);
+          endDrag();
         }}
         className={cn(
           'mx-1 mt-1 h-[26px] rounded-[7px] border border-dashed flex items-center justify-center text-[10px] transition-colors',
@@ -522,18 +544,18 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               key={project.id}
               draggable={editingId !== project.id}
               onDragStart={(e) => { e.dataTransfer.setData('text/plain', project.id); e.dataTransfer.effectAllowed = 'move'; setDragId(project.id); }}
-              onDragEnd={() => { setDragId(null); setDropTarget(null); }}
+              onDragEnd={endDrag}
               // stopPropagation is load-bearing: without it this bubbles to the group block
               // and then the list container, whose own dragover handlers overwrite
               // dropTarget with 'g:…'/'root' — so the insertion line would never appear even
               // though the drop itself worked. (onDrop already stops; onDragOver must too.)
-              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; setDropTarget('p:' + project.id); } }}
-              onDragLeave={() => setDropTarget(t => t === 'p:' + project.id ? null : t)}
+              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
+              onDragLeave={releaseAim}
               onDrop={(e) => {
                 e.preventDefault(); e.stopPropagation();
                 const id = e.dataTransfer.getData('text/plain');
                 if (id && id !== project.id) moveProjectBefore(id, project.id);
-                setDragId(null); setDropTarget(null);
+                endDrag();
               }}
               className={cn(
                 "group relative flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
@@ -547,11 +569,19 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               {/* Insertion line, drawn ABOVE the row — because dropping on a row inserts
                   BEFORE it. A ring around the row (what this used to be) reads as "replace
                   this one", which is the wrong promise. */}
-              {dropTarget === 'p:' + project.id && (
-                <div className="absolute -top-[3px] left-1 right-1 h-[3px] rounded-full bg-[#0071e3] pointer-events-none">
-                  <div className="absolute -left-[3px] -top-[2px] w-[7px] h-[7px] rounded-full bg-[#0071e3]" />
-                </div>
-              )}
+              {/* Always mounted, never conditionally rendered: mounting/unmounting gives you
+                  the hard on/off pop. Kept in the tree and transitioned instead, so it
+                  fades and grows out from the left as the target changes. */}
+              <div
+                aria-hidden
+                className={cn(
+                  'absolute -top-[3px] left-1 right-1 h-[3px] rounded-full bg-[#0071e3] pointer-events-none origin-left',
+                  'transition-[opacity,transform] duration-150 ease-out',
+                  dropTarget === 'p:' + project.id ? 'opacity-100 scale-x-100' : 'opacity-0 scale-x-75'
+                )}
+              >
+                <div className="absolute -left-[3px] -top-[2px] w-[7px] h-[7px] rounded-full bg-[#0071e3]" />
+              </div>
               <div className="flex items-center gap-2 overflow-hidden flex-1">
                 {/* Icon slot. The icon itself is always the project's own — the run/done
                     state rides as a small corner overlay instead of replacing it, so
@@ -694,13 +724,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
         // Dropping on the empty area below everything releases a project from its folder.
-        onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTarget('root'); } }}
-        onDragLeave={() => setDropTarget(t => t === 'root' ? null : t)}
+        onDragOver={(e) => { if (dragId) { e.preventDefault(); aimAt('root'); } }}
+        onDragLeave={releaseAim}
         onDrop={(e) => {
           e.preventDefault();
           const id = e.dataTransfer.getData('text/plain');
           if (id) setProjectGroup(id, undefined);
-          setDragId(null); setDropTarget(null);
+          endDrag();
         }}
       >
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
@@ -715,13 +745,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           const isDropTarget = dropTarget === 'g:' + g.id;
           return (
             <div key={g.id}
-              onDragOver={(e) => { if (dragId) { e.preventDefault(); e.stopPropagation(); setDropTarget('g:' + g.id); } }}
-              onDragLeave={() => setDropTarget(t => t === 'g:' + g.id ? null : t)}
+              onDragOver={(e) => { if (dragId) { e.preventDefault(); e.stopPropagation(); aimAt('g:' + g.id); } }}
+              onDragLeave={releaseAim}
               onDrop={(e) => {
                 e.preventDefault(); e.stopPropagation();
                 const id = e.dataTransfer.getData('text/plain');
                 if (id) setProjectGroup(id, g.id);
-                setDragId(null); setDropTarget(null);
+                endDrag();
               }}
               className={cn('rounded-[8px]', isDropTarget && 'ring-1 ring-[#0071e3] ring-inset bg-[#0071e3]/5')}
             >
@@ -754,8 +784,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 <div className="shrink-0 hidden group-hover/g:flex items-center gap-0.5">
                   <button onClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}
                     title="그룹 이름 변경" className="p-0.5 text-white/40 hover:text-white transition-colors"><Edit2 size={12} /></button>
-                  <button onClick={(e) => { e.stopPropagation(); deleteProjectGroup(g.id); }}
-                    title="그룹 해제 (안의 프로젝트는 그대로 남습니다)" className="p-0.5 text-white/40 hover:text-[#ff3b30] transition-colors"><Trash2 size={12} /></button>
+                  <button onClick={(e) => { e.stopPropagation(); setPendingGroupDelete({ id: g.id, name: g.name, count: inGroup.length }); }}
+                    title="그룹 삭제" className="p-0.5 text-white/40 hover:text-[#ff3b30] transition-colors"><Trash2 size={12} /></button>
                 </div>
               </div>
               {!g.collapsed && (
@@ -886,6 +916,68 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         )}
       </AnimatePresence>,
       document.body)}
+
+    {/* Group deletion asks WHICH deletion you meant. "Remove the folder" and "remove the
+        folder and everything in it" are different intentions that look like the same click,
+        and only one of them is recoverable. The safe option is the primary button; the
+        destructive one is styled as destructive and states the count. */}
+    {createPortal(
+    <AnimatePresence>
+      {pendingGroupDelete && (
+        <motion.div key="grp-del-backdrop"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          onClick={() => setPendingGroupDelete(null)}
+          className="fixed inset-0 z-[120] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.94, y: 12 }} animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.94, y: 12 }} transition={{ duration: 0.18, ease: 'easeOut' }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-[min(92vw,27rem)] bg-white rounded-2xl shadow-2xl overflow-hidden text-gray-900">
+            <div className="p-5 space-y-3">
+              <div className="flex items-start gap-3">
+                <div className="shrink-0 w-9 h-9 rounded-full bg-amber-50 flex items-center justify-center">
+                  <Folder size={18} className="text-amber-500" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-[16px] font-semibold tracking-tight leading-snug">그룹을 삭제할까요?</h3>
+                  <p className="text-[13px] text-gray-500 mt-0.5 break-all">
+                    {pendingGroupDelete.name}
+                    {pendingGroupDelete.count > 0 && <span className="text-gray-400"> · 프로젝트 {pendingGroupDelete.count}개</span>}
+                  </p>
+                </div>
+              </div>
+              {pendingGroupDelete.count > 0
+                ? <p className="text-[12.5px] text-gray-600 leading-relaxed">
+                    안에 있는 프로젝트를 어떻게 할지 골라주세요.
+                  </p>
+                : <p className="text-[12.5px] text-gray-500">비어 있는 그룹입니다.</p>}
+            </div>
+            <div className="px-5 pb-5 space-y-2">
+              <button
+                autoFocus
+                onClick={() => { deleteProjectGroup(pendingGroupDelete.id); setPendingGroupDelete(null); }}
+                className="w-full px-4 py-2.5 rounded-xl text-[14px] font-semibold text-white bg-[#0071e3] hover:bg-[#0060c0] transition-colors focus:outline-none focus:ring-2 focus:ring-[#0071e3]/40 focus:ring-offset-2">
+                그룹만 삭제 {pendingGroupDelete.count > 0 && '(프로젝트는 남김)'}
+              </button>
+              {pendingGroupDelete.count > 0 && (
+                <button
+                  onClick={() => { deleteProjectGroupWithProjects(pendingGroupDelete.id); setPendingGroupDelete(null); }}
+                  className="w-full px-4 py-2.5 rounded-xl text-[13.5px] font-medium text-[#ff3b30] bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
+                  프로젝트 {pendingGroupDelete.count}개까지 함께 삭제 · 되돌릴 수 없음
+                </button>
+              )}
+              <button
+                onClick={() => setPendingGroupDelete(null)}
+                className="w-full px-4 py-2.5 rounded-xl text-[14px] font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors">
+                취소
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>,
+    document.body)}
 
     {/* Delete confirmation — irreversible, so it states exactly what is lost.
         Rendered through a portal: the sidebar wrapper is overflow-hidden AND runs a

@@ -397,7 +397,8 @@ interface AppState {
   markProjectSeen: (projectId: string) => void;
   createProjectGroup: (name?: string) => string;
   renameProjectGroup: (id: string, name: string) => void;
-  deleteProjectGroup: (id: string) => void;          // projects inside fall back to ungrouped
+  deleteProjectGroup: (id: string) => void;              // folder only — projects released
+  deleteProjectGroupWithProjects: (id: string) => void;  // folder AND everything in it
   toggleProjectGroup: (id: string) => void;
   setProjectGroup: (projectId: string, groupId: string | undefined) => void;
   moveProjectBefore: (draggedId: string, targetId: string) => void;
@@ -692,13 +693,32 @@ export const useAppStore = create<AppState>()(
       renameProjectGroup: (id, name) => {
         set((state) => ({ projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, name } : g) }));
       },
-      // Deleting a folder must never delete what's inside it. Projects are released to the
-      // ungrouped list — visibly still there, one drag from being refiled.
+      // Removing the folder and destroying its contents are different intentions, so they
+      // are different calls — never a flag with a default, where the destructive branch
+      // could be reached by forgetting to pass something. The UI asks which one.
       deleteProjectGroup: (id) => {
         set((state) => ({
           projectGroups: state.projectGroups.filter(g => g.id !== id),
           projects: state.projects.map(p => p.groupId === id ? { ...p, groupId: undefined } : p),
         }));
+      },
+      deleteProjectGroupWithProjects: (id) => {
+        set((state) => {
+          const doomed = new Set(state.projects.filter(p => p.groupId === id).map(p => p.id));
+          const projects = state.projects.filter(p => !doomed.has(p.id));
+          // If the open project was inside, fall back to whatever is left rather than
+          // leaving currentProjectId pointing at something that no longer exists.
+          let currentProjectId = state.currentProjectId;
+          if (currentProjectId && doomed.has(currentProjectId)) {
+            currentProjectId = projects.length ? projects[0].id : null;
+          }
+          const binding = { ...state.projectCollectionId };
+          for (const pid of doomed) delete binding[pid];
+          return {
+            projectGroups: state.projectGroups.filter(g => g.id !== id),
+            projects, currentProjectId, projectCollectionId: binding,
+          };
+        });
       },
       toggleProjectGroup: (id) => {
         set((state) => ({ projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, collapsed: !g.collapsed } : g) }));

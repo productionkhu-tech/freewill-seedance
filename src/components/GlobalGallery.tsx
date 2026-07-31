@@ -25,7 +25,9 @@ import { formatStamp, formatStampFull } from '../lib/utils';
 //   3. VideoPlayer already lazy-mounts on intersection, so bytes only move for what's visible.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Row = ChatMessage & { projectId: string; projectName: string; projectIcon?: string };
+type Row = ChatMessage & { projectId: string; projectName: string; projectIcon?: string; groupName: string };
+
+const NO_GROUP = '그룹 없음';
 
 const ALL = '전체';
 
@@ -136,9 +138,11 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8 }: {
 
 export function GlobalGallery({ onClose }: { onClose: () => void }) {
   const projects = useAppStore(s => s.projects);
+  const projectGroups = useAppStore(s => s.projectGroups);
   const setCurrentProjectId = useAppStore(s => s.setCurrentProjectId);
   const updateMessage = useAppStore(s => s.updateMessage);
 
+  const [groupFilter, setGroupFilter] = useState(ALL);
   const [projectFilter, setProjectFilter] = useState(ALL);
   const [modelFilter, setModelFilter] = useState(ALL);
   const [resFilter, setResFilter] = useState(ALL);
@@ -167,15 +171,21 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   // Flatten every project's finished clips once. Newest first — the thing you are
   // looking for is almost always recent.
   const allRows = useMemo<Row[]>(() => {
+    const groupName = new Map(projectGroups.map(g => [g.id, g.name]));
     const out: Row[] = [];
     for (const p of projects) {
       for (const m of p.messages) {
         if (m.status !== 'succeeded' || !m.videoUrl) continue;
-        out.push({ ...m, projectId: p.id, projectName: p.name, projectIcon: p.icon });
+        out.push({
+          ...m, projectId: p.id, projectName: p.name, projectIcon: p.icon,
+          // A project filed under a group that no longer exists counts as ungrouped —
+          // same rule the sidebar uses, so the two views can't disagree.
+          groupName: (p.groupId && groupName.get(p.groupId)) || NO_GROUP,
+        });
       }
     }
     return out.sort((a, b) => b.timestamp - a.timestamp);
-  }, [projects]);
+  }, [projects, projectGroups]);
 
   const modelLabel = (id?: string) =>
     MODELS.find(m => m.id === id)?.name || id || '알 수 없음';
@@ -200,6 +210,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     const withAll = (m: Map<string, number>, keys: string[]): Opt[] =>
       [{ value: ALL, count: allRows.length }, ...keys.map(k => ({ value: k, count: m.get(k) || 0 }))];
 
+    const gm = tally(r => r.groupName);
     const pm = tally(r => r.projectName);
     const mm = tally(r => modelLabel(r.usedSettings?.model));
     const rm = tally(r => resLabel(r.usedSettings?.resolution));
@@ -208,12 +219,15 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     // listed — appended after the ladder rather than dropped.
     const extra = (m: Map<string, number>, ladder: string[]) => [...m.keys()].filter(k => !ladder.includes(k));
     return {
+      // Groups in sidebar order, with '그룹 없음' last — matching how the sidebar
+      // stacks them, so the two views read the same way.
+      groups: withAll(gm, [...projectGroups.map(g => g.name).filter(n => gm.has(n)), ...(gm.has(NO_GROUP) ? [NO_GROUP] : [])]),
       projects: withAll(pm, [...pm.keys()]),
       models: withAll(mm, MODELS.map(m => m.name).filter(n => mm.has(n)).concat(extra(mm, MODELS.map(m => m.name)))),
       res: withAll(rm, [...RES_LADDER, ...extra(rm, RES_LADDER)]),
       ratios: withAll(am, [...RATIO_LADDER, ...extra(am, RATIO_LADDER)]),
     };
-  }, [allRows]);
+  }, [allRows, projectGroups]);
 
   // In 직접 mode an empty box means "unbounded on that side", so you can ask for
   // "everything before the 5th" without inventing a start date.
@@ -222,6 +236,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     : [presetStart(period), Infinity];
 
   const rows = useMemo(() => allRows.filter(r => {
+    if (groupFilter !== ALL && r.groupName !== groupFilter) return false;
     if (projectFilter !== ALL && r.projectName !== projectFilter) return false;
     if (modelFilter !== ALL && modelLabel(r.usedSettings?.model) !== modelFilter) return false;
     if (resFilter !== ALL) {
@@ -232,11 +247,11 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     if (r.timestamp < since || r.timestamp > until) return false;
     if (starredOnly && !r.starred) return false;
     return true;
-  }), [allRows, projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
+  }), [allRows, groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
 
   // Any filter change resets the window — otherwise you narrow to 3 results and still
   // carry a "shown = 96" from before, or worse, land past the end of a shorter list.
-  useEffect(() => { setShown(PAGE_SIZE); }, [projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
+  useEffect(() => { setShown(PAGE_SIZE); }, [groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
 
   const visible = rows.slice(0, shown);
   const hasMore = rows.length > shown;
@@ -253,10 +268,10 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     return () => io.disconnect();
   }, [hasMore, rows.length]);
 
-  const anyFilter = projectFilter !== ALL || modelFilter !== ALL || resFilter !== ALL
+  const anyFilter = groupFilter !== ALL || projectFilter !== ALL || modelFilter !== ALL || resFilter !== ALL
     || ratioFilter !== ALL || period !== 'all' || starredOnly;
   const resetFilters = () => {
-    setProjectFilter(ALL); setModelFilter(ALL); setResFilter(ALL);
+    setGroupFilter(ALL); setProjectFilter(ALL); setModelFilter(ALL); setResFilter(ALL);
     setRatioFilter(ALL); setPeriod('all'); setFromDate(''); setToDate(''); setStarredOnly(false);
   };
 
@@ -301,6 +316,9 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
         </div>
         <div className="flex items-center gap-3 px-5 pb-3 flex-wrap">
           <Filter size={13} className="text-gray-400 shrink-0" />
+          {projectGroups.length > 0 && (
+            <FilterSelect label="그룹" value={groupFilter} options={opts.groups} onChange={setGroupFilter} />
+          )}
           <FilterSelect label="프로젝트" value={projectFilter} options={opts.projects} onChange={setProjectFilter} />
           <FilterSelect label="모델" value={modelFilter} options={opts.models} onChange={setModelFilter} />
           <FilterSelect label="해상도" value={resFilter} options={opts.res} onChange={setResFilter} />
