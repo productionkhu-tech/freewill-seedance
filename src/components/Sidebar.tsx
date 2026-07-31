@@ -356,20 +356,24 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // So: a leave only *schedules* the clear, and the next dragover cancels it. The line
   // then only disappears when the pointer has genuinely been off every target for a
   // moment — which is also what makes moving between rows read as the line sliding.
-  const dropClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const aimAt = (key: string) => {
-    if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
+    // Same key → same object → React bails out. dragover fires ~60×/s while the pointer
+    // moves, so this guard is what keeps the list from re-rendering on every event.
     setDropTarget(prev => (prev === key ? prev : key));
   };
-  const releaseAim = () => {
-    if (dropClearRef.current) clearTimeout(dropClearRef.current);
-    dropClearRef.current = setTimeout(() => { setDropTarget(null); dropClearRef.current = null; }, 70);
-  };
-  const endDrag = () => {
-    if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
-    setDragId(null); setDropTarget(null);
-  };
-  useEffect(() => () => { if (dropClearRef.current) clearTimeout(dropClearRef.current); }, []);
+  // ── No dragleave anywhere in the list. This is the whole fix for the stutter. ──
+  // dragover REPLACES the aim; drop and dragend CLEAR it. Nothing else touches it.
+  // Two earlier attempts failed for the same underlying reason — dragleave fires
+  // constantly mid-list as the pointer crosses child elements:
+  //   · "schedule a clear in 70ms, cancel it on the next dragover" lost that race
+  //     constantly, so the gap closed and reopened — the 벅벅 stutter.
+  //   · "only clear if relatedTarget is outside the list" doesn't work either: during a
+  //     drag, dragleave's relatedTarget is null in Chromium far more often than not, so
+  //     every child crossing read as leaving and wiped the aim (measured: the gap never
+  //     opened at all).
+  // Leaving the sidebar mid-drag now leaves the last gap open until release. That is the
+  // correct trade: it still shows where the drop would land, and dragend tidies it up.
+  const endDrag = () => { setDragId(null); setDropTarget(null); };
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -520,7 +524,6 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     return (
       <div
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); aimAt(key); }}
-        onDragLeave={releaseAim}
         onDrop={(e) => {
           e.preventDefault(); e.stopPropagation();
           const id = e.dataTransfer.getData('text/plain');
@@ -557,7 +560,6 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       <Fragment key={project.id}>
         <div
           onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
-          onDragLeave={releaseAim}
           onDrop={dropHere}
           // Height, not opacity — the point is that the list physically makes room.
           className={cn('overflow-hidden transition-[height] duration-150 ease-out', aimed ? 'h-[38px]' : 'h-0')}
@@ -576,8 +578,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               // dropTarget with 'g:…'/'root' — so the insertion line would never appear even
               // though the drop itself worked. (onDrop already stops; onDragOver must too.)
               onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
-              onDragLeave={releaseAim}
-              onDrop={dropHere}
+                  onDrop={dropHere}
               className={cn(
                 "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
                 dragId === project.id && "opacity-40",
@@ -735,7 +736,6 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       <div className="relative flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
         // Dropping on the empty area below everything releases a project from its folder.
         onDragOver={(e) => { if (dragId) { e.preventDefault(); aimAt('root'); } }}
-        onDragLeave={releaseAim}
         onDrop={(e) => {
           e.preventDefault();
           const id = e.dataTransfer.getData('text/plain');
@@ -756,8 +756,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           return (
             <div key={g.id}
               onDragOver={(e) => { if (dragId) { e.preventDefault(); e.stopPropagation(); aimAt('g:' + g.id); } }}
-              onDragLeave={releaseAim}
-              onDrop={(e) => {
+                  onDrop={(e) => {
                 e.preventDefault(); e.stopPropagation();
                 const id = e.dataTransfer.getData('text/plain');
                 if (id) setProjectGroup(id, g.id);
