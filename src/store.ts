@@ -355,6 +355,7 @@ interface AppState {
   toggleProjectGroup: (id: string) => void;
   setProjectGroup: (projectId: string, groupId: string | undefined) => void;
   moveProjectBefore: (draggedId: string, targetId: string) => void;
+  moveProjectToEnd: (projectId: string, groupId: string | undefined) => void;
   deleteProject: (id: string) => void;
   updateProjectSettings: (projectId: string, settings: Partial<GenerationSettings>) => void;
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
@@ -668,6 +669,20 @@ export const useAppStore = create<AppState>()(
           const cur = state.projects.find(p => p.id === projectId);
           if (!cur || cur.groupId === groupId) return state;
           return { projects: state.projects.map(p => p.id === projectId ? { ...p, groupId } : p) };
+        });
+      },
+      // Drop on the strip at the end of a section: land last inside it.
+      // Needed because moveProjectBefore can only insert BEFORE something — without this
+      // there is no gesture that reaches the final slot of a list.
+      moveProjectToEnd: (projectId, groupId) => {
+        set((state) => {
+          const moved = state.projects.find(p => p.id === projectId);
+          if (!moved) return state;
+          const rest = state.projects.filter(p => p.id !== projectId);
+          const lastIdx = rest.map(p => (p.groupId || undefined) === groupId).lastIndexOf(true);
+          const next = [...rest];
+          next.splice(lastIdx + 1, 0, { ...moved, groupId });
+          return { projects: next };
         });
       },
       // Drop a project onto another: it lands directly before the target AND adopts the

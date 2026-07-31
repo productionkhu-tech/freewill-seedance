@@ -319,7 +319,7 @@ function formatBytes(bytes: number | null): string {
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
-    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, toggleProjectGroup, setProjectGroup, moveProjectBefore,
+    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, toggleProjectGroup, setProjectGroup, moveProjectBefore, moveProjectToEnd,
     autoDownload, setAutoDownload } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
@@ -469,6 +469,33 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     return projects.filter(p => !p.groupId || !live.has(p.groupId));
   }, [projects, projectGroups]);
 
+  // The strip at the end of a section. Only exists while something is being dragged —
+  // it's an affordance, not furniture. It also fills a real gap: dropping on a row inserts
+  // BEFORE that row, so without this there is no way to reach the last slot of a list.
+  const TailDrop = ({ groupId, label }: { groupId?: string; label: string }) => {
+    if (!dragId) return null;
+    const key = 'end:' + (groupId ?? '');
+    const on = dropTarget === key;
+    return (
+      <div
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDropTarget(key); }}
+        onDragLeave={() => setDropTarget(t => t === key ? null : t)}
+        onDrop={(e) => {
+          e.preventDefault(); e.stopPropagation();
+          const id = e.dataTransfer.getData('text/plain');
+          if (id) moveProjectToEnd(id, groupId);
+          setDragId(null); setDropTarget(null);
+        }}
+        className={cn(
+          'mx-1 mt-1 h-[26px] rounded-[7px] border border-dashed flex items-center justify-center text-[10px] transition-colors',
+          on ? 'border-[#0071e3] bg-[#0071e3]/15 text-[#4da3ff]' : 'border-white/15 text-white/30'
+        )}
+      >
+        {label}
+      </div>
+    );
+  };
+
   // One project row. Extracted so the grouped list and the flat/search list render the
   // exact same thing — two copies of 60 lines of row markup would drift within a week.
   const renderProjectRow = (project: Project) => (
@@ -477,7 +504,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               draggable={editingId !== project.id}
               onDragStart={(e) => { e.dataTransfer.setData('text/plain', project.id); e.dataTransfer.effectAllowed = 'move'; setDragId(project.id); }}
               onDragEnd={() => { setDragId(null); setDropTarget(null); }}
-              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTarget('p:' + project.id); } }}
+              // stopPropagation is load-bearing: without it this bubbles to the group block
+              // and then the list container, whose own dragover handlers overwrite
+              // dropTarget with 'g:…'/'root' — so the insertion line would never appear even
+              // though the drop itself worked. (onDrop already stops; onDragOver must too.)
+              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; setDropTarget('p:' + project.id); } }}
               onDragLeave={() => setDropTarget(t => t === 'p:' + project.id ? null : t)}
               onDrop={(e) => {
                 e.preventDefault(); e.stopPropagation();
@@ -486,8 +517,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 setDragId(null); setDropTarget(null);
               }}
               className={cn(
-                "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
-                dropTarget === 'p:' + project.id && "ring-1 ring-[#0071e3] ring-inset",
+                "group relative flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
                 dragId === project.id && "opacity-40",
                 currentProjectId === project.id ? "bg-[#2a2a2d] text-white" : "text-white/70 hover:bg-[#2a2a2d]/50 hover:text-white"
               )}
@@ -495,6 +525,14 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               onDoubleClick={() => { setEditingId(project.id); setEditName(project.name); }}
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ id: project.id, x: e.clientX, y: e.clientY }); }}
             >
+              {/* Insertion line, drawn ABOVE the row — because dropping on a row inserts
+                  BEFORE it. A ring around the row (what this used to be) reads as "replace
+                  this one", which is the wrong promise. */}
+              {dropTarget === 'p:' + project.id && (
+                <div className="absolute -top-[3px] left-1 right-1 h-[3px] rounded-full bg-[#0071e3] pointer-events-none">
+                  <div className="absolute -left-[3px] -top-[2px] w-[7px] h-[7px] rounded-full bg-[#0071e3]" />
+                </div>
+              )}
               <div className="flex items-center gap-2 overflow-hidden flex-1">
                 {/* Icon slot. The icon itself is always the project's own — the run/done
                     state rides as a small corner overlay instead of replacing it, so
@@ -706,6 +744,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                   {inGroup.length === 0
                     ? <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
                     : inGroup.map(renderProjectRow)}
+                  {inGroup.length > 0 && <TailDrop groupId={g.id} label="이 그룹 맨 아래로" />}
                 </div>
               )}
             </div>
@@ -717,6 +756,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           ? filteredProjects
           : ungroupedProjects
         ).map(renderProjectRow)}
+        {!searchQuery.trim() && <TailDrop label={projectGroups.length ? '그룹 밖 맨 아래로' : '맨 아래로'} />}
       </div>
       {/* Footer: download folder + dashboard link + cache cleanup */}
       <div className="p-3 border-t border-[#2a2a2d] shrink-0 space-y-2">
