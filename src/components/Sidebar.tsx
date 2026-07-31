@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, Fragment, type DragEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -357,23 +357,17 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // then only disappears when the pointer has genuinely been off every target for a
   // moment — which is also what makes moving between rows read as the line sliding.
   const dropClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Where the single insertion line sits, in pixels from the top of the list's content.
-  // ONE line that moves, not one per row: a line per row can only blink off here and on
-  // there, which is the "뚝뚝" — a shared element animates its position instead, so
-  // moving between rows reads as the line sliding to the new gap.
-  const [dropLineTop, setDropLineTop] = useState<number | null>(null);
-  const aimAt = (key: string, lineTop?: number) => {
+  const aimAt = (key: string) => {
     if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
     setDropTarget(prev => (prev === key ? prev : key));
-    setDropLineTop(lineTop ?? null);
   };
   const releaseAim = () => {
     if (dropClearRef.current) clearTimeout(dropClearRef.current);
-    dropClearRef.current = setTimeout(() => { setDropTarget(null); setDropLineTop(null); dropClearRef.current = null; }, 70);
+    dropClearRef.current = setTimeout(() => { setDropTarget(null); dropClearRef.current = null; }, 70);
   };
   const endDrag = () => {
     if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
-    setDragId(null); setDropTarget(null); setDropLineTop(null);
+    setDragId(null); setDropTarget(null);
   };
   useEffect(() => () => { if (dropClearRef.current) clearTimeout(dropClearRef.current); }, []);
   // Which project's icon picker is open, plus where to anchor it.
@@ -545,9 +539,35 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
 
   // One project row. Extracted so the grouped list and the flat/search list render the
   // exact same thing — two copies of 60 lines of row markup would drift within a week.
-  const renderProjectRow = (project: Project) => (
+  // A row, preceded by the gap that opens where it would land.
+  // ★ The gap is itself a drop target aiming at the SAME key as its row. Without that the
+  // list oscillates: opening the gap pushes the row down, the cursor ends up over the gap
+  // rather than the row, the aim clears, the gap closes, the row slides back under the
+  // cursor, and it opens again — forever.
+  const renderProjectRow = (project: Project) => {
+    const aimed = dropTarget === 'p:' + project.id;
+    const dragging = dragId ? projects.find(p => p.id === dragId) : null;
+    const dropHere = (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault(); e.stopPropagation();
+      const id = e.dataTransfer.getData('text/plain');
+      if (id && id !== project.id) moveProjectBefore(id, project.id);
+      endDrag();
+    };
+    return (
+      <Fragment key={project.id}>
+        <div
+          onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
+          onDragLeave={releaseAim}
+          onDrop={dropHere}
+          // Height, not opacity — the point is that the list physically makes room.
+          className={cn('overflow-hidden transition-[height] duration-150 ease-out', aimed ? 'h-[38px]' : 'h-0')}
+        >
+          <div className="h-[34px] flex items-center gap-2 px-3 rounded-[8px] border border-dashed border-[#0071e3]/70 bg-[#0071e3]/10">
+            <ProjectIcon icon={dragging?.icon} size={14} />
+            <span className="truncate text-[12px] text-[#4da3ff]">{dragging ? `${dragging.name} 여기로` : '여기로'}</span>
+          </div>
+        </div>
             <div
-              key={project.id}
               draggable={editingId !== project.id}
               onDragStart={(e) => { e.dataTransfer.setData('text/plain', project.id); e.dataTransfer.effectAllowed = 'move'; setDragId(project.id); }}
               onDragEnd={endDrag}
@@ -555,14 +575,9 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               // and then the list container, whose own dragover handlers overwrite
               // dropTarget with 'g:…'/'root' — so the insertion line would never appear even
               // though the drop itself worked. (onDrop already stops; onDragOver must too.)
-              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id, (e.currentTarget as HTMLElement).offsetTop); } }}
+              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
               onDragLeave={releaseAim}
-              onDrop={(e) => {
-                e.preventDefault(); e.stopPropagation();
-                const id = e.dataTransfer.getData('text/plain');
-                if (id && id !== project.id) moveProjectBefore(id, project.id);
-                endDrag();
-              }}
+              onDrop={dropHere}
               className={cn(
                 "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
                 dragId === project.id && "opacity-40",
@@ -633,7 +648,9 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 );
               })()}
             </div>
-  );
+      </Fragment>
+    );
+  };
 
   return (
     <motion.div
@@ -726,21 +743,6 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           endDrag();
         }}
       >
-        {/* The one and only insertion line. Absolutely placed inside the scrolling content
-            so it rides along with the list, and moved by transform so the browser animates
-            position on the compositor instead of re-laying-out.
-            Opacity only — no scaleX: growing it from one end looked like a progress bar
-            filling up, which is not what a "it goes here" marker should say. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute left-2 right-2 top-0 h-[3px] z-10 rounded-full bg-[#0071e3] transition-[transform,opacity] duration-200 ease-out"
-          style={{
-            transform: `translateY(${(dropLineTop ?? 0) - 3}px)`,
-            opacity: dropLineTop == null ? 0 : 1,
-          }}
-        >
-          <div className="absolute -left-[2px] -top-[2px] w-[7px] h-[7px] rounded-full bg-[#0071e3]" />
-        </div>
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
             callers below. */}
         {!searchQuery.trim() && projectGroups.map((g) => {
