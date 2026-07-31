@@ -253,27 +253,76 @@ ipcMain.handle('get-cache-size', async () => {
 // directory and quietly orphan the only copy of their data that lives outside userData.
 const BACKUP_DIR = path.join(app.getPath('documents'), 'Freewill Seedance Backup');
 const BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-backup.json');
+// ★ The library is backed up SEPARATELY, and that split is not cosmetic — it is the fix
+// for a silent, total backup failure.
+// The old code mirrored state+library as ONE JSON string. Once the library passed ~500MB
+// that string exceeded V8's hard 512MB single-string ceiling and JSON.stringify threw
+// `RangeError: Invalid string length` — synchronously, inside a setTimeout, so the
+// promise .catch never saw it. Backups just stopped, with no error anywhere the user
+// could see. Measured on real data: 19.4MB state + 505.9MB library = 525.3MB > 512MB.
+// Split, the state file is ~19MB and can never be dragged down by the library again.
+const ELEMENTS_BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-elements.json');
+// One-time safety net for the format change: the existing combined file is archived
+// before it is first replaced by the smaller state-only one, so the switch itself can
+// never be the thing that loses a library.
+const LEGACY_COMBINED_PATH = path.join(BACKUP_DIR, 'seedance-backup-combined-legacy.json');
+// Ceiling for auto-restoring the library at startup. Measured the hard way: a 506MB
+// library sent over IPC → IDB → JSON.parse during boot crashed the renderer before the
+// app could serve its first page. Restoring the work history must never depend on the
+// library fitting, so anything above this is left on disk instead of attempted.
+const ELEMENTS_RESTORE_MAX = 150 * 1024 * 1024;
 
-ipcMain.handle('backup-save', async (_e, content) => {
+function writeAtomic(target, content) {
+  if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const tmp = target + '.tmp';
+  fs.writeFileSync(tmp, content, 'utf8');
+  fs.renameSync(tmp, target);   // atomic: a power cut can't leave a half-written backup
+}
+
+ipcMain.handle('backup-save', async (_e, content, kind) => {
   try {
     if (typeof content !== 'string' || content.length === 0) return { ok: false, error: 'empty content' };
-    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    // Atomic write: temp file then rename, so a power-cut mid-write doesn't
-    // corrupt the existing backup.
-    const tmp = BACKUP_PATH + '.tmp';
-    fs.writeFileSync(tmp, content, 'utf8');
-    fs.renameSync(tmp, BACKUP_PATH);
-    return { ok: true, path: BACKUP_PATH, bytes: content.length };
+    const target = kind === 'elements' ? ELEMENTS_BACKUP_PATH : BACKUP_PATH;
+    if (kind !== 'elements' && fs.existsSync(BACKUP_PATH) && !fs.existsSync(LEGACY_COMBINED_PATH)) {
+      // First state-only write on this machine. Whatever is there now predates the split
+      // and may be the only copy of the library — move it aside instead of over it.
+      try { fs.renameSync(BACKUP_PATH, LEGACY_COMBINED_PATH); } catch {}
+    }
+    writeAtomic(target, content);
+    return { ok: true, path: target, bytes: content.length };
   } catch (err) {
     return { ok: false, error: err.message };
   }
 });
 
+// Returns the state blob plus, separately, the library — the caller reattaches them.
+// Falls back to the archived combined file if the state file is missing, so a machine
+// that never completed a new-format write still restores.
 ipcMain.handle('backup-load', async () => {
   try {
-    if (!fs.existsSync(BACKUP_PATH)) return { ok: true, content: null };
-    const content = fs.readFileSync(BACKUP_PATH, 'utf8');
-    return { ok: true, content, path: BACKUP_PATH, bytes: content.length };
+    let path_ = BACKUP_PATH;
+    if (!fs.existsSync(path_)) path_ = LEGACY_COMBINED_PATH;
+    if (!fs.existsSync(path_)) return { ok: true, content: null };
+    const content = fs.readFileSync(path_, 'utf8');
+    // ★ The library is only handed over when it is SMALL ENOUGH TO SURVIVE THE TRIP.
+    // Pushing a ~500MB string through IPC, then into IDB, then parsing it — all during
+    // startup — kills the renderer outright: verified, the app died before it could even
+    // serve a page. So its size is checked on disk first and the bytes are never read
+    // into memory unless they fit. The work history (~19MB) is what must never be lost,
+    // and it restores either way; the library file stays on disk for a deliberate restore.
+    let elements = null, elementsBytes = 0, elementsSkipped = false;
+    try {
+      if (fs.existsSync(ELEMENTS_BACKUP_PATH)) {
+        elementsBytes = fs.statSync(ELEMENTS_BACKUP_PATH).size;
+        if (elementsBytes <= ELEMENTS_RESTORE_MAX) elements = fs.readFileSync(ELEMENTS_BACKUP_PATH, 'utf8');
+        else elementsSkipped = true;
+      }
+    } catch (e) {
+      // A damaged library backup must not block restoring the work history.
+      console.warn('[Backup] elements file unreadable:', e.message);
+    }
+    return { ok: true, content, elements, elementsBytes, elementsSkipped,
+             elementsPath: ELEMENTS_BACKUP_PATH, path: path_, bytes: content.length };
   } catch (err) {
     return { ok: false, error: err.message };
   }

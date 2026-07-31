@@ -21,6 +21,9 @@ let pendingWrite: { name: string; value: StorageValue<unknown> } | null = null;
 // Longer debounce than IDB so we don't churn the disk during heavy editing.
 let backupTimer: ReturnType<typeof setTimeout> | null = null;
 const BACKUP_DEBOUNCE_MS = 5 * 60 * 1000;
+// Last library payload we successfully mirrored. The library is ~500MB, so re-writing it
+// every 5 minutes when nothing changed would grind the disk for no reason.
+let lastBackedUpElements: string | null = null;
 
 // ─── Element library: its own IndexedDB key ───
 // elementAssets carry FULL-RESOLUTION base64 images (~12MB each; measured 368MB for
@@ -111,7 +114,27 @@ const idbPersistStorage: PersistStorage<unknown> = {
           // Seed IDB so subsequent reads hit the fast path and the next setItem
           // doesn't race the restored state.
           await set(name, result.content);
-          console.log(`[Backup] Restored ${(result.bytes / 1024).toFixed(1)}KB from ${result.path}`);
+          console.log(`[Backup] Restored ${(result.bytes / 1048576).toFixed(1)}MB from ${result.path}`);
+          // The library lives in its own file since the split (see main.cjs). Seed it
+          // straight into its own IDB key as the RAW STRING — do not parse it here and do
+          // not thread it through `state`. It is ~500MB; parsing it into objects and then
+          // handing those to the persist merge would hold three copies at once and can
+          // OOM the renderer. loadElementAssets reads that key moments later and parses it
+          // exactly once, which is what every normal launch already does.
+          if (result.elements) {
+            try {
+              await set(ELEMENTS_KEY, result.elements);
+              console.log(`[Backup] Library restored (${(result.elements.length / 1048576).toFixed(1)}MB) → ${ELEMENTS_KEY}`);
+            } catch (e) {
+              // The work history still restores — that is the part that can't be remade.
+              console.warn('[Backup] library restore failed, work history unaffected:', e);
+            }
+          } else if (result.elementsSkipped) {
+            console.warn(
+              `[Backup] Library NOT auto-restored — ${(result.elementsBytes / 1048576).toFixed(0)}MB exceeds the safe ` +
+              `startup limit and would crash the renderer. The work history is restored. ` +
+              `The library backup is intact at: ${result.elementsPath}`);
+          }
           return parse(result.content);
         }
       }
@@ -136,11 +159,6 @@ const idbPersistStorage: PersistStorage<unknown> = {
     backupTimer = setTimeout(() => {
       const api = (window as any).electronAPI;
       if (!api?.backupSave) return;
-      // Re-attach elementAssets so the disaster-recovery mirror still covers the
-      // library after it moved out of partialize. Keeping them nested under
-      // `state` means the on-disk backup format is IDENTICAL to before, so old
-      // backups restore unchanged and the restore path needs no versioning.
-      //
       // ★ SAFETY: never write a backup before the library has loaded. Backing up an
       // empty/half-loaded elementAssets would OVERWRITE a good backup with one that
       // has no library — destroying the very safety net this mirror exists to be.
@@ -152,16 +170,44 @@ const idbPersistStorage: PersistStorage<unknown> = {
         console.warn('[Backup] skipped — element library not hydrated yet (keeping previous backup)');
         return;
       }
-      const withElements = {
-        ...(value as any),
-        state: { ...((value as any)?.state || {}), elementAssets: st.elementAssets },
-      };
-      api.backupSave(JSON.stringify(withElements))
-        .then((r: any) => {
-          if (r?.ok) console.log(`[Backup] Saved ${(r.bytes / 1024 / 1024).toFixed(2)}MB → ${r.path}`);
-          else console.warn('[Backup] Save failed:', r?.error);
-        })
-        .catch((err: any) => console.warn('[Backup] Save error:', err?.message || err));
+
+      // ── The work history goes first, and ALONE ──────────────────────────────────
+      // This used to be one combined string (state + library). Once the library passed
+      // ~500MB the combined JSON exceeded V8's 512MB single-string ceiling and
+      // JSON.stringify threw RangeError — synchronously inside this timer, so the
+      // .catch below never ran and backups silently stopped for weeks. Measured:
+      // 19.4MB + 505.9MB = 525.3MB against a 512MB limit.
+      // Separated, the irreplaceable part is ~19MB and cannot be dragged over the
+      // cliff by the library growing.
+      try {
+        api.backupSave(JSON.stringify(value), 'state')
+          .then((r: any) => {
+            if (r?.ok) console.log(`[Backup] state ${(r.bytes / 1048576).toFixed(2)}MB → ${r.path}`);
+            else console.warn('[Backup] state save failed:', r?.error);
+          })
+          .catch((err: any) => console.warn('[Backup] state save error:', err?.message || err));
+      } catch (err: any) {
+        // try/catch because stringify throws SYNCHRONOUSLY — a promise .catch cannot see it.
+        console.error('[Backup] state serialize failed:', err?.message || err);
+      }
+
+      // ── The library second, best-effort ────────────────────────────────────────
+      // Written only when it actually changed (it is the expensive one), and skipped
+      // rather than allowed to take the state backup down with it.
+      try {
+        const els = st.elementAssets || [];
+        const serialized = JSON.stringify(els);
+        if (serialized !== lastBackedUpElements) {
+          api.backupSave(serialized, 'elements')
+            .then((r: any) => {
+              if (r?.ok) { lastBackedUpElements = serialized; console.log(`[Backup] elements ${(r.bytes / 1048576).toFixed(2)}MB → ${r.path}`); }
+              else console.warn('[Backup] elements save failed:', r?.error);
+            })
+            .catch((err: any) => console.warn('[Backup] elements save error:', err?.message || err));
+        }
+      } catch (err: any) {
+        console.error('[Backup] elements serialize failed (state backup is unaffected):', err?.message || err);
+      }
     }, BACKUP_DEBOUNCE_MS);
   },
   removeItem: async (name: string): Promise<void> => {

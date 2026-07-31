@@ -248,7 +248,16 @@ function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
   onNewGroup: () => void;
   onClose: () => void;
 }) {
-  const W = 210, H = Math.min(320, 108 + groups.length * 30);
+  const [q, setQ] = useState('');
+  const searchable = groups.length > 7;   // same threshold as the gallery filters
+  const shown = q.trim() ? groups.filter(g => g.name.toLowerCase().includes(q.trim().toLowerCase())) : groups;
+  // Height estimate drives the edge-flip only; keep it in step with the real layout so the
+  // menu doesn't get pushed off-screen. header 28 + new-group 36 + rule 9 + label 18
+  // + list (capped 190) + search 30? + ungroup 45?
+  const W = 220;
+  const LIST_MAX = 190;
+  const H = 91 + Math.min(LIST_MAX, Math.max(28, groups.length * 28))
+    + (searchable ? 30 : 0) + (project.groupId ? 45 : 0);
   const left = Math.min(at.x, window.innerWidth - W - 8);
   const top = Math.min(at.y, window.innerHeight - H - 8);
   return createPortal(
@@ -268,9 +277,19 @@ function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
         </button>
         <div className="border-t border-gray-100 my-1" />
         <div className="px-3 pb-1 text-[10px] text-gray-400">그룹으로 이동</div>
-        <div className="max-h-[190px] overflow-y-auto">
+        {searchable && (
+          <div className="px-2 pb-1">
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="그룹 검색…"
+              onClick={(e) => e.stopPropagation()}
+              className="w-full px-2 py-1 text-[12px] bg-gray-100 rounded-md outline-none placeholder-gray-400" />
+          </div>
+        )}
+        {/* Capped + scrollable: the group list is unbounded, and a menu that grows with it
+            runs off the bottom of the screen the moment you have a dozen folders. */}
+        <div className="overflow-y-auto" style={{ maxHeight: LIST_MAX }}>
           {groups.length === 0 && <div className="px-3 py-1.5 text-[12px] text-gray-300">만들어진 그룹이 없습니다</div>}
-          {groups.map(g => (
+          {groups.length > 0 && shown.length === 0 && <div className="px-3 py-1.5 text-[12px] text-gray-300">일치하는 그룹 없음</div>}
+          {shown.map(g => (
             <button key={g.id} onClick={() => { onPick(g.id); onClose(); }} disabled={project.groupId === g.id}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12.5px] text-left transition-colors ${
                 project.groupId === g.id ? 'text-indigo-600 font-medium bg-indigo-50/60 cursor-default' : 'text-gray-700 hover:bg-gray-100'}`}>
