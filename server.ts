@@ -228,6 +228,17 @@ async function startServer() {
   // Cleanup files older than 30 days — mtime-based. Every cache READ/dedup-hit
   // refreshes mtime (touchCache below), so actively reused references never
   // age out; only genuinely unused files get pruned here.
+  //
+  // ★ "Reused" is not the same as "still referenced by the history", and for two months
+  // this pruner could not tell the difference. Looking at an old message shows the 80px
+  // thumbnail stored ON the message — media-cache is never read, so nothing is touched,
+  // so the original ages out while the message that needs it sits right there.
+  // Measured on the real library before the fix (2026-07-31): 199 files / 1.76GB, of which
+  // 162 were referenced by NOTHING, while 68 of the 105 originals the message history does
+  // reference had already been deleted. It was keeping the junk and dropping the record.
+  // The fix is /api/cache/keep below: the client tells us, once per launch, which ids the
+  // history still points at, and those get their clock reset. Unreferenced staging files
+  // still age out exactly as before.
   const CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
   try {
     const now = Date.now();
@@ -398,6 +409,28 @@ async function startServer() {
       }
       res.json({ count, bytes });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Keep-alive for everything the message history still points at. The client posts the
+  // full id set once per launch (see App.tsx), so an original stays as long as the app is
+  // opened at least once every 30 days — which is what "내 기록" should mean.
+  // Deliberately NOT a "protected" list on disk: mtime is already the pruner's clock, and
+  // a second source of truth would be one more thing to keep in sync with reality.
+  app.post('/api/cache/keep', (req, res) => {
+    try {
+      const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      let touched = 0, missing = 0;
+      for (const raw of ids) {
+        // Ids come from persisted state, so treat them as untrusted input: basename()
+        // keeps a crafted "../../" from reaching outside the cache directory.
+        const id = path.basename(String(raw || ''));
+        if (!id) continue;
+        const fp = path.join(CACHE_DIR, id);
+        if (fs.existsSync(fp)) { touchCache(fp); touched++; } else missing++;
+      }
+      console.log(`[Cache] keep-alive: ${touched} refreshed, ${missing} already gone`);
+      res.json({ ok: true, touched, missing });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
   // Wipe the ENTIRE media-cache. Wired to the sidebar cleanup button — explicit

@@ -252,7 +252,30 @@ const idbPersistStorage: PersistStorage<unknown> = {
     if (writeTimer) clearTimeout(writeTimer);
     writeTimer = setTimeout(() => {
       const w = pendingWrite; pendingWrite = null;
-      if (w) set(w.name, JSON.stringify(w.value));
+      if (!w) return;
+      // ★ try/catch, and it is not decoration. This is the SAME shape that killed the
+      // backup for a week: JSON.stringify throws RangeError SYNCHRONOUSLY once the string
+      // passes V8's 512MB ceiling, and a throw inside a setTimeout goes nowhere — no
+      // rejection to catch, no error boundary, nothing on screen. The write just stops
+      // happening while the app carries on looking perfectly healthy, and everything since
+      // is gone at the next launch.
+      // Measured on the real library (2026-07-31): 39.5KB per message → the ceiling lands
+      // at 13,581 messages, confirmed by binary search (20x fine at 389MB, 27x throws).
+      // At the current pace (503 in 3.5 months) that is ~7.7 years away — far, but the
+      // backup's version of this bug was also "years away" until the element library grew.
+      // So: never let it be silent. Tell the user, because the only real fix at that point
+      // is theirs — archive or delete old projects.
+      try {
+        set(w.name, JSON.stringify(w.value));
+      } catch (err: any) {
+        console.error('[Persist] state serialize failed — NOT SAVED:', err?.message || err);
+        window.dispatchEvent(new CustomEvent('seedance:toast', {
+          detail: {
+            ok: false,
+            msg: '기록이 너무 커져서 저장하지 못했습니다. 오래된 프로젝트를 정리해 주세요 — 지금 작업분이 다음 실행 때 사라질 수 있습니다.',
+          },
+        }));
+      }
     }, DEBOUNCE_MS);
 
     // Mirror to external backup file (long debounce — 5 min). Stringifies its own

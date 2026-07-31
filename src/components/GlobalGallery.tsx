@@ -80,8 +80,8 @@ type Opt = { value: string; count: number; label?: string };
 // count (18 projects reaches halfway down the screen, and it only gets worse), and it
 // can't show a per-option count. This one caps its height, scrolls, and filters by
 // typing once the list is long enough to warrant it.
-function FilterSelect({ label, value, options, onChange, searchAfter = 8 }: {
-  label: string; value: string; options: Opt[]; onChange: (v: string) => void; searchAfter?: number;
+function FilterSelect({ label, value, options, onChange, searchAfter = 8, hint }: {
+  label: string; value: string; options: Opt[]; onChange: (v: string) => void; searchAfter?: number; hint?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -104,7 +104,7 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8 }: {
   const current = text(options.find(o => o.value === value) ?? { value, count: 0 });
 
   return (
-    <div className="flex items-center gap-1.5 text-[12px]" ref={boxRef}>
+    <div className="flex items-center gap-1.5 text-[12px]" ref={boxRef} title={hint}>
       <span className="text-gray-500 shrink-0">{label}</span>
       <div className="relative">
         <button onClick={() => setOpen(v => !v)}
@@ -154,6 +154,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   const [modelFilter, setModelFilter] = useState(ALL);
   const [resFilter, setResFilter] = useState(ALL);
   const [ratioFilter, setRatioFilter] = useState(ALL);
+  const [durFilter, setDurFilter] = useState(ALL);
   const [period, setPeriod] = useState<PeriodId>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
@@ -198,6 +199,13 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     MODELS.find(m => m.id === id)?.name || id || '알 수 없음';
   // API stores '4k' lowercase; show it the way the Resolution dropdown does.
   const resLabel = (r?: string) => (r === '4k' ? '4K' : r);
+  // ★ This is the duration that was REQUESTED, not the length of the file that came back.
+  // Nothing else exists to filter on: the app never records the actual length (the task
+  // response's duration isn't kept), and reading it off the <video> would only work for
+  // clips that have already loaded — a filter that quietly skips everything you haven't
+  // scrolled past is worse than one with a clear meaning.
+  // So -1 stays '자동' rather than being resolved to a number it can't know.
+  const durKey = (d?: number) => (d == null ? undefined : d === -1 ? '자동' : `${d}초`);
 
   // Two kinds of filter, deliberately built differently:
   //   · FIXED vocabularies (resolution, ratio) → show the WHOLE ladder, in its canonical
@@ -248,8 +256,19 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       for (const k of kids) groups.push({ value: k.id, label: `${root.name} › ${k.name}`, count: byGroup.get(k.id) || 0 });
     }
     if (ungrouped) groups.push({ value: NO_GROUP, count: ungrouped });
+
+    // Duration is an OPEN set spanning three different models' ranges (2.0 is 4–15,
+    // 2.5 demo 4–30, 옴니 3–10), so a fixed ladder would either be mostly empty rows or
+    // wrong. Only what exists, sorted as numbers — '자동' last, since it isn't one.
+    const dm = tally(r => durKey(r.usedSettings?.duration));
+    const durKeys = [...dm.keys()].sort((a, b) => {
+      if (a === '자동') return 1;
+      if (b === '자동') return -1;
+      return parseInt(a) - parseInt(b);
+    });
     return {
       groups,
+      durations: withAll(dm, durKeys),
       projects: withAll(pm, [...pm.keys()]),
       models: withAll(mm, MODELS.map(m => m.name).filter(n => mm.has(n)).concat(extra(mm, MODELS.map(m => m.name)))),
       res: withAll(rm, [...RES_LADDER, ...extra(rm, RES_LADDER)]),
@@ -268,7 +287,8 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     if (!has(opts.models, modelFilter)) setModelFilter(ALL);
     if (!has(opts.res, resFilter)) setResFilter(ALL);
     if (!has(opts.ratios, ratioFilter)) setRatioFilter(ALL);
-  }, [opts, groupFilter, projectFilter, modelFilter, resFilter, ratioFilter]);
+    if (!has(opts.durations, durFilter)) setDurFilter(ALL);
+  }, [opts, groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter]);
 
   // In 직접 mode an empty box means "unbounded on that side", so you can ask for
   // "everything before the 5th" without inventing a start date.
@@ -293,14 +313,15 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       if (res !== resFilter) return false;
     }
     if (ratioFilter !== ALL && r.usedSettings?.ratio !== ratioFilter) return false;
+    if (durFilter !== ALL && durKey(r.usedSettings?.duration) !== durFilter) return false;
     if (r.timestamp < since || r.timestamp > until) return false;
     if (starredOnly && !r.starred) return false;
     return true;
-  }), [allRows, groupFilter, groupMatch, projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
+  }), [allRows, groupFilter, groupMatch, projectFilter, modelFilter, resFilter, ratioFilter, durFilter, since, until, starredOnly]);
 
   // Any filter change resets the window — otherwise you narrow to 3 results and still
   // carry a "shown = 96" from before, or worse, land past the end of a shorter list.
-  useEffect(() => { setShown(PAGE_SIZE); }, [groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
+  useEffect(() => { setShown(PAGE_SIZE); }, [groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter, since, until, starredOnly]);
 
   const visible = rows.slice(0, shown);
   const hasMore = rows.length > shown;
@@ -318,10 +339,10 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   }, [hasMore, rows.length]);
 
   const anyFilter = groupFilter !== ALL || projectFilter !== ALL || modelFilter !== ALL || resFilter !== ALL
-    || ratioFilter !== ALL || period !== 'all' || starredOnly;
+    || ratioFilter !== ALL || durFilter !== ALL || period !== 'all' || starredOnly;
   const resetFilters = () => {
     setGroupFilter(ALL); setProjectFilter(ALL); setModelFilter(ALL); setResFilter(ALL);
-    setRatioFilter(ALL); setPeriod('all'); setFromDate(''); setToDate(''); setStarredOnly(false);
+    setRatioFilter(ALL); setDurFilter(ALL); setPeriod('all'); setFromDate(''); setToDate(''); setStarredOnly(false);
   };
 
   const goToProject = (r: Row) => {
@@ -372,6 +393,8 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           <FilterSelect label="모델" value={modelFilter} options={opts.models} onChange={setModelFilter} />
           <FilterSelect label="해상도" value={resFilter} options={opts.res} onChange={setResFilter} />
           <FilterSelect label="비율" value={ratioFilter} options={opts.ratios} onChange={setRatioFilter} />
+          <FilterSelect label="길이" value={durFilter} options={opts.durations} onChange={setDurFilter}
+            hint="생성할 때 지정한 길이입니다. Auto로 만든 컷은 실제 길이를 앱이 알 수 없어 '자동'으로 따로 묶입니다." />
           <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
             {PERIODS.map(p => (
               <button key={p.id} onClick={() => setPeriod(p.id)}

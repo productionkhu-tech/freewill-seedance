@@ -37,6 +37,27 @@ export default function App() {
   }, [_hasHydrated, currentProjectId, openProjectNewestDone]);
 
 
+  // Tell the server which reference originals the history still points at, so its 30-day
+  // pruner stops deleting them. Once per launch, after hydration — the id set only grows
+  // during a session, and anything added now is fresh by definition, so the next launch
+  // covers it.
+  // Why this is needed at all: viewing an old message reads the thumbnail stored ON the
+  // message, never media-cache, so "last used" was measuring the wrong thing entirely.
+  // Fire-and-forget: this is a maintenance nicety, and a failure must never surface.
+  useEffect(() => {
+    if (!_hasHydrated) return;
+    const ids = new Set<string>();
+    for (const p of useAppStore.getState().projects) {
+      for (const a of p.assets || []) if (a.cacheId) ids.add(a.cacheId);
+      for (const m of p.messages) for (const a of m.usedAssets || []) if (a.cacheId) ids.add(a.cacheId);
+    }
+    if (!ids.size) return;
+    fetch('/api/cache/keep', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [...ids] }),
+    }).catch(() => { /* 캐시 수명 연장 실패는 조용히 넘어간다 */ });
+  }, [_hasHydrated]);
+
   // Single interval polls ALL active tasks every 10 seconds — no setTimeout chains
   useEffect(() => {
     if (!_hasHydrated) return;
@@ -135,7 +156,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.7.3119
+        v26.7.3120
       </div>
     </div>
   );
