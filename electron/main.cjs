@@ -271,6 +271,9 @@ const LEGACY_COMBINED_PATH = path.join(BACKUP_DIR, 'seedance-backup-combined-leg
 // app could serve its first page. Restoring the work history must never depend on the
 // library fitting, so anything above this is left on disk instead of attempted.
 const ELEMENTS_RESTORE_MAX = 150 * 1024 * 1024;
+// Same ceiling for the state file. Normally ~19MB so it never applies — it exists for the
+// pre-split legacy fallback, which bundles the library and can be half a gigabyte.
+const STATE_RESTORE_MAX = 150 * 1024 * 1024;
 
 function writeAtomic(target, content) {
   if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -303,6 +306,16 @@ ipcMain.handle('backup-load', async () => {
     let path_ = BACKUP_PATH;
     if (!fs.existsSync(path_)) path_ = LEGACY_COMBINED_PATH;
     if (!fs.existsSync(path_)) return { ok: true, content: null };
+    // ★ The legacy fallback needs the same size guard as the library.
+    // A pre-split backup is state AND library in one file (~509MB here). Reading that
+    // whole thing and handing it to the renderer at startup is precisely what crashed
+    // the app before — the fact that it holds the work history doesn't make it safe to
+    // load. Better to boot empty and say so than to die on launch every time.
+    const stateSize = fs.statSync(path_).size;
+    if (stateSize > STATE_RESTORE_MAX) {
+      console.warn(`[Backup] ${path_} is ${(stateSize / 1048576).toFixed(0)}MB — too large to load safely; skipping restore.`);
+      return { ok: true, content: null, stateSkipped: true, stateBytes: stateSize, path: path_ };
+    }
     const content = fs.readFileSync(path_, 'utf8');
     // ★ The library is only handed over when it is SMALL ENOUGH TO SURVIVE THE TRIP.
     // Pushing a ~500MB string through IPC, then into IDB, then parsing it — all during

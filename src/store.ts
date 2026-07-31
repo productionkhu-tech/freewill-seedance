@@ -47,7 +47,27 @@ function scheduleElementsSave(assets: ElementAsset[]) {
   if (elementsTimer) clearTimeout(elementsTimer);
   elementsTimer = setTimeout(() => {
     const a = pendingElements; pendingElements = null;
-    if (a) void set(ELEMENTS_KEY, JSON.stringify(a));
+    if (!a) return;
+    // ★ try/catch, not .catch(): JSON.stringify throws SYNCHRONOUSLY. This is the exact
+    // shape of the bug that killed the Documents backup for a week — a RangeError inside
+    // a timer, invisible to any promise handler, and saving just stopped.
+    // The library is one string in IDB, so it dies at V8's 512MB ceiling. Measured
+    // 2026-07-31: 505.9MB, i.e. 98.8% of the limit. When it crosses, this is where it
+    // breaks, and it must break LOUDLY.
+    let payload: string;
+    try {
+      payload = JSON.stringify(a);
+    } catch (err: any) {
+      console.error('[Elements] SAVE FAILED — the library can no longer be serialised ' +
+        '(V8 caps a single string at 512MB). Nothing new will persist until the library ' +
+        'is split across multiple keys. Assets already on disk are untouched.', err);
+      window.dispatchEvent(new CustomEvent('seedance:toast', { detail: {
+        msg: '엘리먼트 라이브러리가 너무 커서 저장하지 못했습니다. 새로 추가한 어셋이 보존되지 않습니다 — 개발자에게 알려주세요.',
+        ok: false,
+      }}));
+      return;
+    }
+    void set(ELEMENTS_KEY, payload).catch(err => console.error('[Elements] IDB write failed:', err));
   }, DEBOUNCE_MS);
 }
 
@@ -56,7 +76,15 @@ export function flushElements(): Promise<void> {
   if (elementsTimer) { clearTimeout(elementsTimer); elementsTimer = null; }
   if (!pendingElements) return Promise.resolve();
   const a = pendingElements; pendingElements = null;
-  return set(ELEMENTS_KEY, JSON.stringify(a));
+  // Same synchronous-throw hazard as scheduleElementsSave: JSON.stringify blows up BEFORE
+  // any promise exists, so a .catch on the returned promise would never see it — and this
+  // runs on quit, where an uncaught throw could take the shutdown path with it.
+  try {
+    return set(ELEMENTS_KEY, JSON.stringify(a));
+  } catch (err) {
+    console.error('[Elements] flush failed — library too large to serialise:', err);
+    return Promise.resolve();
+  }
 }
 
 // Load the library, migrating from the legacy in-blob copy on first run after update.

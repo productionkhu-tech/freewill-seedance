@@ -1,5 +1,14 @@
 appId: com.freewill.seedance
 productName: Freewill Seedance
+# ★ The executable FILENAME is pinned to the old one on purpose. Do not "tidy" it.
+# productName drives the exe name by default, and renaming the exe silently breaks every
+# shortcut the installer does not know about — above all TASKBAR PINS, which users create
+# themselves and NSIS never tracks. Verified: after a rename the pinned .lnk still pointed
+# at "Freewill Seedance 2.0.exe" and its target no longer existed.
+# Splitting the two keeps every user-made shortcut working while the name people actually
+# see — window title, tray, Start Menu, uninstall entry — drops the "2.0".
+# Nobody reads the exe filename; everybody notices a dead taskbar icon.
+executableName: Freewill Seedance 2.0
 # ★ appId is FROZEN. electron-builder derives the NSIS upgrade GUID from it
 #   (UUID.v5(appId) — verified against the live registry key 692f1479-3e76-5b20-9562-3e01b3da4a16).
 #   Change appId and every installed copy becomes a SEPARATE app: no in-place upgrade,
