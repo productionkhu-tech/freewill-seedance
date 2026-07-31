@@ -625,6 +625,21 @@ export async function downloadViaProxy(remoteUrl: string, filename: string): Pro
   return '';
 }
 
+// Clip timestamps. Two forms on purpose:
+//   formatStamp  → "07/30 22:08"          — the badge on a clip; must stay narrow
+//   formatStampFull → "2026-07-30 22:08:41" — tooltips / detail, where the year and
+//                                             seconds are what you came for
+// Both are local time and zero-padded so they line up in a column (tabular-nums).
+const pad2 = (n: number) => String(n).padStart(2, '0');
+export function formatStamp(ms: number): string {
+  const d = new Date(ms);
+  return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+export function formatStampFull(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
 export function buildDownloadFilename(taskId: string, ext: string = '.mp4', prefix: string = 'dreamina'): string {
   const now = new Date();
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;

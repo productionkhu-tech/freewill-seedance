@@ -1,9 +1,129 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, AlertTriangle } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useAppStore } from '../store';
+import { useAppStore, type Project } from '../store';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
+import { GlobalGallery } from './GlobalGallery';
+
+// ─── Project icon ────────────────────────────────────────────────────────────
+// Emoji are just characters — the OS font draws them (Apple emoji on macOS, Segoe UI
+// Emoji on Windows), so "기본 이모티콘" costs literally nothing to ship and always
+// matches the platform the user is on.
+const ICON_EMOJIS = [
+  '🎬', '🎥', '📹', '🎞️', '🍿', '✨', '🔥', '⭐',
+  '💡', '🎨', '🖌️', '🧪', '🚀', '🛠️', '📦', '🗂️',
+  '📌', '🏷️', '🎯', '✅', '⏳', '🐣', '🐳', '🦊',
+  '🐼', '🌊', '🌋', '🌙', '☀️', '🌈', '🍀', '🌸',
+  '🍎', '🍕', '☕', '🎧', '🎸', '🕹️', '💎', '👑',
+];
+
+// Downscale an uploaded image to a 64px square PNG data URL.
+// 64px because the icon renders at 16px (≈32px on a 2x display) — anything larger is
+// bytes that live in the persisted blob forever and never reach a pixel. Center-crop
+// rather than letterbox: the slot is square, and fitting a wide logo into it would
+// shrink the logo to an unreadable band.
+function fileToIconDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const S = 64;
+      const canvas = document.createElement('canvas');
+      canvas.width = S; canvas.height = S;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return reject(new Error('canvas 사용 불가'));
+      const side = Math.min(img.width, img.height);
+      ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, S, S);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('이미지를 읽을 수 없습니다')); };
+    img.src = url;
+  });
+}
+
+// The icon itself: uploaded PNG › emoji › default chat glyph.
+function ProjectIcon({ icon, size = 16 }: { icon?: string; size?: number }) {
+  if (icon?.startsWith('data:')) {
+    return <img src={icon} alt="" className="rounded-[4px] object-cover shrink-0" style={{ width: size, height: size }} />;
+  }
+  if (icon) {
+    return <span className="shrink-0 leading-none text-center" style={{ fontSize: size - 1, width: size }}>{icon}</span>;
+  }
+  return <MessageSquare size={size} className="shrink-0 opacity-70" />;
+}
+
+// Emoji/PNG picker, portaled and anchored to the icon that opened it. Portaled for the
+// same reason as the delete modal: the sidebar is overflow-hidden and width-animated,
+// which clips (and can re-anchor) fixed children.
+function IconPicker({ anchor, current, onPick, onClose }: {
+  anchor: DOMRect; current?: string;
+  onPick: (icon: string | undefined) => void;
+  onClose: () => void;
+}) {
+  const [err, setErr] = useState<string | null>(null);
+  const PANEL_W = 268, PANEL_H = 250;
+  // Keep the panel on screen when the row is near the bottom / right edge.
+  const left = Math.min(anchor.left, window.innerWidth - PANEL_W - 8);
+  const top = anchor.bottom + PANEL_H > window.innerHeight
+    ? Math.max(8, anchor.top - PANEL_H - 6)
+    : anchor.bottom + 6;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[110]" onClick={onClose}>
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96, y: -4 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        transition={{ duration: 0.12, ease: 'easeOut' }}
+        onClick={(e) => e.stopPropagation()}
+        style={{ left, top, width: PANEL_W }}
+        className="absolute bg-white rounded-xl shadow-2xl border border-gray-200 p-2.5 text-gray-900"
+      >
+        <div className="grid grid-cols-8 gap-0.5 max-h-[152px] overflow-y-auto">
+          {ICON_EMOJIS.map(e => (
+            <button key={e} onClick={() => { onPick(e); onClose(); }}
+              className={`h-[30px] rounded-md text-[17px] leading-none transition-colors ${current === e ? 'bg-indigo-100 ring-1 ring-indigo-300' : 'hover:bg-gray-100'}`}>
+              {e}
+            </button>
+          ))}
+        </div>
+        {err && <p className="text-[11px] text-red-500 mt-1.5 px-0.5">{err}</p>}
+        <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-gray-100">
+          <label className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11.5px] font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer transition-colors">
+            <Upload size={12} /> PNG 업로드
+            <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+              onChange={async (e) => {
+                const f = e.target.files?.[0]; e.target.value = '';
+                if (!f) return;
+                try { onPick(await fileToIconDataUrl(f)); onClose(); }
+                catch (x: any) { setErr(x?.message || '변환 실패'); }
+              }} />
+          </label>
+          <button onClick={() => { onPick(undefined); onClose(); }}
+            title="기본 아이콘으로"
+            className="flex items-center gap-1.5 px-2 py-1.5 text-[11.5px] font-medium text-gray-500 hover:text-gray-800 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
+            <RotateCcw size={12} /> 기본
+          </button>
+        </div>
+      </motion.div>
+    </div>,
+    document.body
+  );
+}
+
+// Has this project finished something the user hasn't looked at?
+// The open project never badges — you are, by definition, looking at it (App.tsx keeps
+// its lastSeenAt current), so this is purely about the OTHER projects in the list.
+function unseenDoneCount(p: Project, isCurrent: boolean): number {
+  if (isCurrent) return 0;
+  const seen = p.lastSeenAt || 0;
+  let n = 0;
+  for (const m of p.messages) {
+    if (m.status === 'succeeded' && (m.endTime || m.timestamp) > seen) n++;
+  }
+  return n;
+}
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return '...';
@@ -14,7 +134,10 @@ function formatBytes(bytes: number | null): string {
 }
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
-  const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, autoDownload, setAutoDownload } = useAppStore();
+  const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon, autoDownload, setAutoDownload } = useAppStore();
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  // Which project's icon picker is open, plus where to anchor it.
+  const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -75,6 +198,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     if (!api?.pickDownloadDir) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
     const r = await api.pickDownloadDir();
     if (r?.ok && r.dir) { setDownloadDir(r.dir); setIsDefaultDir(false); }
+  };
+
+  // Jump straight to the folder downloads are landing in. No argument — main resolves
+  // the session folder itself, so this can't point somewhere else than where files go.
+  const openDownloadFolder = async () => {
+    const api = (window as any).electronAPI;
+    if (!api?.openFolder) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
+    const r = await api.openFolder();
+    if (!r?.ok) alert(r?.reason === 'missing' ? `폴더를 찾을 수 없습니다.\n${r.path || downloadDir}` : '폴더를 열지 못했습니다.');
   };
 
   const totalCacheBytes = (diskCacheSize ?? 0) + memCacheBytes;
@@ -150,11 +282,19 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         <button onClick={createProject} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="New Project">
           <Plus size={18} />
         </button>
+        <button onClick={() => setGalleryOpen(true)} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="전체 갤러리">
+          <LayoutGrid size={18} />
+        </button>
         <div className="flex-1" />
         <button onClick={pickDownloadFolder}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
           title={`다운로드 폴더 선택${isDefaultDir ? ' (현재: 기본 Downloads)' : `\n현재: ${downloadDir}`}`}>
           <FolderDown size={18} />
+        </button>
+        <button onClick={openDownloadFolder}
+          className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
+          title={`다운로드 폴더 열기\n${downloadDir}`}>
+          <FolderOpen size={18} />
         </button>
         <button onClick={openDashboard}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
@@ -189,6 +329,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             className="w-full bg-[#2a2a2d] border border-transparent focus:border-[#0071e3] rounded-[8px] pl-9 pr-3 py-1.5 text-[13px] text-white placeholder-white/40 outline-none transition-colors"
           />
         </div>
+        {/* Cross-project gallery. Sits under the search box rather than in the footer:
+            it answers the same question the search box does ("where is that thing"),
+            just for clips instead of projects. */}
+        <button onClick={() => setGalleryOpen(true)}
+          className="w-full flex items-center gap-2 px-3 py-1.5 bg-[#2a2a2d]/70 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12.5px]"
+          title="모든 프로젝트의 영상을 한 곳에서 (모델·해상도·비율·기간 필터)">
+          <LayoutGrid size={14} className="shrink-0" />
+          <span className="font-medium">전체 갤러리</span>
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar">
         {filteredProjects.map((project) => (
@@ -202,11 +351,35 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             onDoubleClick={() => { setEditingId(project.id); setEditName(project.name); }}
           >
             <div className="flex items-center gap-2 overflow-hidden flex-1">
-              {project.messages.some(m => m.status === 'running' || m.status === 'queued') ? (
-                <Loader2 size={16} className="shrink-0 text-[#0071e3] animate-spin" />
-              ) : (
-                <MessageSquare size={16} className="shrink-0 opacity-70" />
-              )}
+              {/* Icon slot. The icon itself is always the project's own — the run/done
+                  state rides as a small corner overlay instead of replacing it, so
+                  picking a 🎬 doesn't mean losing it every time you hit generate. */}
+              {(() => {
+                const running = project.messages.some(m => m.status === 'running' || m.status === 'queued');
+                const unseen = unseenDoneCount(project, currentProjectId === project.id);
+                return (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIconPicker({ id: project.id, rect: (e.currentTarget as HTMLElement).getBoundingClientRect() });
+                    }}
+                    title="아이콘 변경"
+                    className="relative shrink-0 w-[18px] h-[18px] flex items-center justify-center rounded hover:bg-white/10 transition-colors"
+                  >
+                    <ProjectIcon icon={project.icon} />
+                    {running && (
+                      <Loader2 size={10} className="absolute -bottom-0.5 -right-1 text-[#0071e3] animate-spin bg-[#1d1d1f] rounded-full" />
+                    )}
+                    {!running && unseen > 0 && (
+                      // Unread-style dot: this project finished something while you were
+                      // elsewhere. Clicking in clears it (App marks the open project seen).
+                      <span className="absolute -bottom-0.5 -right-1 min-w-[13px] h-[13px] px-[3px] rounded-full bg-[#30d158] text-[#0b2c16] text-[8px] font-bold leading-[13px] text-center ring-2 ring-[#1d1d1f]">
+                        {unseen > 9 ? '9+' : unseen}
+                      </span>
+                    )}
+                  </button>
+                );
+              })()}
               {editingId === project.id ? (
                 <input
                   ref={inputRef}
@@ -251,6 +424,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             title="다운로드 폴더 선택 (앱 재시작 시 기본 폴더로 초기화)">
             폴더 선택
           </button>
+          {/* Open the folder itself — not "reveal a file in it". Different IPC for that
+              reason: showItemInFolder on a directory opens its PARENT. */}
+          <button onClick={openDownloadFolder}
+            className="w-full flex items-center justify-center gap-1.5 px-2 py-1 bg-[#3a3a3d] hover:bg-[#4a4a4d] text-white/80 hover:text-white rounded-[6px] text-[11px] font-medium transition-colors"
+            title={`탐색기에서 열기\n${downloadDir}`}>
+            <FolderOpen size={12} /> 폴더 열기
+          </button>
           {/* Auto-download: when on, every video auto-saves to the folder above
               on completion. Manual "다시 다운로드" marker is unaffected. */}
           <label className="flex items-center gap-2 pt-0.5 cursor-pointer select-none"
@@ -279,6 +459,24 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       </div>
       </>
     )}
+
+    {iconPicker && (
+      <IconPicker
+        anchor={iconPicker.rect}
+        current={projects.find(p => p.id === iconPicker.id)?.icon}
+        onPick={(icon) => setProjectIcon(iconPicker.id, icon)}
+        onClose={() => setIconPicker(null)}
+      />
+    )}
+
+    {/* ★ Deliberately NOT wrapped in <AnimatePresence>.
+        GlobalGallery renders through a portal, and an AnimatePresence sitting OUTSIDE a
+        portal never receives the exit completion from inside it — the overlay stayed
+        mounted at opacity:0, invisible but still `fixed inset-0`, swallowing every click
+        in the app. (The delete modal below is fine because it portals FIRST and puts
+        AnimatePresence inside.)
+        Mounting conditionally also means the all-projects scan doesn't run while closed. */}
+    {galleryOpen && <GlobalGallery onClose={() => setGalleryOpen(false)} />}
 
     {/* Delete confirmation — irreversible, so it states exactly what is lost.
         Rendered through a portal: the sidebar wrapper is overflow-hidden AND runs a

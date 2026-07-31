@@ -15,6 +15,27 @@ export default function App() {
     if (_hasHydrated && projects.length === 0) createProject();
   }, [_hasHydrated, projects.length, createProject]);
 
+  // The sidebar badges projects that finished something you haven't looked at. The open
+  // project is by definition looked at, so clear it — both when you switch in, and again
+  // when a clip finishes while you are sitting in it.
+  // Keyed on the newest completion time (not a count): a deletion could lower a count and
+  // wrongly re-badge, and re-running with an unchanged timestamp costs nothing because
+  // markProjectSeen no-ops when there is nothing newer to record.
+  const openProjectNewestDone = useAppStore((s) => {
+    const p = s.projects.find((x) => x.id === s.currentProjectId);
+    if (!p) return 0;
+    let newest = 0;
+    for (const m of p.messages) {
+      if (m.status !== 'succeeded') continue;
+      const t = m.endTime || m.timestamp;
+      if (t > newest) newest = t;
+    }
+    return newest;
+  });
+  useEffect(() => {
+    if (_hasHydrated && currentProjectId) useAppStore.getState().markProjectSeen(currentProjectId);
+  }, [_hasHydrated, currentProjectId, openProjectNewestDone]);
+
 
   // Single interval polls ALL active tasks every 10 seconds — no setTimeout chains
   useEffect(() => {
@@ -114,7 +135,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.7.3002
+        v26.7.3101
       </div>
     </div>
   );

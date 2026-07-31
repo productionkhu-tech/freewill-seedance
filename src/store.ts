@@ -295,6 +295,14 @@ export interface Project {
   assets: Asset[];
   updatedAt: number;
   draftPrompt?: string; // saved prompt HTML so users can switch projects without losing in-progress text
+  icon?: string; // sidebar icon: an emoji character, OR a data: URL for an uploaded 64px PNG.
+                 // ONE field, not two — `startsWith('data:')` tells them apart, and two
+                 // fields would permit a meaningless both-set state. Undefined = default icon.
+  lastSeenAt?: number; // completion timestamp of the newest finished clip the user has
+                       // actually looked at. Drives the sidebar "done" badge: anything
+                       // that finished after this is unseen. Stores the CLIP's time (not
+                       // Date.now()) so the comparison is idempotent — re-marking while
+                       // nothing new finished is a no-op and never writes.
 }
 
 interface AppState {
@@ -325,6 +333,8 @@ interface AppState {
   setCurrentProjectId: (id: string) => void;
   createProject: () => void;
   renameProject: (id: string, name: string) => void;
+  setProjectIcon: (id: string, icon: string | undefined) => void;
+  markProjectSeen: (projectId: string) => void;
   deleteProject: (id: string) => void;
   updateProjectSettings: (projectId: string, settings: Partial<GenerationSettings>) => void;
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
@@ -573,6 +583,35 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           projects: state.projects.map((p) =>
             p.id === id ? { ...p, name, updatedAt: Date.now() } : p
+          ),
+        }));
+      },
+      setProjectIcon: (id, icon) => {
+        set((state) => ({
+          projects: state.projects.map((p) =>
+            // updatedAt is deliberately NOT bumped: the icon is decoration, and the
+            // project list is ordered/《recently touched》 by real work, not by cosmetics.
+            p.id === id ? { ...p, icon } : p
+          ),
+        }));
+      },
+      // Mark every finished clip in this project as seen (clears the sidebar badge).
+      // ★ The guard runs BEFORE set(): this is called on every render pass that touches
+      // the open project, and an unconditional set() would hand every no-selector
+      // subscriber a new state object — a re-render storm for a value that didn't change.
+      markProjectSeen: (projectId) => {
+        const p = get().projects.find((x) => x.id === projectId);
+        if (!p) return;
+        let newest = 0;
+        for (const m of p.messages) {
+          if (m.status !== 'succeeded') continue;
+          const t = m.endTime || m.timestamp;
+          if (t > newest) newest = t;
+        }
+        if (newest === 0 || (p.lastSeenAt || 0) >= newest) return; // nothing new — no write
+        set((state) => ({
+          projects: state.projects.map((x) =>
+            x.id === projectId ? { ...x, lastSeenAt: newest } : x
           ),
         }));
       },

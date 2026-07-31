@@ -5,7 +5,7 @@ import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as I
 import { getAssetNames } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
-import { copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl } from '../lib/utils';
+import { formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl } from '../lib/utils';
 
 // Resolve one element-library image to a fresh R2 URL for the API payload. Tries
 // the opportunistic media-cache id first; on miss (30-day LRU eviction) rebuilds
@@ -71,7 +71,9 @@ const CAN_PLAY_HEVC = (() => {
   } catch { return false; }
 })();
 
-function VideoPlayer({ src, className, eager, is4k }: { src: string; className?: string; eager?: boolean; is4k?: boolean }) {
+// Exported for the all-projects gallery (GlobalGallery). Lazy-mounts on intersection,
+// so a grid of hundreds of clips only ever fetches the handful actually on screen.
+export function VideoPlayer({ src, className, eager, is4k }: { src: string; className?: string; eager?: boolean; is4k?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(eager === true);
@@ -328,6 +330,73 @@ const settingsTagList = (us: any): string[] => {
   return [modelName, us.mode, res, us.ratio, us.duration === -1 ? 'Auto' : `${us.duration}s`];
 };
 
+// filename → messageId, for downloads whose save path only arrives with the Electron
+// 'download-done' event. MODULE scope, not a component ref: the all-projects gallery can
+// start a download for a message in a project ChatArea doesn't have open, and both paths
+// must feed the same listener.
+export const pendingReveal = new Map<string, string>();
+
+// Date+time stamp pinned to a clip's top-left corner. The card already carries WHAT was
+// generated (model / mode / resolution chips); this answers WHEN, which is how people
+// actually tell two takes of the same prompt apart.
+// pointer-events-none so it never steals the hover that starts playback.
+export function ClipStamp({ ms }: { ms: number }) {
+  return (
+    <div
+      title={`생성 시각 ${formatStampFull(ms)}`}
+      className="absolute top-2 left-2 z-10 pointer-events-none select-none px-1.5 py-[3px] rounded-md bg-black/55 backdrop-blur-[2px] text-white/90 text-[10px] font-mono tabular-nums leading-none tracking-tight"
+    >
+      {formatStamp(ms)}
+    </div>
+  );
+}
+
+// Download a clip and mark its message so the button flips to "다시 다운로드".
+// Module-level and owner-resolved-by-message-id (rather than closing over the open
+// project) so the all-projects gallery can download a clip from ANY project. That also
+// removes a latent bug: the old version always wrote to the currently-open project.
+export async function downloadClip(msgId: string, videoUrl: string, taskId: string) {
+  try {
+    const st = useAppStore.getState();
+    const owner = st.projects.find(p => p.messages.some(m => m.id === msgId));
+    if (!owner) return;
+    // Omni's taskId is a huge Gemini interaction id (v1_Ch…) and "dreamina" is the wrong
+    // brand for it — name Omni downloads "omni-<date>-<short cache id>" from the served URL.
+    const isOmniMsg = modelProvider(owner.messages.find(m => m.id === msgId)?.usedSettings?.model || '') === 'gemini';
+    const filename = isOmniMsg
+      ? buildDownloadFilename((videoUrl.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId), '.mp4', 'omni')
+      : buildDownloadFilename(taskId);
+    // Remember which message this filename belongs to. The Electron download path only
+    // learns the save path once 'download-done' fires, long after this call returns.
+    pendingReveal.set(filename, msgId);
+    const savedPath = await downloadViaProxy(videoUrl, filename);
+    useAppStore.getState().updateMessage(owner.id, msgId, {
+      downloadedAt: Date.now(),
+      // Blob fast path knows the path immediately; otherwise the done-listener fills it.
+      ...(savedPath ? { downloadedPath: savedPath } : {}),
+    });
+    if (savedPath) pendingReveal.delete(filename);
+    // Force the mark to disk now — the 1.5s debounced write would be lost
+    // if the app quits (or auto-update restarts) right after the download.
+    await flushPersist();
+  } catch (e) { console.error('download failed:', e); }
+}
+
+// Open the containing folder with the file selected, so the user can see WHICH clip this
+// was. The file may be long gone (moved into an edit project, renamed, deleted) — main
+// checks existence and reports back so we can say so instead of doing nothing.
+// `warn` is injected because the toast lives in ChatArea but the gallery needs this too.
+export async function revealClipFile(filePath: string | undefined, warn: (m: string) => void) {
+  if (!filePath) { warn('저장 경로를 알 수 없습니다. 다시 다운로드해주세요.'); return; }
+  const api = (window as any).electronAPI;
+  if (!api?.revealFile) { warn('이 환경에서는 폴더 열기를 지원하지 않습니다.'); return; }
+  const r = await api.revealFile(filePath);
+  if (r?.ok) return;
+  warn(r?.reason === 'missing'
+    ? `파일을 찾을 수 없습니다 — 이동·이름변경·삭제된 것 같습니다.\n${filePath}`
+    : '폴더를 열지 못했습니다.');
+}
+
 const renderMessageContent = (content: string, namedAssets: any[]) => {
   const regex = /(\[(?:Image|Video|Audio) \d+\])/g;
   const parts = content.split(regex);
@@ -581,9 +650,9 @@ export function ChatArea() {
         // path can report it. Record it on the originating message so "폴더에서 보기"
         // survives restarts.
         if (state === 'completed' && path) {
-          const msgId = pendingRevealRef.current.get(filename);
+          const msgId = pendingReveal.get(filename);
           if (msgId) {
-            pendingRevealRef.current.delete(filename);
+            pendingReveal.delete(filename);
             const st = useAppStore.getState();
             const owner = st.projects.find(p => p.messages.some(m => m.id === msgId));
             if (owner) st.updateMessage(owner.id, msgId, { downloadedPath: path });
@@ -839,54 +908,14 @@ export function ChatArea() {
     () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && m.starred).length,
     [project.messages]);
 
-  // filename → messageId, for downloads whose save path only arrives with the
-  // 'download-done' event. A ref (not state) so filling it never re-renders.
-  const pendingRevealRef = useRef<Map<string, string>>(new Map());
-
-  // Open the containing folder with the file selected, so the user can see WHICH clip
-  // this was. The file may be long gone (moved into an edit project, renamed, deleted) —
-  // main checks existence and reports back so we can say so instead of doing nothing.
-  const revealDownloaded = async (filePath?: string) => {
-    if (!filePath) { warn('저장 경로를 알 수 없습니다. 다시 다운로드해주세요.'); return; }
-    const api = (window as any).electronAPI;
-    if (!api?.revealFile) { warn('이 환경에서는 폴더 열기를 지원하지 않습니다.'); return; }
-    const r = await api.revealFile(filePath);
-    if (r?.ok) return;
-    warn(r?.reason === 'missing'
-      ? `파일을 찾을 수 없습니다 — 이동·이름변경·삭제된 것 같습니다.\n${filePath}`
-      : '폴더를 열지 못했습니다.');
-  };
+  const revealDownloaded = (filePath?: string) => revealClipFile(filePath, warn);
 
   // 컷 채택 토글. downloadedAt과 같은 경로(updateMessage)라 별도 배선이 없다.
   const toggleStar = (msgId: string, next: boolean) => {
     useAppStore.getState().updateMessage(project.id, msgId, { starred: next });
   };
 
-  // Download + mark the message so the button flips to "다시 다운로드".
-  // Marked only after downloadViaProxy resolves (= download handed off OK).
-  const handleVideoDownload = async (msgId: string, videoUrl: string, taskId: string) => {
-    try {
-      // Omni's taskId is a huge Gemini interaction id (v1_Ch…) and "dreamina" is the wrong
-      // brand for it — name Omni downloads "omni-<date>-<short cache id>" from the served URL.
-      const isOmniMsg = modelProvider(project.messages.find(m => m.id === msgId)?.usedSettings?.model || '') === 'gemini';
-      const filename = isOmniMsg
-        ? buildDownloadFilename((videoUrl.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId), '.mp4', 'omni')
-        : buildDownloadFilename(taskId);
-      // Remember which message this filename belongs to. The Electron download path only
-      // learns the save path once 'download-done' fires, long after this call returns.
-      pendingRevealRef.current.set(filename, msgId);
-      const savedPath = await downloadViaProxy(videoUrl, filename);
-      useAppStore.getState().updateMessage(project.id, msgId, {
-        downloadedAt: Date.now(),
-        // Blob fast path knows the path immediately; otherwise the done-listener fills it.
-        ...(savedPath ? { downloadedPath: savedPath } : {}),
-      });
-      if (savedPath) pendingRevealRef.current.delete(filename);
-      // Force the mark to disk now — the 1.5s debounced write would be lost
-      // if the app quits (or auto-update restarts) right after the download.
-      await flushPersist();
-    } catch (e) { console.error('download failed:', e); }
-  };
+  const handleVideoDownload = downloadClip;
   // previewItem is a useState snapshot — read downloadedAt live from the store
   const previewDownloaded = previewItem ? project.messages.find(m => m.id === previewItem.id)?.downloadedAt : undefined;
   const previewDownloadedPath = previewItem ? project.messages.find(m => m.id === previewItem.id)?.downloadedPath : undefined;
@@ -2296,6 +2325,11 @@ export function ChatArea() {
                   ))}
                 </div>
               )}
+              {/* 상세는 좁은 카드가 아니므로 초 단위까지 그대로 보여준다 */}
+              <div className="text-[11px] text-gray-500 tabular-nums">
+                생성 {formatStampFull(previewItem.timestamp)}
+                {previewItem.endTime && <> · 완료 {formatStampFull(previewItem.endTime)}</>}
+              </div>
               <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
                 <button onClick={() => { if (previewItem.videoUrl && previewItem.taskId) handleVideoDownload(previewItem.id, previewItem.videoUrl, previewItem.taskId); }}
                   className={`flex items-center gap-1.5 px-4 py-2 text-white text-[13px] font-medium rounded-lg transition-colors ${previewDownloaded ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-indigo-500 hover:bg-indigo-600'}`}>
@@ -2346,6 +2380,7 @@ export function ChatArea() {
                 <div key={item.id} className="bg-white rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200 animate-fade-in-up" >
                   <div className="aspect-video bg-black relative group">
                     <VideoPlayer src={item.videoUrl!} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    <ClipStamp ms={item.timestamp} />
                     {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
                     <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}
                       title={item.starred ? '채택 해제' : '컷 채택'}
@@ -2379,7 +2414,8 @@ export function ChatArea() {
                         className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors whitespace-nowrap shrink-0">
                         <Search size={12} /> 찾기
                       </button>
-                      <span className="text-[10px] text-gray-400 ml-auto whitespace-nowrap shrink-0">{new Date(item.timestamp).toLocaleDateString()}</span>
+                      <span title={`생성 시각 ${formatStampFull(item.timestamp)}`}
+                        className="text-[10px] text-gray-400 ml-auto whitespace-nowrap shrink-0 tabular-nums">{formatStamp(item.timestamp)}</span>
                     </div>
                   </div>
                 </div>
@@ -2517,11 +2553,15 @@ export function ChatArea() {
                       ) : msg.status === 'succeeded' && (msg.videoUrl || msg.imageUrl) ? (
                         <div className="space-y-3">
                           {msg.videoUrl && (
-                            <VideoPlayer src={msg.videoUrl} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                            <div className="relative">
+                              <VideoPlayer src={msg.videoUrl} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                              <ClipStamp ms={msg.timestamp} />
+                            </div>
                           )}
                           {msg.imageUrl && (
-                            <div className="rounded-xl overflow-hidden border border-gray-200/80 bg-black">
+                            <div className="rounded-xl overflow-hidden border border-gray-200/80 bg-black relative">
                               <img src={msg.imageUrl} alt="Last Frame" className="w-full max-h-[400px] object-contain" />
+                              {!msg.videoUrl && <ClipStamp ms={msg.timestamp} />}
                             </div>
                           )}
                           <div className="flex items-center justify-between">
@@ -2556,7 +2596,20 @@ export function ChatArea() {
                                 </button>
                               )}
                             </div>
-                            <div className="text-[11px] text-gray-400 whitespace-nowrap shrink-0">소요 시간: <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></div>
+                            {/* Clip metadata, one line. The chips above say WHAT was asked
+                                for; this says when it was fired, when it landed, and how
+                                long it took — the three things you need to identify a take. */}
+                            <div className="text-[11px] text-gray-400 whitespace-nowrap shrink-0 flex items-center gap-1.5 tabular-nums">
+                              <span title={`생성 시각 ${formatStampFull(msg.timestamp)}`}>{formatStamp(msg.timestamp)}</span>
+                              {msg.endTime && (
+                                <>
+                                  <span className="text-gray-300">→</span>
+                                  <span title={`완료 시각 ${formatStampFull(msg.endTime)}`}>{formatStamp(msg.endTime)}</span>
+                                </>
+                              )}
+                              <span className="text-gray-300">·</span>
+                              <span>소요 <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></span>
+                            </div>
                           </div>
                         </div>
                       ) : null}

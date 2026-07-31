@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Opens the containing folder with the file selected. Returns { ok:false, reason:'missing' }
   // when the file was moved/deleted so the UI can say so instead of doing nothing.
   revealFile: (filePath) => ipcRenderer.invoke('reveal-file', filePath),
+  // Opens a FOLDER itself. Omit the argument to open the current download folder —
+  // main resolves it, so this can't drift from where downloads actually land.
+  openFolder: (dirPath) => ipcRenderer.invoke('open-folder', dirPath),
   // Electron 32+ removed File.path; webUtils.getPathForFile is the replacement.
   // Returns the absolute on-disk path of a File object so we can re-read the
   // original later if the server cache + tmpfiles URL are both gone.

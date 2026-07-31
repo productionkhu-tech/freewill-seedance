@@ -304,6 +304,22 @@ ipcMain.handle('open-external', async (_event, url) => {
 // the whole point — the user wants to see which clip this was. It fails silently when
 // the file is gone (moved/renamed/deleted/emptied trash), so check first and report
 // back instead, letting the UI say so rather than looking like a dead button.
+// Open a DIRECTORY itself. Distinct from reveal-file, which selects a FILE inside its
+// folder — pointing showItemInFolder at a directory opens the PARENT with the directory
+// highlighted, which is not what "go to my download folder" means.
+// No argument → the session download folder, resolved here so the renderer can't drift
+// out of sync with the folder main is actually saving to.
+ipcMain.handle('open-folder', async (_event, dirPath) => {
+  const target = (typeof dirPath === 'string' && dirPath) ? dirPath : (sessionDownloadDir || app.getPath('downloads'));
+  try {
+    if (!fs.existsSync(target)) return { ok: false, reason: 'missing', path: target };
+    const err = await shell.openPath(target); // returns '' on success, message on failure
+    return err ? { ok: false, reason: 'error', error: err } : { ok: true, path: target };
+  } catch (err) {
+    return { ok: false, reason: 'error', error: err.message };
+  }
+});
+
 ipcMain.handle('reveal-file', async (_event, filePath) => {
   if (typeof filePath !== 'string' || !filePath) return { ok: false, reason: 'nopath' };
   try {
