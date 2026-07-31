@@ -534,20 +534,59 @@ function uniqueName(desired: string, taken: Iterable<string>): string {
   return `${base} (${used.size + 1})`; // unreachable in practice; never loop forever
 }
 
-// ── Scope: why the two differ ────────────────────────────────────────────────
-// PROJECTS are unique app-wide. The sidebar search FLATTENS the tree (matches are listed
-// without their folders) and the gallery's project filter is a flat list, so two projects
-// called "1차" in different folders are genuinely indistinguishable in both places.
+// ── Scope: one container, one namespace — exactly like a Windows folder ──────
+// A CONTAINER is one visible list: the top level, or the inside of a folder. Two things
+// only clash when they are drawn in the SAME list.
+//   S010 (folder) containing C010, and a C010 sitting next to S010 → not a clash. They
+//   are never shown side by side, so neither is ambiguous.
+//   Move that outer C010 into S010 → now they meet, and the newcomer becomes C010 (1).
+// Move it back out and it stays C010 (1): the name it was given is its name now, and
+// silently un-renaming things behind the user is worse than a suffix they can edit.
 //
-// GROUPS are unique only among SIBLINGS. A folder is never shown without its parent —
-// indented in the sidebar, "부모 › 자식" in the gallery — so "광고 › 1차" and "예능 › 1차"
-// already read as different things. Forcing "1차 (1)" on the second client would be noise.
-function siblingGroupNames(groups: ProjectGroup[], exceptId: string | null, parentId: string | undefined): string[] {
-  // Effective parent (groupTree), not the raw field: a group with a dangling parentId is
-  // DRAWN at the top level, so that is who it has to be distinguishable from.
+// Folders and projects share ONE namespace per container, because they are drawn in one
+// list — same reason Windows won't let a folder and a file take the same name.
+//
+// (Projects were briefly app-wide unique. That was wrong: it forbade the perfectly normal
+// "C010 in every shot folder". The one thing app-wide scope bought — telling matches apart
+// in the sidebar search, which flattens the tree — is now handled properly, by printing
+// each match's folder next to it.)
+function namesInContainer(
+  groups: ProjectGroup[],
+  projects: Project[],
+  containerId: string | undefined,
+  except?: { groupId?: string; projectId?: string },
+): string[] {
   const t = groupTree(groups);
-  const sibs = parentId ? t.childrenOf(parentId) : t.roots;
-  return sibs.filter(g => g.id !== exceptId).map(g => g.name);
+  const live = new Set(groups.map(g => g.id));
+  const out: string[] = [];
+  for (const g of groups) {
+    if (g.id === except?.groupId) continue;
+    // Effective parent, not the raw field: a group with a dangling parentId is DRAWN at
+    // the top level, so that is the list it has to be distinguishable in.
+    if ((t.isSub(g) ? g.parentId : undefined) === containerId) out.push(g.name);
+  }
+  for (const p of projects) {
+    if (p.id === except?.projectId) continue;
+    if ((p.groupId && live.has(p.groupId) ? p.groupId : undefined) === containerId) out.push(p.name);
+  }
+  return out;
+}
+
+// Unfold whatever is hiding a project, so a selection is actually on screen. Jumping to a
+// clip from the gallery, or falling back to a survivor after a delete, otherwise changes
+// the header while the sidebar shows no selection at all — it reads as "nothing happened".
+// Returns the SAME array when nothing is folded: this runs on every project click, and
+// rebuilding it each time would re-serialize the persisted state for no change.
+function revealProject(groups: ProjectGroup[], projects: Project[], projectId: string | null): ProjectGroup[] {
+  if (!projectId) return groups;
+  const p = projects.find(x => x.id === projectId);
+  const home = p?.groupId ? groups.find(g => g.id === p.groupId) : undefined;
+  if (!home) return groups;
+  // The whole chain — an open subfolder inside a folded parent is just as invisible.
+  const chain = [home, ...(home.parentId ? groups.filter(g => g.id === home.parentId) : [])];
+  const ids = new Set(chain.filter(g => g.collapsed).map(g => g.id));
+  if (!ids.size) return groups;
+  return groups.map(g => ids.has(g.id) ? { ...g, collapsed: false } : g);
 }
 
 // Unfold a destination folder so what just moved into it is actually on screen. Moving
@@ -851,9 +890,13 @@ export const useAppStore = create<AppState>()(
         else delete binding[projectId];
         return { projectCollectionId: binding };
       }),
-      setCurrentProjectId: (id) => set({ currentProjectId: id }),
+      setCurrentProjectId: (id) => set((state) => ({
+        currentProjectId: id,
+        projectGroups: revealProject(state.projectGroups, state.projects, id),
+      })),
       createProject: () => {
-        const existing = get().projects.map(p => p.name);
+        // New projects land at the top level, so that is the list they must be unique in.
+        const existing = namesInContainer(get().projectGroups, get().projects, undefined);
         const newProject: Project = {
           id: uuidv4(),
           // The counter is a position, not an identity: delete one project and the next
@@ -873,7 +916,11 @@ export const useAppStore = create<AppState>()(
         set((state) => {
           // Excluding self matters: without it, re-confirming a project's own name would
           // bump it to "이름 (1)" every time you opened the rename box.
-          const final = uniqueName(name, state.projects.filter(p => p.id !== id).map(p => p.name));
+          const me = state.projects.find(p => p.id === id);
+          if (!me) return state;
+          const live = new Set(state.projectGroups.map(g => g.id));
+          const home = me.groupId && live.has(me.groupId) ? me.groupId : undefined;
+          const final = uniqueName(name, namesInContainer(state.projectGroups, state.projects, home, { projectId: id }));
           return {
             projects: state.projects.map((p) =>
               p.id === id ? { ...p, name: final, updatedAt: Date.now() } : p
@@ -919,7 +966,7 @@ export const useAppStore = create<AppState>()(
         const wanted = name || `그룹 ${get().projectGroups.length + 1}`;
         const g: ProjectGroup = {
           id: uuidv4(),
-          name: uniqueName(wanted, siblingGroupNames(get().projectGroups, null, under)),
+          name: uniqueName(wanted, namesInContainer(get().projectGroups, get().projects, under)),
           parentId: under,
         };
         set((state) => ({
@@ -935,7 +982,8 @@ export const useAppStore = create<AppState>()(
           const me = state.projectGroups.find(g => g.id === id);
           if (!me) return state;
           const t = groupTree(state.projectGroups);
-          const final = uniqueName(name, siblingGroupNames(state.projectGroups, id, t.isSub(me) ? me.parentId : undefined));
+          const final = uniqueName(name, namesInContainer(state.projectGroups, state.projects,
+            t.isSub(me) ? me.parentId : undefined, { groupId: id }));
           return { projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, name: final } : g) };
         });
       },
@@ -971,15 +1019,9 @@ export const useAppStore = create<AppState>()(
           // Landing on something tucked inside a folded folder looks like the app moved
           // you nowhere — the header changes but the sidebar shows no selection.
           let projectGroups = state.projectGroups.filter(g => !gone.has(g.id));
-          const landed = projects.find(p => p.id === currentProjectId);
-          if (landed?.groupId) {
-            // Unfold the whole chain down to it. Unfolding only the immediate folder isn't
-            // enough once folders nest — an open subfolder inside a folded parent is just
-            // as invisible as a folded one.
-            const home = projectGroups.find(g => g.id === landed.groupId);
-            const open = new Set([landed.groupId, ...(home?.parentId ? [home.parentId] : [])]);
-            projectGroups = projectGroups.map(g => open.has(g.id) ? { ...g, collapsed: false } : g);
-          }
+          // Unfold the whole chain down to wherever we landed — an open subfolder inside
+          // a folded parent is just as invisible as a folded one.
+          projectGroups = revealProject(projectGroups, projects, currentProjectId);
           return { projectGroups, projects, currentProjectId, projectCollectionId: binding };
         });
       },
@@ -1001,7 +1043,8 @@ export const useAppStore = create<AppState>()(
           // Landing next to a folder of the same name would produce two identical rows in
           // one list — the exact ambiguity the naming rule exists to prevent, arriving by
           // a different door. The "(1)" also tells you there was already one there.
-          next.splice(at, 0, { ...dragged, parentId, name: uniqueName(dragged.name, siblingGroupNames(state.projectGroups, draggedId, parentId)) });
+          next.splice(at, 0, { ...dragged, parentId,
+            name: uniqueName(dragged.name, namesInContainer(state.projectGroups, state.projects, parentId, { groupId: draggedId })) });
           return { projectGroups: openChain(next, parentId) };
         });
       },
@@ -1015,7 +1058,8 @@ export const useAppStore = create<AppState>()(
           const rest = state.projectGroups.filter(x => x.id !== draggedId);
           const lastIdx = rest.map(x => (x.parentId || undefined) === parentId).lastIndexOf(true);
           const next = [...rest];
-          next.splice(lastIdx + 1, 0, { ...g, parentId, name: uniqueName(g.name, siblingGroupNames(state.projectGroups, draggedId, parentId)) });
+          next.splice(lastIdx + 1, 0, { ...g, parentId,
+            name: uniqueName(g.name, namesInContainer(state.projectGroups, state.projects, parentId, { groupId: draggedId })) });
           return { projectGroups: openChain(next, parentId) };
         });
       },
@@ -1025,7 +1069,7 @@ export const useAppStore = create<AppState>()(
           const g = state.projectGroups.find(x => x.id === groupId);
           if (!g || (g.parentId || undefined) === (parentId || undefined)) return state;
           if (!canNest(state.projectGroups, groupId, parentId)) return state;
-          const final = uniqueName(g.name, siblingGroupNames(state.projectGroups, groupId, parentId));
+          const final = uniqueName(g.name, namesInContainer(state.projectGroups, state.projects, parentId, { groupId }));
           return {
             projectGroups: openChain(
               state.projectGroups.map(x => x.id === groupId ? { ...x, parentId, name: final } : x), parentId),
@@ -1057,7 +1101,10 @@ export const useAppStore = create<AppState>()(
             const open = new Set([groupId, ...(home?.parentId ? [home.parentId] : [])]);
             projectGroups = projectGroups.map(g => open.has(g.id) ? { ...g, collapsed: false } : g);
           }
-          return { projectGroups, projects: state.projects.map(p => p.id === projectId ? { ...p, groupId } : p) };
+          // Moving IS how two names meet. Nothing collided while they sat in different
+          // folders; the moment one arrives next to the other, one of them has to change.
+          const name = uniqueName(cur.name, namesInContainer(state.projectGroups, state.projects, groupId, { projectId }));
+          return { projectGroups, projects: state.projects.map(p => p.id === projectId ? { ...p, groupId, name } : p) };
         });
       },
       // Drop on the strip at the end of a section: land last inside it.
@@ -1070,7 +1117,8 @@ export const useAppStore = create<AppState>()(
           const rest = state.projects.filter(p => p.id !== projectId);
           const lastIdx = rest.map(p => (p.groupId || undefined) === groupId).lastIndexOf(true);
           const next = [...rest];
-          next.splice(lastIdx + 1, 0, { ...moved, groupId });
+          next.splice(lastIdx + 1, 0, { ...moved, groupId,
+            name: uniqueName(moved.name, namesInContainer(state.projectGroups, state.projects, groupId, { projectId })) });
           return { projects: next };
         });
       },
@@ -1087,7 +1135,8 @@ export const useAppStore = create<AppState>()(
           const at = rest.findIndex(p => p.id === targetId);
           if (at < 0) return state;
           const next = [...rest];
-          next.splice(at, 0, { ...dragged, groupId: target.groupId });
+          next.splice(at, 0, { ...dragged, groupId: target.groupId,
+            name: uniqueName(dragged.name, namesInContainer(state.projectGroups, state.projects, target.groupId, { projectId: draggedId })) });
           return { projects: next };
         });
       },
@@ -1100,7 +1149,10 @@ export const useAppStore = create<AppState>()(
           }
           const binding = { ...state.projectCollectionId };
           delete binding[id]; // drop the deleted project's collection binding
-          return { projects: newProjects, currentProjectId: newCurrentId, projectCollectionId: binding };
+          return {
+            projects: newProjects, currentProjectId: newCurrentId, projectCollectionId: binding,
+            projectGroups: revealProject(state.projectGroups, newProjects, newCurrentId),
+          };
         });
       },
       updateProjectSettings: (projectId, settings) => {

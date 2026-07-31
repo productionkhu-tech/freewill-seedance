@@ -483,10 +483,64 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   //     opened at all).
   // Leaving the sidebar mid-drag now leaves the last gap open until release. That is the
   // correct trade: it still shows where the drop would land, and dragend tidies it up.
+  // ── Edge auto-scroll ─────────────────────────────────────────────────────────
+  // Without this a folder simply cannot be moved past the bottom of the visible list.
+  // The wheel is not a way out: Chromium suppresses wheel events for the duration of a
+  // native drag, so while you are holding something the list is frozen — the only thing
+  // that can scroll it is the drag itself.
+  // The loop also re-runs planFor with the last pointer position, so the target keeps
+  // updating while the list slides under a stationary cursor. Safe with the snapshot
+  // design because planFor already corrects for (scrollTop - snapshot scrollTop).
+  const autoScroll = useRef<{ raf: number; vy: number; y: number } | null>(null);
+  const stopAutoScroll = () => {
+    if (autoScroll.current) cancelAnimationFrame(autoScroll.current.raf);
+    autoScroll.current = null;
+  };
+  const tickAutoScroll = () => {
+    const st = autoScroll.current, list = listRef.current;
+    if (!st || !list) return;
+    const max = list.scrollHeight - list.clientHeight;
+    const next = Math.max(0, Math.min(max, list.scrollTop + st.vy));
+    // ★ 'instant', and it is load-bearing. index.css sets `scroll-behavior: smooth` on
+    // <html>; the list inherits it, so a plain `list.scrollTop = x` starts an ANIMATION
+    // and reads back the OLD value immediately afterwards.
+    // That killed the first version of this loop: it compared before/after to detect the
+    // end, saw "no change" on frame 1, and shut itself down after ~15px — the list nudged
+    // once and then sat there. Measured: five `scrollTop += 15` in a row all read back
+    // 15.333. A per-frame step must not animate, and the end must be detected from the
+    // bounds rather than from a read-back.
+    list.scrollTo({ top: next, behavior: 'instant' });
+    planFor(st.y);
+    if (next === 0 || next === max) { stopAutoScroll(); return; }
+    st.raf = requestAnimationFrame(tickAutoScroll);
+  };
+  const updateAutoScroll = (clientY: number) => {
+    const list = listRef.current;
+    if (!list) return;
+    const r = list.getBoundingClientRect();
+    const EDGE = 56;              // deep enough to hit without aiming, shallow enough to sit still mid-list
+    const MAX = 18;               // px per frame at the very edge
+    let vy = 0;
+    if (clientY < r.top + EDGE) vy = -Math.ceil(MAX * Math.min(1, (r.top + EDGE - clientY) / EDGE));
+    else if (clientY > r.bottom - EDGE) vy = Math.ceil(MAX * Math.min(1, (clientY - (r.bottom - EDGE)) / EDGE));
+    if (!vy) { stopAutoScroll(); return; }
+    if (autoScroll.current) { autoScroll.current.vy = vy; autoScroll.current.y = clientY; return; }
+    autoScroll.current = { vy, y: clientY, raf: requestAnimationFrame(tickAutoScroll) };
+  };
+
   const endDrag = () => {
+    stopAutoScroll();
     setDragKind(null); setDragId(null); setPlan(null); setGroupPlan(null);
     snapRef.current = null; dragRef.current = null; snapFresh.current = false;
   };
+  // A drag can end outside the window (Esc, or releasing over another app), and then no
+  // dragend reaches our rows — the scroll loop would keep running with nothing to drop.
+  useEffect(() => {
+    const off = () => endDrag();
+    window.addEventListener('dragend', off);
+    window.addEventListener('drop', off);
+    return () => { window.removeEventListener('dragend', off); window.removeEventListener('drop', off); };
+  }, []);
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -665,6 +719,16 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     );
   };
 
+  // "광고" or "광고 › 1차" — where a project actually lives. Empty at the top level:
+  // that is the default, and labelling it would be noise on every ungrouped row.
+  const groupPathOf = (project: Project): string => {
+    const g = project.groupId ? projectGroups.find(x => x.id === project.groupId) : undefined;
+    if (!g) return '';
+    const parent = g.parentId ? projectGroups.find(x => x.id === g.parentId) : undefined;
+    // Only a real one-level parent counts — same rule groupTree applies when drawing.
+    return parent && !parent.parentId ? `${parent.name} › ${g.name}` : g.name;
+  };
+
   // One project row. Extracted so the grouped list and the flat/search list render the
   // exact same thing — two copies of 60 lines of row markup would drift within a week.
   // A row, preceded by the gap that opens where it would land.
@@ -737,6 +801,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 ) : (
                   <span className="truncate text-[14px] font-medium">{project.name}</span>
                 )}
+                {/* Which folder this match came from — search flattens the tree, and two
+                    projects may legitimately share a name in different folders (that is
+                    the whole point of per-folder naming). Without this the two rows are
+                    the same row twice. Only while searching: everywhere else the
+                    indentation already says it. */}
+                {searchQuery.trim() && (() => {
+                  const path = groupPathOf(project);
+                  return path && <span className="shrink-0 text-[10px] text-white/30 truncate max-w-[84px]" title={path}>{path}</span>;
+                })()}
               </div>
               {!editingId && (() => {
                 const running = project.messages.some(m => m.status === 'running' || m.status === 'queued');
@@ -1008,6 +1081,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           // have opened yet (a gap needs a plan, a plan needs this handler), so this is
           // the true resting layout of the list mid-drag. See beginDrag.
           if (!snapFresh.current) { snapFresh.current = true; captureSlots(); }
+          updateAutoScroll(e.clientY);
           planFor(e.clientY);
         }}
         onDrop={(e) => { e.preventDefault(); applyDrop(); }}
