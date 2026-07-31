@@ -338,15 +338,29 @@ function formatBytes(bytes: number | null): string {
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
-    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, moveProjectBefore, moveProjectToEnd,
+    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
     autoDownload, setAutoDownload } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
-  // Drag state for reordering / refiling. dropTarget is a tagged id ('p:<id>' | 'g:<id>'
-  // | 'root') so one piece of state can highlight rows, groups and the empty area.
+  // ── Drag & drop ──────────────────────────────────────────────────────────
+  // The drop point is decided from the POINTER'S Y against a snapshot of the list taken at
+  // dragstart — never from whichever element is under the cursor. That distinction is the
+  // whole design. Element hit-testing feeds back on itself: opening a gap under the cursor
+  // pushes everything below down, a different element lands under the pointer, that picks
+  // a different slot, the gap moves… at any boundary the list shakes violently.
+  // A snapshot can't feed back — rows don't move during a drag, only the gap does, so
+  // positions captured before the gap existed stay true for the whole drag.
+  const [dragKind, setDragKind] = useState<'project' | 'group' | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [plan, setPlan] = useState<{ beforeId: string | null; groupId?: string } | null>(null);
+  const [groupPlan, setGroupPlan] = useState<{ beforeId: string | null } | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const snapRef = useRef<{
+    slots: { y: number; beforeId: string | null; groupId?: string }[];
+    groupSlots: { y: number; beforeId: string | null }[];
+    scrollTop: number;
+  } | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [pendingGroupDelete, setPendingGroupDelete] = useState<{ id: string; name: string; count: number } | null>(null);
   // ── Why dropTarget is set through these two helpers ──────────────────────────
@@ -356,10 +370,64 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // So: a leave only *schedules* the clear, and the next dragover cancels it. The line
   // then only disappears when the pointer has genuinely been off every target for a
   // moment — which is also what makes moving between rows read as the line sliding.
-  const aimAt = (key: string) => {
-    // Same key → same object → React bails out. dragover fires ~60×/s while the pointer
-    // moves, so this guard is what keeps the list from re-rendering on every event.
-    setDropTarget(prev => (prev === key ? prev : key));
+  // Every place something could land, measured once, before any gap exists.
+  const takeSnapshot = () => {
+    const list = listRef.current;
+    if (!list) return;
+    const slots: { y: number; beforeId: string | null; groupId?: string }[] = [];
+    const groupSlots: { y: number; beforeId: string | null }[] = [];
+    list.querySelectorAll<HTMLElement>('[data-row-id]').forEach(el =>
+      slots.push({ y: el.getBoundingClientRect().top, beforeId: el.dataset.rowId!, groupId: el.dataset.rowGroup || undefined }));
+    list.querySelectorAll<HTMLElement>('[data-section-end]').forEach(el =>
+      slots.push({ y: el.getBoundingClientRect().top, beforeId: null, groupId: el.dataset.sectionEnd || undefined }));
+    list.querySelectorAll<HTMLElement>('[data-group-id]').forEach(el =>
+      groupSlots.push({ y: el.getBoundingClientRect().top, beforeId: el.dataset.groupId! }));
+    const tail = list.querySelector<HTMLElement>('[data-group-end]');
+    if (tail) groupSlots.push({ y: tail.getBoundingClientRect().top, beforeId: null });
+    slots.sort((a, b) => a.y - b.y);
+    groupSlots.sort((a, b) => a.y - b.y);
+    snapRef.current = { slots, groupSlots, scrollTop: list.scrollTop };
+  };
+
+  const beginDrag = (kind: 'project' | 'group', id: string, e: DragEvent<HTMLElement>) => {
+    e.dataTransfer.setData('text/plain', id);
+    e.dataTransfer.effectAllowed = 'move';
+    setDragKind(kind); setDragId(id);
+    takeSnapshot();
+  };
+
+  // Nearest slot to the pointer, corrected for scrolling since the snapshot.
+  const planFor = (clientY: number) => {
+    const snap = snapRef.current, list = listRef.current;
+    if (!snap || !list) return;
+    const y = clientY + (list.scrollTop - snap.scrollTop);
+    const nearest = (arr: { y: number }[]) => {
+      let best = -1, bestD = Infinity;
+      arr.forEach((sl, i) => { const d = Math.abs(sl.y - y); if (d < bestD) { bestD = d; best = i; } });
+      return best;
+    };
+    if (dragKind === 'group') {
+      const i = nearest(snap.groupSlots);
+      const g = i < 0 ? null : snap.groupSlots[i];
+      setGroupPlan(prev => (prev?.beforeId === (g ? g.beforeId : null) ? prev : (g ? { beforeId: g.beforeId } : null)));
+    } else {
+      const i = nearest(snap.slots);
+      const sl = i < 0 ? null : snap.slots[i];
+      setPlan(prev => (prev && sl && prev.beforeId === sl.beforeId && prev.groupId === sl.groupId
+        ? prev : (sl ? { beforeId: sl.beforeId, groupId: sl.groupId } : null)));
+    }
+  };
+
+  const applyDrop = () => {
+    if (dragId) {
+      if (dragKind === 'group' && groupPlan) {
+        if (groupPlan.beforeId) moveGroupBefore(dragId, groupPlan.beforeId); else moveGroupToEnd(dragId);
+      } else if (dragKind === 'project' && plan) {
+        if (plan.beforeId && plan.beforeId !== dragId) moveProjectBefore(dragId, plan.beforeId);
+        else if (!plan.beforeId) moveProjectToEnd(dragId, plan.groupId);
+      }
+    }
+    endDrag();
   };
   // ── No dragleave anywhere in the list. This is the whole fix for the stutter. ──
   // dragover REPLACES the aim; drop and dragend CLEAR it. Nothing else touches it.
@@ -373,7 +441,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   //     opened at all).
   // Leaving the sidebar mid-drag now leaves the last gap open until release. That is the
   // correct trade: it still shows where the drop would land, and dragend tidies it up.
-  const endDrag = () => { setDragId(null); setDropTarget(null); };
+  const endDrag = () => { setDragKind(null); setDragId(null); setPlan(null); setGroupPlan(null); snapRef.current = null; };
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -517,22 +585,22 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // The strip at the end of a section. Only exists while something is being dragged —
   // it's an affordance, not furniture. It also fills a real gap: dropping on a row inserts
   // BEFORE that row, so without this there is no way to reach the last slot of a list.
-  const TailDrop = ({ groupId, label }: { groupId?: string; label: string }) => {
-    if (!dragId) return null;
-    const key = 'end:' + (groupId ?? '');
-    const on = dropTarget === key;
+  // ★ A plain function, NOT a component used as <TailDrop/>.
+  // Declared inside Sidebar, it would be a NEW component type on every render, so React
+  // would unmount and remount it each time — the DOM node is replaced, which resets the
+  // CSS transition mid-flight and makes it pop instead of animate. Calling it inlines the
+  // JSX into this render, so the same element persists and the transition can run.
+  const renderTailDrop = (groupId: string | undefined, label: string) => {
+    // Always rendered (zero height when idle) so the snapshot can measure this slot.
+    const on = !!dragId && dragKind === 'project' && plan?.beforeId === null && plan?.groupId === groupId;
     return (
       <div
-        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); aimAt(key); }}
-        onDrop={(e) => {
-          e.preventDefault(); e.stopPropagation();
-          const id = e.dataTransfer.getData('text/plain');
-          if (id) moveProjectToEnd(id, groupId);
-          endDrag();
-        }}
+        data-section-end={groupId ?? ''}
         className={cn(
-          'mx-1 mt-1 h-[26px] rounded-[7px] border border-dashed flex items-center justify-center text-[10px] transition-colors',
-          on ? 'border-[#0071e3] bg-[#0071e3]/15 text-[#4da3ff]' : 'border-white/15 text-white/30'
+          'mx-1 rounded-[7px] border border-dashed flex items-center justify-center text-[10px] overflow-hidden',
+          'transition-[height,margin,border-color,color] duration-150 ease-out',
+          on ? 'h-[26px]' : 'h-0',
+          on ? 'border-[#0071e3] bg-[#0071e3]/15 text-[#4da3ff] mt-1' : 'border-transparent text-transparent'
         )}
       >
         {label}
@@ -548,19 +616,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // rather than the row, the aim clears, the gap closes, the row slides back under the
   // cursor, and it opens again — forever.
   const renderProjectRow = (project: Project) => {
-    const aimed = dropTarget === 'p:' + project.id;
+    const aimed = !!dragId && dragKind === 'project' && plan?.beforeId === project.id;
     const dragging = dragId ? projects.find(p => p.id === dragId) : null;
-    const dropHere = (e: DragEvent<HTMLDivElement>) => {
-      e.preventDefault(); e.stopPropagation();
-      const id = e.dataTransfer.getData('text/plain');
-      if (id && id !== project.id) moveProjectBefore(id, project.id);
-      endDrag();
-    };
     return (
       <Fragment key={project.id}>
         <div
-          onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
-          onDrop={dropHere}
+          // No drag handlers here (nor on the row). The container owns all of them —
+          // see the note on the drag state.
           // Height, not opacity — the point is that the list physically makes room.
           className={cn('overflow-hidden transition-[height] duration-150 ease-out', aimed ? 'h-[38px]' : 'h-0')}
         >
@@ -570,15 +632,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           </div>
         </div>
             <div
+              data-row-id={project.id}
+              data-row-group={project.groupId || ''}
               draggable={editingId !== project.id}
-              onDragStart={(e) => { e.dataTransfer.setData('text/plain', project.id); e.dataTransfer.effectAllowed = 'move'; setDragId(project.id); }}
+              onDragStart={(e) => beginDrag('project', project.id, e)}
               onDragEnd={endDrag}
-              // stopPropagation is load-bearing: without it this bubbles to the group block
-              // and then the list container, whose own dragover handlers overwrite
-              // dropTarget with 'g:…'/'root' — so the insertion line would never appear even
-              // though the drop itself worked. (onDrop already stops; onDragOver must too.)
-              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
-                  onDrop={dropHere}
               className={cn(
                 "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
                 dragId === project.id && "opacity-40",
@@ -733,15 +791,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <span className="font-medium">전체 갤러리</span>
         </button>
       </div>
-      <div className="relative flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
-        // Dropping on the empty area below everything releases a project from its folder.
-        onDragOver={(e) => { if (dragId) { e.preventDefault(); aimAt('root'); } }}
-        onDrop={(e) => {
-          e.preventDefault();
-          const id = e.dataTransfer.getData('text/plain');
-          if (id) setProjectGroup(id, undefined);
-          endDrag();
-        }}
+      {/* One dragover handler for the entire list. Children deliberately have none. */}
+      <div ref={listRef} className="relative flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
+        onDragOver={(e) => { if (dragId) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; planFor(e.clientY); } }}
+        onDrop={(e) => { e.preventDefault(); applyDrop(); }}
       >
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
             callers below. */}
@@ -752,19 +805,21 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           // own. Showing both would double-count the same clips in the same glance.
           const groupUnseen = inGroup.reduce((n, p) => n + unseenDoneCount(p, currentProjectId === p.id), 0);
           const groupRunning = inGroup.some(p => p.messages.some(m => m.status === 'running' || m.status === 'queued'));
-          const isDropTarget = dropTarget === 'g:' + g.id;
+          const groupAimed = !!dragId && dragKind === 'group' && groupPlan?.beforeId === g.id;
           return (
-            <div key={g.id}
-              onDragOver={(e) => { if (dragId) { e.preventDefault(); e.stopPropagation(); aimAt('g:' + g.id); } }}
-                  onDrop={(e) => {
-                e.preventDefault(); e.stopPropagation();
-                const id = e.dataTransfer.getData('text/plain');
-                if (id) setProjectGroup(id, g.id);
-                endDrag();
-              }}
-              className={cn('rounded-[8px]', isDropTarget && 'ring-1 ring-[#0071e3] ring-inset bg-[#0071e3]/5')}
-            >
+            <Fragment key={g.id}>
+            {/* Gap for reordering the FOLDERS themselves. */}
+            <div className={cn('overflow-hidden transition-[height] duration-150 ease-out', groupAimed ? 'h-[30px]' : 'h-0')}>
+              <div className="h-[26px] flex items-center gap-1.5 px-2 rounded-[7px] border border-dashed border-[#0071e3]/70 bg-[#0071e3]/10">
+                <Folder size={12} className="shrink-0 text-[#4da3ff]" />
+                <span className="truncate text-[11px] text-[#4da3ff]">{projectGroups.find(x => x.id === dragId)?.name} 여기로</span>
+              </div>
+            </div>
+            <div data-group-id={g.id} className={cn('rounded-[8px]', dragId === g.id && 'opacity-40')}>
               <div className="group/g flex items-center gap-1.5 px-2 py-1.5 rounded-[8px] cursor-pointer text-white/50 hover:text-white/80 hover:bg-[#2a2a2d]/40 transition-colors"
+                draggable={editingGroupId !== g.id}
+                onDragStart={(e) => { e.stopPropagation(); beginDrag('group', g.id, e); }}
+                onDragEnd={endDrag}
                 onClick={() => toggleProjectGroup(g.id)}
                 onDoubleClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}>
                 <ChevronRight size={13} className={cn('shrink-0 transition-transform', !g.collapsed && 'rotate-90')} />
@@ -799,22 +854,34 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               </div>
               {!g.collapsed && (
                 <div className="pl-3 space-y-1 pb-0.5">
-                  {inGroup.length === 0
-                    ? <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
-                    : inGroup.map(renderProjectRow)}
-                  {inGroup.length > 0 && <TailDrop groupId={g.id} label="이 그룹 맨 아래로" />}
+                  {inGroup.map(renderProjectRow)}
+                  {renderTailDrop(g.id, inGroup.length ? '이 그룹 맨 아래로' : '이 그룹으로')}
+                  {inGroup.length === 0 && !dragId && (
+                    <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
+                  )}
                 </div>
               )}
             </div>
+            </Fragment>
           );
         })}
+        {/* Tail slot for folder reordering — measurable even when idle. */}
+        {!searchQuery.trim() && projectGroups.length > 0 && (
+          <div data-group-end="" className={cn('overflow-hidden transition-[height] duration-150 ease-out',
+            (!!dragId && dragKind === 'group' && groupPlan?.beforeId === null) ? 'h-[30px]' : 'h-0')}>
+            <div className="h-[26px] flex items-center gap-1.5 px-2 rounded-[7px] border border-dashed border-[#0071e3]/70 bg-[#0071e3]/10">
+              <Folder size={12} className="shrink-0 text-[#4da3ff]" />
+              <span className="truncate text-[11px] text-[#4da3ff]">맨 아래 그룹으로</span>
+            </div>
+          </div>
+        )}
         {(searchQuery.trim()
           // While searching, groups and their collapsed state are ignored — you asked for
           // a name, not for a place. Hiding a match inside a folded folder would be wrong.
           ? filteredProjects
           : ungroupedProjects
         ).map(renderProjectRow)}
-        {!searchQuery.trim() && <TailDrop label={projectGroups.length ? '그룹 밖 맨 아래로' : '맨 아래로'} />}
+        {!searchQuery.trim() && renderTailDrop(undefined, projectGroups.length ? '그룹 밖 맨 아래로' : '맨 아래로')}
       </div>
       {/* Footer: download folder + dashboard link + cache cleanup */}
       <div className="p-3 border-t border-[#2a2a2d] shrink-0 space-y-2">

@@ -509,6 +509,8 @@ interface AppState {
   setProjectGroup: (projectId: string, groupId: string | undefined) => void;
   moveProjectBefore: (draggedId: string, targetId: string) => void;
   moveProjectToEnd: (projectId: string, groupId: string | undefined) => void;
+  moveGroupBefore: (draggedId: string, targetId: string) => void;
+  moveGroupToEnd: (draggedId: string) => void;
   deleteProject: (id: string) => void;
   updateProjectSettings: (projectId: string, settings: Partial<GenerationSettings>) => void;
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
@@ -824,6 +826,28 @@ export const useAppStore = create<AppState>()(
             projectGroups: state.projectGroups.filter(g => g.id !== id),
             projects, currentProjectId, projectCollectionId: binding,
           };
+        });
+      },
+      // Reorder folders themselves. Same "insert before the target" rule as projects, so
+      // both drags mean the same thing.
+      moveGroupBefore: (draggedId, targetId) => {
+        if (draggedId === targetId) return;
+        set((state) => {
+          const from = state.projectGroups.findIndex(g => g.id === draggedId);
+          if (from < 0) return state;
+          const rest = state.projectGroups.filter(g => g.id !== draggedId);
+          const at = targetId === null ? rest.length : rest.findIndex(g => g.id === targetId);
+          if (at < 0) return state;
+          const next = [...rest];
+          next.splice(at, 0, state.projectGroups[from]);
+          return { projectGroups: next };
+        });
+      },
+      moveGroupToEnd: (draggedId) => {
+        set((state) => {
+          const g = state.projectGroups.find(x => x.id === draggedId);
+          if (!g) return state;
+          return { projectGroups: [...state.projectGroups.filter(x => x.id !== draggedId), g] };
         });
       },
       toggleProjectGroup: (id) => {
