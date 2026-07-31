@@ -34,7 +34,79 @@ let lastBackedUpElements: string | null = null;
 // library itself changes, so ordinary writes serialize ~17MB instead.
 // The images themselves are untouched (still full-res base64), so send / share /
 // import / 원본 복사 behave exactly as before.
-const ELEMENTS_KEY = 'seedance-element-assets';
+const ELEMENTS_KEY = 'seedance-element-assets';   // v1: the whole library as ONE string
+
+// ── v2: the library, split across keys ───────────────────────────────────────
+// v1 died at a hard wall: V8 caps a single string at 512MB, and the library reached
+// 505.9MB (98.8%). Past that, JSON.stringify throws and NOTHING saves — silently, since
+// the throw happens synchronously inside a timer. Raising a limit was never an option;
+// the limit is in the engine.
+// v2 never builds a whole-library string. Assets are serialized ONE AT A TIME (~12MB
+// each) and packed into chunks under CHUNK_MAX, so the size of the library stops
+// mattering. Same reason restore can stream: a chunk goes straight from file to IDB as
+// a string, never parsed into a 500MB object graph on the way.
+const ELEMENTS_MANIFEST = 'seedance-elements-manifest';
+const ELEMENTS_CHUNK = 'seedance-elements-chunk-';
+const CHUNK_MAX = 32 * 1024 * 1024;   // 32MB — far below every ceiling, ~16 chunks at today's size
+type ElementsManifest = { v: 2; chunks: number; count: number; savedAt: number };
+
+// Serializes writes. A save can take a while across N keys; a second one starting
+// mid-flight could interleave chunk writes and leave a manifest describing a library
+// that never existed on disk.
+let elementsWriteChain: Promise<void> = Promise.resolve();
+
+// Serialize one asset at a time and pack the pieces into JSON arrays under CHUNK_MAX.
+// Never builds a string for the whole library, which is the entire point — that string
+// is what hit V8's 512MB wall. Shared by the IDB write and the Documents backup so the
+// two can never disagree about how the library is split.
+function buildElementChunks(assets: ElementAsset[]): string[] {
+  const parts: string[] = [];
+  let cur: string[] = [], curLen = 0;
+  for (const a of assets) {
+    const one = JSON.stringify(a);      // one asset at a time — always well under any limit
+    if (curLen + one.length > CHUNK_MAX && cur.length) {
+      parts.push('[' + cur.join(',') + ']');
+      cur = []; curLen = 0;
+    }
+    cur.push(one); curLen += one.length;
+  }
+  if (cur.length) parts.push('[' + cur.join(',') + ']');
+  return parts;
+}
+
+async function writeElementsChunked(assets: ElementAsset[]): Promise<void> {
+  const parts = buildElementChunks(assets);
+
+  for (let i = 0; i < parts.length; i++) await set(ELEMENTS_CHUNK + i, parts[i]);
+  // Manifest LAST: until it lands, a half-finished write is simply not visible, and the
+  // reader keeps using whatever was there before.
+  const man: ElementsManifest = { v: 2, chunks: parts.length, count: assets.length, savedAt: Date.now() };
+  await set(ELEMENTS_MANIFEST, JSON.stringify(man));
+  // Drop chunks left over from a previously longer library.
+  for (let i = parts.length; i < parts.length + 40; i++) {
+    try { await del(ELEMENTS_CHUNK + i); } catch { /* absent is fine */ }
+  }
+  // Only now is the v1 blob redundant. Removing it reclaims ~500MB and stops the next
+  // launch from having two sources of truth.
+  try { if (await get(ELEMENTS_KEY)) await del(ELEMENTS_KEY); } catch { /* leave it */ }
+}
+
+async function readElementsChunked(): Promise<ElementAsset[] | null> {
+  const raw = await get(ELEMENTS_MANIFEST);
+  if (!raw) return null;
+  const man = JSON.parse(raw) as ElementsManifest;
+  const out: ElementAsset[] = [];
+  for (let i = 0; i < man.chunks; i++) {
+    const part = await get(ELEMENTS_CHUNK + i);
+    if (!part) throw new Error(`element chunk ${i}/${man.chunks} missing`);
+    out.push(...(JSON.parse(part) as ElementAsset[]));
+  }
+  if (out.length !== man.count) {
+    console.warn(`[Elements] manifest says ${man.count} but ${out.length} loaded — using what loaded.`);
+  }
+  return out;
+}
+
 let elementsTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingElements: ElementAsset[] | null = null;
 // Last array reference we persisted. Every mutation (add / update / delete /
@@ -47,74 +119,68 @@ function scheduleElementsSave(assets: ElementAsset[]) {
   if (elementsTimer) clearTimeout(elementsTimer);
   elementsTimer = setTimeout(() => {
     const a = pendingElements; pendingElements = null;
-    if (!a) return;
-    // ★ try/catch, not .catch(): JSON.stringify throws SYNCHRONOUSLY. This is the exact
-    // shape of the bug that killed the Documents backup for a week — a RangeError inside
-    // a timer, invisible to any promise handler, and saving just stopped.
-    // The library is one string in IDB, so it dies at V8's 512MB ceiling. Measured
-    // 2026-07-31: 505.9MB, i.e. 98.8% of the limit. When it crosses, this is where it
-    // breaks, and it must break LOUDLY.
-    let payload: string;
-    try {
-      payload = JSON.stringify(a);
-    } catch (err: any) {
-      console.error('[Elements] SAVE FAILED — the library can no longer be serialised ' +
-        '(V8 caps a single string at 512MB). Nothing new will persist until the library ' +
-        'is split across multiple keys. Assets already on disk are untouched.', err);
+    if (a) void saveElements(a);
+  }, DEBOUNCE_MS);
+}
+
+// The one write path. Chunked, serialized against itself, and loud on failure — the v1
+// version threw synchronously inside a timer, which no .catch could see, so saving just
+// stopped without a word.
+function saveElements(assets: ElementAsset[]): Promise<void> {
+  elementsWriteChain = elementsWriteChain
+    .catch(() => {})                       // a previous failure must not block later saves
+    .then(() => writeElementsChunked(assets))
+    .then(() => { console.log(`[Elements] saved ${assets.length} asset(s) in chunks`); })
+    .catch((err) => {
+      console.error('[Elements] SAVE FAILED — new assets are NOT on disk:', err);
       window.dispatchEvent(new CustomEvent('seedance:toast', { detail: {
-        msg: '엘리먼트 라이브러리가 너무 커서 저장하지 못했습니다. 새로 추가한 어셋이 보존되지 않습니다 — 개발자에게 알려주세요.',
+        msg: '엘리먼트 라이브러리 저장에 실패했습니다. 새로 추가한 어셋이 보존되지 않습니다 — 개발자에게 알려주세요.',
         ok: false,
       }}));
-      return;
-    }
-    void set(ELEMENTS_KEY, payload).catch(err => console.error('[Elements] IDB write failed:', err));
-  }, DEBOUNCE_MS);
+    });
+  return elementsWriteChain;
 }
 
 // Flush the element library NOW (quit / window hide), same contract as flushPersist.
 export function flushElements(): Promise<void> {
   if (elementsTimer) { clearTimeout(elementsTimer); elementsTimer = null; }
-  if (!pendingElements) return Promise.resolve();
   const a = pendingElements; pendingElements = null;
-  // Same synchronous-throw hazard as scheduleElementsSave: JSON.stringify blows up BEFORE
-  // any promise exists, so a .catch on the returned promise would never see it — and this
-  // runs on quit, where an uncaught throw could take the shutdown path with it.
-  try {
-    return set(ELEMENTS_KEY, JSON.stringify(a));
-  } catch (err) {
-    console.error('[Elements] flush failed — library too large to serialise:', err);
-    return Promise.resolve();
-  }
+  // Await whatever is already in flight even with nothing pending, so quit doesn't cut a
+  // chunk write in half and leave the manifest pointing at a chunk that isn't there.
+  return a ? saveElements(a) : elementsWriteChain.catch(() => {});
 }
 
-// Load the library, migrating from the legacy in-blob copy on first run after update.
-// `legacy` = whatever zustand/persist restored from the old blob (persist merges any
-// stored key back into state even though partialize no longer writes it), so the
-// migration source is already in memory — no second 385MB parse needed.
-// Migration is copy → verify → only then treated as migrated; on any failure we keep
-// the assets in memory and retry on the next change, so nothing is ever dropped.
+// Load the library. Three sources in order of preference:
+//   1. v2 chunks (current)
+//   2. v1 single blob → migrate to chunks
+//   3. whatever zustand/persist restored from the very old in-state copy → migrate
+// Migration writes the new form and only then removes the old, so a failure anywhere
+// leaves the previous copy exactly where it was.
 async function loadElementAssets(legacy: ElementAsset[]): Promise<ElementAsset[]> {
+  try {
+    const chunked = await readElementsChunked();
+    if (chunked) return chunked;
+  } catch (err) {
+    console.error('[Elements] chunked read failed, trying older formats:', err);
+  }
+  // v1 → v2
   try {
     const raw = await get(ELEMENTS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed as ElementAsset[];
+      if (Array.isArray(parsed)) {
+        console.log(`[Elements] migrating ${parsed.length} asset(s) from the single-blob format → chunks`);
+        // writeElementsChunked deletes ELEMENTS_KEY only after the manifest lands.
+        saveElements(parsed as ElementAsset[]);
+        return parsed as ElementAsset[];
+      }
     }
   } catch (err) {
-    console.warn('[Elements] dedicated store unreadable, falling back to legacy blob:', err);
+    console.warn('[Elements] single-blob store unreadable, falling back to in-state copy:', err);
   }
   if (legacy && legacy.length) {
-    try {
-      const payload = JSON.stringify(legacy);
-      await set(ELEMENTS_KEY, payload);
-      const back = await get(ELEMENTS_KEY);
-      if (back !== payload) throw new Error('verify mismatch');
-      console.log(`[Elements] migrated ${legacy.length} asset(s) → ${ELEMENTS_KEY} (${(payload.length / 1048576).toFixed(1)}MB)`);
-    } catch (err) {
-      // Keep them in memory; the change-subscriber retries the write later.
-      console.error('[Elements] migration failed — keeping in memory, will retry:', err);
-      scheduleElementsSave(legacy);
-    }
+    console.log(`[Elements] migrating ${legacy.length} asset(s) from the in-state copy → chunks`);
+    saveElements(legacy);
   }
   return legacy || [];
 }
@@ -149,19 +215,27 @@ const idbPersistStorage: PersistStorage<unknown> = {
           // handing those to the persist merge would hold three copies at once and can
           // OOM the renderer. loadElementAssets reads that key moments later and parses it
           // exactly once, which is what every normal launch already does.
-          if (result.elements) {
+          // Library restore, streamed. Each chunk goes file → IPC → IDB as a STRING and is
+          // released before the next one; nothing ever holds the whole library as one
+          // value. That is what makes an arbitrarily large library restorable — the
+          // previous version tried it in one piece and killed the renderer on startup.
+          if (result.elementsChunks > 0 && api.backupLoadElementsChunk) {
             try {
-              await set(ELEMENTS_KEY, result.elements);
-              console.log(`[Backup] Library restored (${(result.elements.length / 1048576).toFixed(1)}MB) → ${ELEMENTS_KEY}`);
+              for (let i = 0; i < result.elementsChunks; i++) {
+                const part = await api.backupLoadElementsChunk(i);
+                if (!part?.ok || typeof part.content !== 'string') throw new Error(`chunk ${i} unreadable`);
+                await set('seedance-elements-chunk-' + i, part.content);
+              }
+              await set('seedance-elements-manifest', JSON.stringify({
+                v: 2, chunks: result.elementsChunks, count: result.elementsCount || 0, savedAt: Date.now(),
+              }));
+              console.log(`[Backup] library restored from ${result.elementsChunks} chunk(s)`);
             } catch (e) {
-              // The work history still restores — that is the part that can't be remade.
-              console.warn('[Backup] library restore failed, work history unaffected:', e);
+              console.warn('[Backup] library restore failed — work history is unaffected:', e);
             }
-          } else if (result.elementsSkipped) {
-            console.warn(
-              `[Backup] Library NOT auto-restored — ${(result.elementsBytes / 1048576).toFixed(0)}MB exceeds the safe ` +
-              `startup limit and would crash the renderer. The work history is restored. ` +
-              `The library backup is intact at: ${result.elementsPath}`);
+          } else if (result.elements) {
+            // Older single-file library backup.
+            try { await set(ELEMENTS_KEY, result.elements); } catch (e) { console.warn('[Backup] legacy library restore failed:', e); }
           }
           return parse(result.content);
         }
@@ -219,23 +293,27 @@ const idbPersistStorage: PersistStorage<unknown> = {
         console.error('[Backup] state serialize failed:', err?.message || err);
       }
 
-      // ── The library second, best-effort ────────────────────────────────────────
-      // Written only when it actually changed (it is the expensive one), and skipped
-      // rather than allowed to take the state backup down with it.
-      try {
-        const els = st.elementAssets || [];
-        const serialized = JSON.stringify(els);
-        if (serialized !== lastBackedUpElements) {
-          api.backupSave(serialized, 'elements')
-            .then((r: any) => {
-              if (r?.ok) { lastBackedUpElements = serialized; console.log(`[Backup] elements ${(r.bytes / 1048576).toFixed(2)}MB → ${r.path}`); }
-              else console.warn('[Backup] elements save failed:', r?.error);
-            })
-            .catch((err: any) => console.warn('[Backup] elements save error:', err?.message || err));
+      // ── The library second, chunked, best-effort ───────────────────────────────
+      // Same chunking as IDB: no whole-library string is ever built, so the library can
+      // grow past 512MB without the backup quietly dying the way it did before.
+      // Skipped when unchanged — this is half a gigabyte of disk writes.
+      void (async () => {
+        try {
+          const els = st.elementAssets || [];
+          const parts = buildElementChunks(els);
+          const sig = parts.length + ':' + parts.reduce((n, p) => n + p.length, 0);
+          if (sig === lastBackedUpElements) return;
+          for (let i = 0; i < parts.length; i++) {
+            const r = await api.backupSaveElementsChunk(i, parts[i], parts.length, els.length);
+            if (!r?.ok) { console.warn('[Backup] elements chunk', i, 'failed:', r?.error); return; }
+          }
+          lastBackedUpElements = sig;
+          console.log(`[Backup] library mirrored in ${parts.length} chunk(s), ${els.length} asset(s)`);
+        } catch (err: any) {
+          // The work-history backup above already succeeded and is unaffected.
+          console.error('[Backup] library mirror failed (work history is safe):', err?.message || err);
         }
-      } catch (err: any) {
-        console.error('[Backup] elements serialize failed (state backup is unaffected):', err?.message || err);
-      }
+      })();
     }, BACKUP_DEBOUNCE_MS);
   },
   removeItem: async (name: string): Promise<void> => {

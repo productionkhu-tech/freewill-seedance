@@ -23,6 +23,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // External backup mirror — Documents/Freewill Seedance Backup/seedance-backup.json
   // kind: 'state' (default, the work history — small, must never fail) | 'elements'
   backupSave: (content, kind) => ipcRenderer.invoke('backup-save', content, kind),
+  // The library moves in chunks, never as one value: it is ~500MB and a single string
+  // hits V8's 512MB ceiling, while a single IPC message of that size kills the renderer.
+  backupSaveElementsChunk: (index, content, total, count) =>
+    ipcRenderer.invoke('backup-save-elements-chunk', index, content, total, count),
+  backupLoadElementsChunk: (index) => ipcRenderer.invoke('backup-load-elements-chunk', index),
   backupLoad: () => ipcRenderer.invoke('backup-load'),
   backupInfo: () => ipcRenderer.invoke('backup-info'),
   // Download folder (session-only — resets to OS Downloads on app restart)

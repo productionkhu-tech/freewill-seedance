@@ -1,13 +1,11 @@
 appId: com.freewill.seedance
-productName: Freewill Seedance
-# ★ The executable FILENAME is pinned to the old one on purpose. Do not "tidy" it.
-# productName drives the exe name by default, and renaming the exe silently breaks every
-# shortcut the installer does not know about — above all TASKBAR PINS, which users create
-# themselves and NSIS never tracks. Verified: after a rename the pinned .lnk still pointed
-# at "Freewill Seedance 2.0.exe" and its target no longer existed.
-# Splitting the two keeps every user-made shortcut working while the name people actually
-# see — window title, tray, Start Menu, uninstall entry — drops the "2.0".
-# Nobody reads the exe filename; everybody notices a dead taskbar icon.
+productName: Freewill Seedance 2.0
+# ★ Pinned deliberately, and it must stay pinned even if productName changes later.
+# By default the exe filename follows productName — and renaming the exe silently breaks
+# every shortcut the installer does not know about, above all TASKBAR PINS, which users
+# create themselves and NSIS never tracks. Verified on 26.7.3111: after a rename the
+# pinned .lnk still pointed at "Freewill Seedance 2.0.exe" and the target was gone.
+# Keeping this line means a future display-name change costs nobody their taskbar icon.
 executableName: Freewill Seedance 2.0
 # ★ appId is FROZEN. electron-builder derives the NSIS upgrade GUID from it
 #   (UUID.v5(appId) — verified against the live registry key 692f1479-3e76-5b20-9562-3e01b3da4a16).
@@ -15,7 +13,7 @@ executableName: Freewill Seedance 2.0
 #   two entries in Programs & Features. productName has zero influence on that GUID.
 # ★ package.json `name` is also FROZEN — it is what app.getName() returns (productName is
 #   NOT injected into the packaged package.json; verified by extracting it from app.asar),
-#   so userData stays at %APPDATA%reewill-seedance and no user loses their projects.
+#   so userData stays at %APPDATA%\freewill-seedance and no user loses their projects.
 copyright: Copyright (c) 2026 Freewill
 
 directories:
@@ -63,7 +61,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Freewill Seedance
+  shortcutName: Freewill Seedance 2.0
 
 publish:
   provider: github

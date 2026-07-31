@@ -59,7 +59,7 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    title: 'Freewill Seedance',
+    title: 'Freewill Seedance 2.0',
     icon: getIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
@@ -108,7 +108,7 @@ function createWindow() {
       e.preventDefault();
       mainWindow.hide();
       tray?.displayBalloon({
-        title: 'Freewill Seedance',
+        title: 'Freewill Seedance 2.0',
         content: 'Running in system tray. Double-click to reopen.',
         iconType: 'info',
       });
@@ -126,9 +126,9 @@ function createTray() {
   }
 
   tray = new Tray(trayIcon);
-  tray.setToolTip('Freewill Seedance');
+  tray.setToolTip('Freewill Seedance 2.0');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Freewill Seedance', enabled: false },
+    { label: 'Freewill Seedance 2.0', enabled: false },
     { type: 'separator' },
     { label: 'Open', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },
@@ -298,6 +298,44 @@ ipcMain.handle('backup-save', async (_e, content, kind) => {
   }
 });
 
+// ── Library backup, in chunks ────────────────────────────────────────────────
+// One file per chunk plus a manifest. The library outgrew every "just send the whole
+// thing" approach: a single string dies at V8's 512MB limit, and shipping half a gigabyte
+// through IPC in one message killed the renderer at startup. Per-chunk files mean neither
+// side ever holds more than ~32MB at once, so the library can grow without limit.
+const ELEMENTS_MANIFEST_PATH = path.join(BACKUP_DIR, 'seedance-elements-manifest.json');
+const elementsChunkPath = (i) => path.join(BACKUP_DIR, `seedance-elements-${String(i).padStart(3, '0')}.json`);
+
+ipcMain.handle('backup-save-elements-chunk', async (_e, index, content, total, count) => {
+  try {
+    if (typeof content !== 'string') return { ok: false, error: 'bad chunk' };
+    writeAtomic(elementsChunkPath(index), content);
+    if (index === total - 1) {
+      // Manifest last — until it lands, a partial run is simply not a valid backup.
+      writeAtomic(ELEMENTS_MANIFEST_PATH, JSON.stringify({ v: 2, chunks: total, count, savedAt: Date.now() }));
+      // Sweep chunk files left over from a previously larger library.
+      for (let i = total; i < total + 40; i++) {
+        try { if (fs.existsSync(elementsChunkPath(i))) fs.unlinkSync(elementsChunkPath(i)); } catch {}
+      }
+      // The old single-file library backup is now redundant (~500MB reclaimed).
+      try { if (fs.existsSync(ELEMENTS_BACKUP_PATH)) fs.unlinkSync(ELEMENTS_BACKUP_PATH); } catch {}
+    }
+    return { ok: true, bytes: content.length };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('backup-load-elements-chunk', async (_e, index) => {
+  try {
+    const f = elementsChunkPath(index);
+    if (!fs.existsSync(f)) return { ok: false, error: 'missing' };
+    return { ok: true, content: fs.readFileSync(f, 'utf8') };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 // Returns the state blob plus, separately, the library — the caller reattaches them.
 // Falls back to the archived combined file if the state file is missing, so a machine
 // that never completed a new-format write still restores.
@@ -323,18 +361,32 @@ ipcMain.handle('backup-load', async () => {
     // serve a page. So its size is checked on disk first and the bytes are never read
     // into memory unless they fit. The work history (~19MB) is what must never be lost,
     // and it restores either way; the library file stays on disk for a deliberate restore.
-    let elements = null, elementsBytes = 0, elementsSkipped = false;
+    // Chunked library (v2) is reported as a COUNT, not content — the renderer pulls the
+    // pieces one at a time. Only the old single-file form is still size-gated, because
+    // that one has to arrive in a single message or not at all.
+    let elementsChunks = 0, elementsCount = 0;
     try {
-      if (fs.existsSync(ELEMENTS_BACKUP_PATH)) {
-        elementsBytes = fs.statSync(ELEMENTS_BACKUP_PATH).size;
-        if (elementsBytes <= ELEMENTS_RESTORE_MAX) elements = fs.readFileSync(ELEMENTS_BACKUP_PATH, 'utf8');
-        else elementsSkipped = true;
+      if (fs.existsSync(ELEMENTS_MANIFEST_PATH)) {
+        const man = JSON.parse(fs.readFileSync(ELEMENTS_MANIFEST_PATH, 'utf8'));
+        if (man && man.chunks > 0) { elementsChunks = man.chunks; elementsCount = man.count || 0; }
       }
     } catch (e) {
-      // A damaged library backup must not block restoring the work history.
-      console.warn('[Backup] elements file unreadable:', e.message);
+      console.warn('[Backup] elements manifest unreadable:', e.message);
     }
-    return { ok: true, content, elements, elementsBytes, elementsSkipped,
+    let elements = null, elementsBytes = 0, elementsSkipped = false;
+    if (!elementsChunks) {
+      try {
+        if (fs.existsSync(ELEMENTS_BACKUP_PATH)) {
+          elementsBytes = fs.statSync(ELEMENTS_BACKUP_PATH).size;
+          if (elementsBytes <= ELEMENTS_RESTORE_MAX) elements = fs.readFileSync(ELEMENTS_BACKUP_PATH, 'utf8');
+          else elementsSkipped = true;
+        }
+      } catch (e) {
+        // A damaged library backup must not block restoring the work history.
+        console.warn('[Backup] elements file unreadable:', e.message);
+      }
+    }
+    return { ok: true, content, elements, elementsBytes, elementsSkipped, elementsChunks, elementsCount,
              elementsPath: ELEMENTS_BACKUP_PATH, path: path_, bytes: content.length };
   } catch (err) {
     return { ok: false, error: err.message };

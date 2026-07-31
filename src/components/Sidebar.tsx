@@ -357,17 +357,23 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // then only disappears when the pointer has genuinely been off every target for a
   // moment — which is also what makes moving between rows read as the line sliding.
   const dropClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const aimAt = (key: string) => {
+  // Where the single insertion line sits, in pixels from the top of the list's content.
+  // ONE line that moves, not one per row: a line per row can only blink off here and on
+  // there, which is the "뚝뚝" — a shared element animates its position instead, so
+  // moving between rows reads as the line sliding to the new gap.
+  const [dropLineTop, setDropLineTop] = useState<number | null>(null);
+  const aimAt = (key: string, lineTop?: number) => {
     if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
     setDropTarget(prev => (prev === key ? prev : key));
+    setDropLineTop(lineTop ?? null);
   };
   const releaseAim = () => {
     if (dropClearRef.current) clearTimeout(dropClearRef.current);
-    dropClearRef.current = setTimeout(() => { setDropTarget(null); dropClearRef.current = null; }, 70);
+    dropClearRef.current = setTimeout(() => { setDropTarget(null); setDropLineTop(null); dropClearRef.current = null; }, 70);
   };
   const endDrag = () => {
     if (dropClearRef.current) { clearTimeout(dropClearRef.current); dropClearRef.current = null; }
-    setDragId(null); setDropTarget(null);
+    setDragId(null); setDropTarget(null); setDropLineTop(null);
   };
   useEffect(() => () => { if (dropClearRef.current) clearTimeout(dropClearRef.current); }, []);
   // Which project's icon picker is open, plus where to anchor it.
@@ -549,7 +555,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               // and then the list container, whose own dragover handlers overwrite
               // dropTarget with 'g:…'/'root' — so the insertion line would never appear even
               // though the drop itself worked. (onDrop already stops; onDragOver must too.)
-              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id); } }}
+              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; aimAt('p:' + project.id, (e.currentTarget as HTMLElement).offsetTop); } }}
               onDragLeave={releaseAim}
               onDrop={(e) => {
                 e.preventDefault(); e.stopPropagation();
@@ -558,7 +564,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 endDrag();
               }}
               className={cn(
-                "group relative flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
+                "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
                 dragId === project.id && "opacity-40",
                 currentProjectId === project.id ? "bg-[#2a2a2d] text-white" : "text-white/70 hover:bg-[#2a2a2d]/50 hover:text-white"
               )}
@@ -569,19 +575,6 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               {/* Insertion line, drawn ABOVE the row — because dropping on a row inserts
                   BEFORE it. A ring around the row (what this used to be) reads as "replace
                   this one", which is the wrong promise. */}
-              {/* Always mounted, never conditionally rendered: mounting/unmounting gives you
-                  the hard on/off pop. Kept in the tree and transitioned instead, so it
-                  fades and grows out from the left as the target changes. */}
-              <div
-                aria-hidden
-                className={cn(
-                  'absolute -top-[3px] left-1 right-1 h-[3px] rounded-full bg-[#0071e3] pointer-events-none origin-left',
-                  'transition-[opacity,transform] duration-150 ease-out',
-                  dropTarget === 'p:' + project.id ? 'opacity-100 scale-x-100' : 'opacity-0 scale-x-75'
-                )}
-              >
-                <div className="absolute -left-[3px] -top-[2px] w-[7px] h-[7px] rounded-full bg-[#0071e3]" />
-              </div>
               <div className="flex items-center gap-2 overflow-hidden flex-1">
                 {/* Icon slot. The icon itself is always the project's own — the run/done
                     state rides as a small corner overlay instead of replacing it, so
@@ -722,7 +715,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <span className="font-medium">전체 갤러리</span>
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
+      <div className="relative flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
         // Dropping on the empty area below everything releases a project from its folder.
         onDragOver={(e) => { if (dragId) { e.preventDefault(); aimAt('root'); } }}
         onDragLeave={releaseAim}
@@ -733,6 +726,21 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           endDrag();
         }}
       >
+        {/* The one and only insertion line. Absolutely placed inside the scrolling content
+            so it rides along with the list, and moved by transform so the browser animates
+            position on the compositor instead of re-laying-out.
+            Opacity only — no scaleX: growing it from one end looked like a progress bar
+            filling up, which is not what a "it goes here" marker should say. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute left-2 right-2 top-0 h-[3px] z-10 rounded-full bg-[#0071e3] transition-[transform,opacity] duration-200 ease-out"
+          style={{
+            transform: `translateY(${(dropLineTop ?? 0) - 3}px)`,
+            opacity: dropLineTop == null ? 0 : 1,
+          }}
+        >
+          <div className="absolute -left-[2px] -top-[2px] w-[7px] h-[7px] rounded-full bg-[#0071e3]" />
+        </div>
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
             callers below. */}
         {!searchQuery.trim() && projectGroups.map((g) => {
