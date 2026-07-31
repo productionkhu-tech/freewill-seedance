@@ -349,6 +349,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
   const groupInputRef = useRef<HTMLInputElement>(null);
+  // A folder-name click waiting to see whether it becomes a double-click. See the name span.
+  const pendingToggle = useRef<number | null>(null);
   // ── Drag & drop ──────────────────────────────────────────────────────────
   // The drop point is decided from the POINTER'S Y against a snapshot of the list taken at
   // dragstart — never from whichever element is under the cursor. That distinction is the
@@ -359,11 +361,16 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // positions captured before the gap existed stay true for the whole drag.
   const [dragKind, setDragKind] = useState<'project' | 'group' | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
-  const [plan, setPlan] = useState<{ beforeId: string | null; groupId?: string } | null>(null);
+  // `into` marks the Windows-style "drop ONTO this folder" target — aiming at a folder's
+  // header row rather than at a position between rows. Same store call as the tail strip
+  // (land last inside it), but it has to be a distinct plan so the two can look different:
+  // the folder LIGHTS UP instead of a strip opening somewhere below it. Without that, a
+  // folder holding subfolders gave you no way to tell which one you were about to drop in.
+  const [plan, setPlan] = useState<{ beforeId: string | null; groupId?: string; into?: boolean } | null>(null);
   const [groupPlan, setGroupPlan] = useState<{ beforeId: string | null; parentId?: string } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const snapRef = useRef<{
-    slots: { y: number; beforeId: string | null; groupId?: string }[];
+    slots: { y: number; beforeId: string | null; groupId?: string; into?: boolean }[];
     groupSlots: { y: number; beforeId: string | null; parentId?: string }[];
     scrollTop: number;
   } | null>(null);
@@ -380,12 +387,18 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const takeSnapshot = () => {
     const list = listRef.current;
     if (!list) return;
-    const slots: { y: number; beforeId: string | null; groupId?: string }[] = [];
+    const slots: { y: number; beforeId: string | null; groupId?: string; into?: boolean }[] = [];
     const groupSlots: { y: number; beforeId: string | null; parentId?: string }[] = [];
     list.querySelectorAll<HTMLElement>('[data-row-id]').forEach(el =>
       slots.push({ y: el.getBoundingClientRect().top, beforeId: el.dataset.rowId!, groupId: el.dataset.rowGroup || undefined }));
     list.querySelectorAll<HTMLElement>('[data-section-end]').forEach(el =>
       slots.push({ y: el.getBoundingClientRect().top, beforeId: null, groupId: el.dataset.sectionEnd || undefined }));
+    // The folder header itself is a drop target — "put it in here", the way a folder in
+    // Explorer highlights when you hover it. Before this, aiming at a folder's header
+    // snapped to the first row of whatever was inside it (measured: hovering 광고 aimed
+    // at a row inside its subfolder 1차), so you could not tell the two apart.
+    list.querySelectorAll<HTMLElement>('[data-into-group]').forEach(el =>
+      slots.push({ y: el.getBoundingClientRect().top, beforeId: null, groupId: el.dataset.intoGroup!, into: true }));
     // Folder slots carry the parent they'd file into, exactly like project slots carry
     // their group. Subfolder headers are in here too, so folders reorder within a parent.
     list.querySelectorAll<HTMLElement>('[data-group-id]').forEach(el =>
@@ -454,8 +467,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     } else {
       const i = nearest(snap.slots);
       const sl = i < 0 ? null : snap.slots[i];
-      setPlan(prev => (prev && sl && prev.beforeId === sl.beforeId && prev.groupId === sl.groupId
-        ? prev : (sl ? { beforeId: sl.beforeId, groupId: sl.groupId } : null)));
+      setPlan(prev => (prev && sl && prev.beforeId === sl.beforeId && prev.groupId === sl.groupId && !!prev.into === !!sl.into
+        ? prev : (sl ? { beforeId: sl.beforeId, groupId: sl.groupId, into: sl.into } : null)));
     }
   };
 
@@ -484,10 +497,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // Leaving the sidebar mid-drag now leaves the last gap open until release. That is the
   // correct trade: it still shows where the drop would land, and dragend tidies it up.
   // ── Edge auto-scroll ─────────────────────────────────────────────────────────
-  // Without this a folder simply cannot be moved past the bottom of the visible list.
-  // The wheel is not a way out: Chromium suppresses wheel events for the duration of a
-  // native drag, so while you are holding something the list is frozen — the only thing
-  // that can scroll it is the drag itself.
+  // Without this a folder cannot be moved past the bottom of the visible list by dragging
+  // alone. The wheel works too (see the wheel listener below) — these cover different
+  // habits: the wheel for crossing a long list deliberately, the edge for the reflex of
+  // just pushing the thing downwards and expecting the list to follow.
   // The loop also re-runs planFor with the last pointer position, so the target keeps
   // updating while the list slides under a stationary cursor. Safe with the snapshot
   // design because planFor already corrects for (scrollTop - snapshot scrollTop).
@@ -541,6 +554,32 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     window.addEventListener('drop', off);
     return () => { window.removeEventListener('dragend', off); window.removeEventListener('drop', off); };
   }, []);
+
+  // The wheel, while dragging. Edge auto-scroll alone means the only way to cross a long
+  // list is to park at the edge and wait — fine for one screen, tedious for ten.
+  // Three things make it not jump:
+  //   · A NATIVE non-passive listener. React registers onWheel as passive, so a React
+  //     handler cannot preventDefault and the browser's own scroll would run as well —
+  //     two scrolls per notch.
+  //   · behavior:'instant'. `scroll-behavior: smooth` is inherited from <html>, and a
+  //     smooth animation fighting per-notch jumps is exactly the stutter to avoid.
+  //   · planFor right after, so the gap follows the content instead of catching up on the
+  //     next dragover ~350ms later.
+  // Bound only for the duration of a drag: closures stay fresh and normal scrolling is
+  // completely untouched.
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || !dragId) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      stopAutoScroll();                       // a deliberate wheel outranks the edge loop
+      const max = list.scrollHeight - list.clientHeight;
+      list.scrollTo({ top: Math.max(0, Math.min(max, list.scrollTop + e.deltaY)), behavior: 'instant' });
+      planFor(e.clientY);
+    };
+    list.addEventListener('wheel', onWheel, { passive: false });
+    return () => list.removeEventListener('wheel', onWheel);
+  }, [dragId, dragKind]);
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -703,7 +742,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // JSX into this render, so the same element persists and the transition can run.
   const renderTailDrop = (groupId: string | undefined, label: string) => {
     // Always rendered (zero height when idle) so the snapshot can measure this slot.
-    const on = !!dragId && dragKind === 'project' && plan?.beforeId === null && plan?.groupId === groupId;
+    const on = !!dragId && dragKind === 'project' && plan?.beforeId === null && plan?.groupId === groupId && !plan?.into;
     return (
       <div
         data-section-end={groupId ?? ''}
@@ -890,6 +929,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     const unseen = all.reduce((n, p) => n + unseenDoneCount(p, currentProjectId === p.id), 0);
     const running = all.some(p => p.messages.some(m => m.status === 'running' || m.status === 'queued'));
     const aimed = !!dragId && dragKind === 'group' && groupPlan?.beforeId === g.id;
+    const dropInto = !!dragId && dragKind === 'project' && plan?.into === true && plan?.groupId === g.id;
     const draggedName = projectGroups.find(x => x.id === dragId)?.name;
     const intoName = parentId ? projectGroups.find(x => x.id === parentId)?.name : null;
     return (
@@ -907,14 +947,27 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         </div>
         <div data-group-id={g.id} data-group-parent={parentId ?? ''}
           className={cn('rounded-[8px]', dragId === g.id && 'opacity-40')}>
-          <div className="group/g flex items-center gap-1.5 px-2 py-1.5 rounded-[8px] cursor-pointer text-white/50 hover:text-white/80 hover:bg-[#2a2a2d]/40 transition-colors"
+          <div data-into-group={g.id}
+            title="클릭: 접기·펴기 · 더블클릭: 이름 변경"
+            className={cn(
+              'group/g flex items-center gap-1.5 px-2 py-1.5 rounded-[8px] cursor-pointer transition-colors',
+              // Lit as a drop destination. A ring around the folder says "inside this one",
+              // which is the promise the drop actually keeps — and it says which one, even
+              // when a folder is sitting directly above its own subfolders.
+              dropInto
+                ? 'bg-[#0071e3]/25 ring-1 ring-[#0071e3] text-white'
+                : 'text-white/50 hover:text-white/80 hover:bg-[#2a2a2d]/40')}
             draggable={editingGroupId !== g.id}
             onDragStart={(e) => { e.stopPropagation(); beginDrag('group', g.id, e); }}
             onDragEnd={endDrag}
-            onClick={() => toggleProjectGroup(g.id)}
-            onDoubleClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}>
+            // Chevron / icon / count / padding: fold instantly. Aiming at the chevron is
+            // the deliberate "open this" gesture and it should never wait on anything.
+            // detail > 1 skips the second click of a double-click so it can't fold twice.
+            onClick={(e) => { if (e.detail > 1) return; toggleProjectGroup(g.id); }}>
             <ChevronRight size={13} className={cn('shrink-0 transition-transform', !g.collapsed && 'rotate-90')} />
-            {g.collapsed ? <Folder size={13} className="shrink-0" /> : <FolderOpen size={13} className="shrink-0" />}
+            {/* Open the folder while something hovers over it — the same "it will go in
+                here" cue Explorer gives. */}
+            {g.collapsed && !dropInto ? <Folder size={13} className="shrink-0" /> : <FolderOpen size={13} className="shrink-0" />}
             {editingGroupId === g.id ? (
               <input ref={groupInputRef} autoFocus value={editGroupName}
                 onChange={(e) => setEditGroupName(e.target.value)}
@@ -926,7 +979,29 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 onClick={(e) => e.stopPropagation()}
                 className="flex-1 min-w-0 bg-black border border-[#0071e3] rounded-[5px] px-1 py-0.5 text-[12px] text-white outline-none" />
             ) : (
-              <span className={cn('flex-1 truncate tracking-tight', depth === 0 ? 'text-[12px] font-semibold' : 'text-[11.5px] font-medium')}>{g.name}</span>
+              // The NAME is the rename target, so its single click has to wait long enough
+              // to know a second one isn't coming. Without the wait the folder folds first
+              // and the rename box opens on a folder that just shut itself — the rename
+              // worked, but it read as "double-click does something random".
+              // Only the name pays the 220ms; everything else in the header folds instantly.
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (e.detail > 1) return;
+                  if (pendingToggle.current) clearTimeout(pendingToggle.current);
+                  pendingToggle.current = window.setTimeout(() => {
+                    pendingToggle.current = null;
+                    toggleProjectGroup(g.id);
+                  }, 220);
+                }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  if (pendingToggle.current) { clearTimeout(pendingToggle.current); pendingToggle.current = null; }
+                  setEditingGroupId(g.id); setEditGroupName(g.name);
+                }}
+                className={cn('flex-1 truncate tracking-tight', depth === 0 ? 'text-[12px] font-semibold' : 'text-[11.5px] font-medium')}>
+                {g.name}
+              </span>
             )}
             <span className="shrink-0 text-[10px] text-white/25 tabular-nums group-hover/g:hidden">{all.length}</span>
             {g.collapsed && running && <Loader2 size={12} className="shrink-0 text-[#0071e3] animate-spin" />}
