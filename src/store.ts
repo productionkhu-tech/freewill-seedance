@@ -656,18 +656,18 @@ export const useAppStore = create<AppState>()(
       toggleProjectGroup: (id) => {
         set((state) => ({ projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, collapsed: !g.collapsed } : g) }));
       },
+      // Change which folder a project is filed under — and NOTHING else.
+      // `projects` array order is the one master order in the sidebar; groups are just a
+      // way of partitioning that order for display. So filing a project doesn't move it in
+      // the array, which is what makes taking it back out return it to its original spot
+      // instead of dumping it at the bottom. It never actually left its place.
+      // Want a specific position? That's `moveProjectBefore` — dropping ON a row is the
+      // gesture that says "put it exactly here", and it carries the group along with it.
       setProjectGroup: (projectId, groupId) => {
         set((state) => {
-          const moved = state.projects.find(p => p.id === projectId);
-          if (!moved || moved.groupId === groupId) return state;
-          // Re-append at the end of the target group so the drop lands somewhere
-          // predictable instead of wherever the project happened to sit before.
-          const rest = state.projects.filter(p => p.id !== projectId);
-          const updated = { ...moved, groupId };
-          const lastIdx = rest.map(p => p.groupId === groupId).lastIndexOf(true);
-          const next = [...rest];
-          next.splice(lastIdx + 1, 0, updated);
-          return { projects: next };
+          const cur = state.projects.find(p => p.id === projectId);
+          if (!cur || cur.groupId === groupId) return state;
+          return { projects: state.projects.map(p => p.id === projectId ? { ...p, groupId } : p) };
         });
       },
       // Drop a project onto another: it lands directly before the target AND adopts the
