@@ -235,6 +235,67 @@ function IconPicker({ anchor, current, onPick, onClose }: {
   );
 }
 
+// Right-click menu for a project row. Portaled and pinned to the cursor, with the same
+// edge-flip as the icon picker so it never opens off-screen.
+// Exists because drag-and-drop is the wrong and only way to file a project when the list
+// is long: dragging across a scrolling sidebar to reach a folder is fiddly, and there was
+// no way at all to make a folder *around* the project you're looking at.
+function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
+  at: { x: number; y: number };
+  project: Project;
+  groups: { id: string; name: string }[];
+  onPick: (groupId: string | undefined) => void;
+  onNewGroup: () => void;
+  onClose: () => void;
+}) {
+  const W = 210, H = Math.min(320, 108 + groups.length * 30);
+  const left = Math.min(at.x, window.innerWidth - W - 8);
+  const top = Math.min(at.y, window.innerHeight - H - 8);
+  return createPortal(
+    <div className="fixed inset-0 z-[115]" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }}>
+      <motion.div
+        initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.1, ease: 'easeOut' }}
+        onClick={(e) => e.stopPropagation()}
+        style={{ left, top, width: W }}
+        className="absolute bg-white rounded-xl shadow-2xl border border-gray-200 py-1 text-gray-900 overflow-hidden"
+      >
+        <div className="px-3 py-1.5 text-[11px] text-gray-400 truncate border-b border-gray-100">{project.name}</div>
+        <button onClick={() => { onNewGroup(); onClose(); }}
+          className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-100 transition-colors">
+          <FolderPlus size={13} className="shrink-0 text-indigo-500" />
+          이 프로젝트로 새 그룹 만들기
+        </button>
+        <div className="border-t border-gray-100 my-1" />
+        <div className="px-3 pb-1 text-[10px] text-gray-400">그룹으로 이동</div>
+        <div className="max-h-[190px] overflow-y-auto">
+          {groups.length === 0 && <div className="px-3 py-1.5 text-[12px] text-gray-300">만들어진 그룹이 없습니다</div>}
+          {groups.map(g => (
+            <button key={g.id} onClick={() => { onPick(g.id); onClose(); }} disabled={project.groupId === g.id}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12.5px] text-left transition-colors ${
+                project.groupId === g.id ? 'text-indigo-600 font-medium bg-indigo-50/60 cursor-default' : 'text-gray-700 hover:bg-gray-100'}`}>
+              <Folder size={13} className="shrink-0 opacity-60" />
+              <span className="truncate flex-1">{g.name}</span>
+              {project.groupId === g.id && <span className="shrink-0 text-[10px]">현재</span>}
+            </button>
+          ))}
+        </div>
+        {project.groupId && (
+          <>
+            <div className="border-t border-gray-100 my-1" />
+            <button onClick={() => { onPick(undefined); onClose(); }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-100 transition-colors">
+              <RotateCcw size={13} className="shrink-0 opacity-60" />
+              그룹에서 빼기
+            </button>
+          </>
+        )}
+      </motion.div>
+    </div>,
+    document.body
+  );
+}
+
 // Has this project finished something the user hasn't looked at?
 // The open project never badges — you are, by definition, looking at it (App.tsx keeps
 // its lastSeenAt current), so this is purely about the OTHER projects in the list.
@@ -267,6 +328,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // | 'root') so one piece of state can highlight rows, groups and the empty area.
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -431,6 +493,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               )}
               onClick={() => { if (editingId !== project.id) setCurrentProjectId(project.id); }}
               onDoubleClick={() => { setEditingId(project.id); setEditName(project.name); }}
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ id: project.id, x: e.clientX, y: e.clientY }); }}
             >
               <div className="flex items-center gap-2 overflow-hidden flex-1">
                 {/* Icon slot. The icon itself is always the project's own — the run/done
@@ -538,8 +601,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <button onClick={onToggle} className="p-1.5 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[6px] transition-colors shrink-0" title="Collapse sidebar">
             <PanelLeftClose size={18} />
           </button>
-          <button onClick={createProject} className="flex-1 flex items-center justify-center gap-2 bg-[#2a2a2d] hover:bg-[#3a3a3d] text-white px-4 py-2 rounded-[8px] font-medium transition-colors text-[17px]">
-            <Plus size={18} />
+          {/* whitespace-nowrap + min-w-0: adding the group button next to this stole enough
+              width to wrap "New Project" onto two lines. The label should shrink its padding,
+              never break. */}
+          <button onClick={createProject} className="flex-1 min-w-0 flex items-center justify-center gap-1.5 bg-[#2a2a2d] hover:bg-[#3a3a3d] text-white px-2 py-2 rounded-[8px] font-medium transition-colors text-[15px] whitespace-nowrap">
+            <Plus size={17} className="shrink-0" />
             New Project
           </button>
           <button
@@ -704,6 +770,28 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       </div>
       </>
     )}
+
+    {menu && (() => {
+      const p = projects.find(x => x.id === menu.id);
+      if (!p) return null;
+      return (
+        <ProjectMenu
+          at={{ x: menu.x, y: menu.y }}
+          project={p}
+          groups={projectGroups}
+          onPick={(gid) => setProjectGroup(p.id, gid)}
+          onNewGroup={() => {
+            // Make the folder AROUND this project: create it, move the project in, and
+            // drop straight into rename — the name is the only thing still missing.
+            const gid = createProjectGroup();
+            setProjectGroup(p.id, gid);
+            setEditingGroupId(gid);
+            setEditGroupName('');
+          }}
+          onClose={() => setMenu(null)}
+        />
+      );
+    })()}
 
     {iconPicker && (
       <IconPicker

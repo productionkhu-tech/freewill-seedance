@@ -101,6 +101,44 @@ export function VideoPlayer({ src, className, eager, is4k }: { src: string; clas
     return () => observer.disconnect();
   }, [eager]);
 
+  // ── Keep your place across fullscreen ──────────────────────────────────────
+  // Chromium scrolls a fullscreened element into view on the way IN and does not put
+  // the page back on the way OUT — measured 421px of drift, so you exit looking at a
+  // different clip than the one you opened.
+  // The scroll has already happened by the time `fullscreenchange` fires, so the
+  // position must be captured EARLIER: entering fullscreen always takes a user gesture
+  // on the video (the controls' button, or a double-click), and pointerdown precedes
+  // all of them. Restore on the way out.
+  const scrollHomeRef = useRef<{ el: Element; top: number } | null>(null);
+  const rememberScroll = () => {
+    let el: HTMLElement | null = containerRef.current;
+    while (el) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) {
+        scrollHomeRef.current = { el, top: el.scrollTop };
+        return;
+      }
+      el = el.parentElement;
+    }
+    scrollHomeRef.current = null;
+  };
+  useEffect(() => {
+    const onFsChange = () => {
+      const v = videoRef.current;
+      if (!v) return;
+      if (document.fullscreenElement === v) return;   // entering — nothing to do yet
+      const home = scrollHomeRef.current;
+      if (!home || !home.el.isConnected) return;
+      // Two frames: fullscreen teardown relays out, and a single frame lands too early.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        home.el.scrollTop = home.top;
+        scrollHomeRef.current = null;
+      }));
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
   // Hover-to-play with sound. Leaving the card just pauses — we keep the current
   // playback position so the next hover resumes from where the user was watching.
   const handleMouseEnter = () => {
@@ -174,6 +212,9 @@ export function VideoPlayer({ src, className, eager, is4k }: { src: string; clas
       ref={containerRef}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
+      // Capture phase: the native controls swallow pointerdown, so a bubbling listener
+      // would never see the click on the fullscreen button.
+      onPointerDownCapture={rememberScroll}
       className={`${className} aspect-video bg-black flex items-center justify-center relative`}
     >
       {!mounted && <Play size={40} className="text-white/30" />}
