@@ -348,6 +348,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
+  const groupInputRef = useRef<HTMLInputElement>(null);
   // ── Drag & drop ──────────────────────────────────────────────────────────
   // The drop point is decided from the POINTER'S Y against a snapshot of the list taken at
   // dragstart — never from whichever element is under the cursor. That distinction is the
@@ -399,19 +400,40 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     snapRef.current = { slots, groupSlots, scrollTop: list.scrollTop };
   };
 
-  const beginDrag = (kind: 'project' | 'group', id: string, e: DragEvent<HTMLElement>) => {
-    e.dataTransfer.setData('text/plain', id);
-    e.dataTransfer.effectAllowed = 'move';
-    setDragKind(kind); setDragId(id);
+  // What is being dragged, as a ref — the snapshot has to be re-taken from a dragover
+  // handler, which closes over stale state.
+  const dragRef = useRef<{ kind: 'project' | 'group'; id: string } | null>(null);
+  const snapFresh = useRef(false);
+
+  const captureSlots = () => {
     takeSnapshot();
     // A folder that has folders in it can only move at the top level (one level, hard).
     // Drop those targets from the snapshot rather than rejecting the drop at the end:
     // an illegal slot that still lights up promises a move that then doesn't happen, and
     // the user has no way to know why. Deleted from the snapshot, it simply never aims
     // there — the nearest LEGAL slot wins instead.
-    if (kind === 'group' && projectGroups.some(x => x.parentId === id) && snapRef.current) {
+    const d = dragRef.current;
+    if (d?.kind === 'group' && projectGroups.some(x => x.parentId === d.id) && snapRef.current) {
       snapRef.current.groupSlots = snapRef.current.groupSlots.filter(s => !s.parentId);
     }
+  };
+
+  const beginDrag = (kind: 'project' | 'group', id: string, e: DragEvent<HTMLElement>) => {
+    e.dataTransfer.setData('text/plain', id);
+    e.dataTransfer.effectAllowed = 'move';
+    setDragKind(kind); setDragId(id);
+    dragRef.current = { kind, id };
+    // ★ This snapshot is taken BEFORE React has re-rendered — setDragId above is async.
+    // If anything in the list changes size in response to a drag starting, every measured
+    // position below it is wrong by that much for the rest of the drag.
+    // It happened: empty groups showed a "비어 있음" hint that unmounted on `!dragId`, so
+    // two empty folders moved every row below them up by 65px (measured) — about 1.7 rows.
+    // You aim at one row, the app aims at another, and dropping "does nothing".
+    // Fixed at the source (the hint no longer unmounts), and again here: the first
+    // dragover re-measures, by which time the render has committed. Belt and braces,
+    // because the next person to add a drag-conditional element won't know about this.
+    snapFresh.current = false;
+    captureSlots();
   };
 
   // Nearest slot to the pointer, corrected for scrolling since the snapshot.
@@ -461,7 +483,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   //     opened at all).
   // Leaving the sidebar mid-drag now leaves the last gap open until release. That is the
   // correct trade: it still shows where the drop would land, and dragend tidies it up.
-  const endDrag = () => { setDragKind(null); setDragId(null); setPlan(null); setGroupPlan(null); snapRef.current = null; };
+  const endDrag = () => {
+    setDragKind(null); setDragId(null); setPlan(null); setGroupPlan(null);
+    snapRef.current = null; dragRef.current = null; snapFresh.current = false;
+  };
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -580,6 +605,18 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       inputRef.current.select();
     }
   }, [editingId]);
+
+  // Same for a group name. autoFocus alone only puts the caret somewhere in the existing
+  // text, so renaming meant selecting it by hand first — while the project rename right
+  // next to it hands you a selection you can type straight over. Two controls that look
+  // identical have to behave identically.
+  // Harmless on the create path (the name starts empty, so there is nothing to select).
+  useEffect(() => {
+    if (editingGroupId && groupInputRef.current) {
+      groupInputRef.current.focus();
+      groupInputRef.current.select();
+    }
+  }, [editingGroupId]);
 
   const handleRename = (id: string) => {
     if (editName.trim()) {
@@ -806,7 +843,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             <ChevronRight size={13} className={cn('shrink-0 transition-transform', !g.collapsed && 'rotate-90')} />
             {g.collapsed ? <Folder size={13} className="shrink-0" /> : <FolderOpen size={13} className="shrink-0" />}
             {editingGroupId === g.id ? (
-              <input autoFocus value={editGroupName}
+              <input ref={groupInputRef} autoFocus value={editGroupName}
                 onChange={(e) => setEditGroupName(e.target.value)}
                 onBlur={() => { if (editGroupName.trim()) renameProjectGroup(g.id, editGroupName.trim()); setEditingGroupId(null); }}
                 onKeyDown={(e) => {
@@ -862,8 +899,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               {depth === 0 && kids.length > 0 && renderGroupTailDrop(g.id, `${g.name} 안 맨 아래로`)}
               {own.map(renderProjectRow)}
               {renderTailDrop(g.id, own.length ? '이 그룹 맨 아래로' : '이 그룹으로')}
-              {/* A folder holding only subfolders isn't empty — don't tell the user it is. */}
-              {all.length === 0 && kids.length === 0 && !dragId && (
+              {/* A folder holding only subfolders isn't empty — don't tell the user it is.
+                  ★ Stays mounted during a drag. It used to hide on `!dragId`, which shrank
+                  the folder the instant a drag began and invalidated every measured
+                  position below it (65px with two empty folders — see beginDrag).
+                  Keeping it is also just correct: "프로젝트를 끌어다 놓으세요" is exactly
+                  what you want to read while dragging a project. */}
+              {all.length === 0 && kids.length === 0 && (
                 <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
               )}
               {/* With no children yet, this is the only way in by drag. It has to exist
@@ -958,7 +1000,16 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       </div>
       {/* One dragover handler for the entire list. Children deliberately have none. */}
       <div ref={listRef} className="relative flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
-        onDragOver={(e) => { if (dragId) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; planFor(e.clientY); } }}
+        onDragOver={(e) => {
+          if (!dragId) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          // Re-measure once, now that the drag-start render has committed. No gap can
+          // have opened yet (a gap needs a plan, a plan needs this handler), so this is
+          // the true resting layout of the list mid-drag. See beginDrag.
+          if (!snapFresh.current) { snapFresh.current = true; captureSlots(); }
+          planFor(e.clientY);
+        }}
         onDrop={(e) => { e.preventDefault(); applyDrop(); }}
       >
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
