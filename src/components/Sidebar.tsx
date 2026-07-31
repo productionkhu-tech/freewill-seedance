@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppStore, type Project } from '../store';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
@@ -155,8 +155,13 @@ function IconPicker({ anchor, current, onPick, onClose }: {
   const [err, setErr] = useState<string | null>(null);
   // Open on the tab that already holds the current icon, so re-picking doesn't start
   // you on a page that doesn't contain what you chose last time.
+  // '커스텀' is a tab like any other — uploading a PNG is just another way to pick an
+  // icon, so it belongs beside the emoji pages rather than as a permanent footer that
+  // steals height from every category.
+  const CUSTOM = 'custom';
   const [tab, setTab] = useState(() =>
-    ICON_CATEGORIES.find(c => current && c.items.includes(current))?.id ?? ICON_CATEGORIES[0].id);
+    current?.startsWith('data:') ? CUSTOM
+      : ICON_CATEGORIES.find(c => current && c.items.includes(current))?.id ?? ICON_CATEGORIES[0].id);
   const items = ICON_CATEGORIES.find(c => c.id === tab)?.items ?? [];
   const PANEL_W = 300, PANEL_H = 330; // keep in step with the real height (tabs + grid + actions + spec)
   // Keep the panel on screen when the row is near the bottom / right edge.
@@ -178,45 +183,52 @@ function IconPicker({ anchor, current, onPick, onClose }: {
         {/* Category tabs. A single flat grid of ~600 glyphs is a scroll-hunt; tabs keep
             any one page to a couple of screenfuls. */}
         <div className="flex gap-0.5 mb-1.5 overflow-x-auto pb-0.5 -mx-0.5 px-0.5">
-          {ICON_CATEGORIES.map(c => (
-            <button key={c.id} onClick={() => setTab(c.id)}
+          {[...ICON_CATEGORIES.map(c => ({ id: c.id, label: c.label })), { id: CUSTOM, label: '커스텀' }].map(c => (
+            <button key={c.id} onClick={() => { setTab(c.id); setErr(null); }}
               className={`shrink-0 px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-colors ${
                 tab === c.id ? 'bg-indigo-500 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
               {c.label}
             </button>
           ))}
         </div>
-        <div className="grid grid-cols-8 gap-0.5 h-[168px] overflow-y-auto content-start">
-          {items.map(e => (
-            <button key={e} onClick={() => { onPick(e); onClose(); }} title={e}
-              className={`h-[32px] rounded-md text-[18px] leading-none transition-colors ${current === e ? 'bg-indigo-100 ring-1 ring-indigo-300' : 'hover:bg-gray-100'}`}>
-              {e}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-gray-100">
-          <label className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11.5px] font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer transition-colors">
-            <Upload size={12} /> 이미지 업로드
-            <input type="file" accept={ICON_ACCEPT} className="hidden"
-              onChange={async (e) => {
-                const f = e.target.files?.[0]; e.target.value = '';
-                if (!f) return;
-                setErr(null);
-                try { onPick(await fileToIconDataUrl(f)); onClose(); }
-                catch (x: any) { setErr(x?.message || '변환 실패'); }
-              }} />
-          </label>
+        {tab === CUSTOM ? (
+          <div className="h-[168px] flex flex-col items-center justify-center gap-2.5 px-2">
+            {current?.startsWith('data:') && (
+              <img src={current} alt="" className="w-14 h-14 rounded-lg object-cover border border-gray-200" />
+            )}
+            <label className="flex items-center justify-center gap-1.5 px-3 py-2 text-[12px] font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg cursor-pointer transition-colors">
+              <Upload size={13} /> {current?.startsWith('data:') ? '다른 이미지로 교체' : '이미지 업로드'}
+              <input type="file" accept={ICON_ACCEPT} className="hidden"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0]; e.target.value = '';
+                  if (!f) return;
+                  setErr(null);
+                  try { onPick(await fileToIconDataUrl(f)); onClose(); }
+                  catch (x: any) { setErr(x?.message || '변환 실패'); }
+                }} />
+            </label>
+            {/* State the spec where the upload is, and say what happens to the file
+                (crop + downscale) — otherwise a rejected upload reads as a bug. */}
+            <p className={`text-[10px] leading-snug text-center ${err ? 'text-red-500' : 'text-gray-400'}`}>
+              {err || `${ICON_SPEC}\n가운데를 정사각으로 잘라 ${ICON_OUT_PX}px로 저장합니다`}
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-8 gap-0.5 h-[168px] overflow-y-auto content-start">
+            {items.map(e => (
+              <button key={e} onClick={() => { onPick(e); onClose(); }} title={e}
+                className={`h-[32px] rounded-md text-[18px] leading-none transition-colors ${current === e ? 'bg-indigo-100 ring-1 ring-indigo-300' : 'hover:bg-gray-100'}`}>
+                {e}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="mt-2 pt-2 border-t border-gray-100">
           <button onClick={() => { onPick(undefined); onClose(); }}
-            title="기본 아이콘으로"
-            className="flex items-center gap-1.5 px-2 py-1.5 text-[11.5px] font-medium text-gray-500 hover:text-gray-800 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
-            <RotateCcw size={12} /> 기본
+            className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11.5px] font-medium text-gray-500 hover:text-gray-800 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
+            <RotateCcw size={12} /> 기본 아이콘으로
           </button>
         </div>
-        {/* State the spec where the upload is, and say what actually happens to the file
-            (crop + downscale) — otherwise a rejected upload reads as a bug. */}
-        <p className={`text-[10px] leading-snug mt-1.5 px-0.5 ${err ? 'text-red-500' : 'text-gray-400'}`}>
-          {err || `${ICON_SPEC} · 가운데를 정사각으로 잘라 ${ICON_OUT_PX}px로 저장합니다`}
-        </p>
       </motion.div>
     </div>,
     document.body
@@ -245,8 +257,16 @@ function formatBytes(bytes: number | null): string {
 }
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
-  const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon, autoDownload, setAutoDownload } = useAppStore();
+  const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
+    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, toggleProjectGroup, setProjectGroup, moveProjectBefore,
+    autoDownload, setAutoDownload } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [editGroupName, setEditGroupName] = useState('');
+  // Drag state for reordering / refiling. dropTarget is a tagged id ('p:<id>' | 'g:<id>'
+  // | 'root') so one piece of state can highlight rows, groups and the empty area.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -379,6 +399,99 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     return projects.filter(p => p.name.toLowerCase().includes(query));
   }, [projects, searchQuery]);
 
+  // A project whose groupId points at a group that no longer exists counts as ungrouped.
+  // Without that fallback a stale id would make the project invisible — present in the
+  // data, absent from every list, and unreachable.
+  const ungroupedProjects = useMemo(() => {
+    const live = new Set(projectGroups.map(g => g.id));
+    return projects.filter(p => !p.groupId || !live.has(p.groupId));
+  }, [projects, projectGroups]);
+
+  // One project row. Extracted so the grouped list and the flat/search list render the
+  // exact same thing — two copies of 60 lines of row markup would drift within a week.
+  const renderProjectRow = (project: Project) => (
+            <div
+              key={project.id}
+              draggable={editingId !== project.id}
+              onDragStart={(e) => { e.dataTransfer.setData('text/plain', project.id); e.dataTransfer.effectAllowed = 'move'; setDragId(project.id); }}
+              onDragEnd={() => { setDragId(null); setDropTarget(null); }}
+              onDragOver={(e) => { if (dragId && dragId !== project.id) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTarget('p:' + project.id); } }}
+              onDragLeave={() => setDropTarget(t => t === 'p:' + project.id ? null : t)}
+              onDrop={(e) => {
+                e.preventDefault(); e.stopPropagation();
+                const id = e.dataTransfer.getData('text/plain');
+                if (id && id !== project.id) moveProjectBefore(id, project.id);
+                setDragId(null); setDropTarget(null);
+              }}
+              className={cn(
+                "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
+                dropTarget === 'p:' + project.id && "ring-1 ring-[#0071e3] ring-inset",
+                dragId === project.id && "opacity-40",
+                currentProjectId === project.id ? "bg-[#2a2a2d] text-white" : "text-white/70 hover:bg-[#2a2a2d]/50 hover:text-white"
+              )}
+              onClick={() => { if (editingId !== project.id) setCurrentProjectId(project.id); }}
+              onDoubleClick={() => { setEditingId(project.id); setEditName(project.name); }}
+            >
+              <div className="flex items-center gap-2 overflow-hidden flex-1">
+                {/* Icon slot. The icon itself is always the project's own — the run/done
+                    state rides as a small corner overlay instead of replacing it, so
+                    picking a 🎬 doesn't mean losing it every time you hit generate. */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIconPicker({ id: project.id, rect: (e.currentTarget as HTMLElement).getBoundingClientRect() });
+                  }}
+                  title="아이콘 변경"
+                  className="shrink-0 w-[18px] h-[18px] flex items-center justify-center rounded hover:bg-white/10 transition-colors"
+                >
+                  <ProjectIcon icon={project.icon} />
+                </button>
+                {editingId === project.id ? (
+                  <input
+                    ref={inputRef}
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onBlur={() => handleRename(project.id)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleRename(project.id); if (e.key === 'Escape') setEditingId(null); }}
+                    className="w-full bg-[#000000] border border-[#0071e3] rounded-[6px] px-1 py-0.5 text-[14px] text-white outline-none"
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                ) : (
+                  <span className="truncate text-[14px] font-medium">{project.name}</span>
+                )}
+              </div>
+              {!editingId && (() => {
+                const running = project.messages.some(m => m.status === 'running' || m.status === 'queued');
+                const unseen = unseenDoneCount(project, currentProjectId === project.id);
+                return (
+                  // Status lives on the RIGHT, not on the icon. Stacking a badge on a 16px
+                  // icon buries whatever the user picked — the point of choosing an icon is
+                  // that you can see it. Status and actions share this slot and cross-fade:
+                  // status when idle, rename/delete on hover.
+                  <div className="relative shrink-0 ml-2 flex items-center" style={{ minWidth: 44, height: 22 }}>
+                    <div className="absolute inset-0 flex items-center justify-end gap-1 opacity-100 group-hover:opacity-0 transition-opacity pointer-events-none">
+                      {running && <Loader2 size={14} className="text-[#0071e3] animate-spin" />}
+                      {!running && unseen > 0 && (
+                        <span title={`새로 완성된 영상 ${unseen}개`}
+                          className="min-w-[17px] h-[17px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[10px] font-bold leading-[17px] text-center tabular-nums">
+                          {unseen > 99 ? '99+' : unseen}
+                        </span>
+                      )}
+                    </div>
+                    <div className="absolute inset-0 flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={(e) => { e.stopPropagation(); setEditingId(project.id); setEditName(project.name); }} className="p-1 text-white/40 hover:text-white transition-colors" title="Rename">
+                        <Edit2 size={14} />
+                      </button>
+                      <button onClick={(e) => { e.stopPropagation(); setPendingDelete({ id: project.id, name: project.name }); }} className="p-1 text-white/40 hover:text-[#ff3b30] transition-colors" title="Delete">
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+  );
+
   return (
     <motion.div
       animate={{ width: collapsed ? 48 : 256 }}
@@ -429,6 +542,12 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             <Plus size={18} />
             New Project
           </button>
+          <button
+            onClick={() => { const id = createProjectGroup(); setEditingGroupId(id); setEditGroupName(''); }}
+            title="새 그룹 (프로젝트를 끌어다 넣으세요)"
+            className="shrink-0 p-2 text-white/50 hover:text-white bg-[#2a2a2d] hover:bg-[#3a3a3d] rounded-[8px] transition-colors">
+            <FolderPlus size={18} />
+          </button>
         </div>
         <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40" />
@@ -450,76 +569,88 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <span className="font-medium">전체 갤러리</span>
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar">
-        {filteredProjects.map((project) => (
-          <div
-            key={project.id}
-            className={cn(
-              "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
-              currentProjectId === project.id ? "bg-[#2a2a2d] text-white" : "text-white/70 hover:bg-[#2a2a2d]/50 hover:text-white"
-            )}
-            onClick={() => { if (editingId !== project.id) setCurrentProjectId(project.id); }}
-            onDoubleClick={() => { setEditingId(project.id); setEditName(project.name); }}
-          >
-            <div className="flex items-center gap-2 overflow-hidden flex-1">
-              {/* Icon slot. The icon itself is always the project's own — the run/done
-                  state rides as a small corner overlay instead of replacing it, so
-                  picking a 🎬 doesn't mean losing it every time you hit generate. */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setIconPicker({ id: project.id, rect: (e.currentTarget as HTMLElement).getBoundingClientRect() });
-                }}
-                title="아이콘 변경"
-                className="shrink-0 w-[18px] h-[18px] flex items-center justify-center rounded hover:bg-white/10 transition-colors"
-              >
-                <ProjectIcon icon={project.icon} />
-              </button>
-              {editingId === project.id ? (
-                <input
-                  ref={inputRef}
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  onBlur={() => handleRename(project.id)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleRename(project.id); if (e.key === 'Escape') setEditingId(null); }}
-                  className="w-full bg-[#000000] border border-[#0071e3] rounded-[6px] px-1 py-0.5 text-[14px] text-white outline-none"
-                  onClick={(e) => e.stopPropagation()}
-                />
-              ) : (
-                <span className="truncate text-[14px] font-medium">{project.name}</span>
+      <div className="flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
+        // Dropping on the empty area below everything releases a project from its folder.
+        onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTarget('root'); } }}
+        onDragLeave={() => setDropTarget(t => t === 'root' ? null : t)}
+        onDrop={(e) => {
+          e.preventDefault();
+          const id = e.dataTransfer.getData('text/plain');
+          if (id) setProjectGroup(id, undefined);
+          setDragId(null); setDropTarget(null);
+        }}
+      >
+        {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
+            callers below. */}
+        {!searchQuery.trim() && projectGroups.map((g) => {
+          const inGroup = projects.filter(p => p.groupId === g.id);
+          // ★ The badge appears in exactly ONE place at a time. Folded: the header carries
+          // the group's total. Unfolded: the header shows nothing and each row carries its
+          // own. Showing both would double-count the same clips in the same glance.
+          const groupUnseen = inGroup.reduce((n, p) => n + unseenDoneCount(p, currentProjectId === p.id), 0);
+          const groupRunning = inGroup.some(p => p.messages.some(m => m.status === 'running' || m.status === 'queued'));
+          const isDropTarget = dropTarget === 'g:' + g.id;
+          return (
+            <div key={g.id}
+              onDragOver={(e) => { if (dragId) { e.preventDefault(); e.stopPropagation(); setDropTarget('g:' + g.id); } }}
+              onDragLeave={() => setDropTarget(t => t === 'g:' + g.id ? null : t)}
+              onDrop={(e) => {
+                e.preventDefault(); e.stopPropagation();
+                const id = e.dataTransfer.getData('text/plain');
+                if (id) setProjectGroup(id, g.id);
+                setDragId(null); setDropTarget(null);
+              }}
+              className={cn('rounded-[8px]', isDropTarget && 'ring-1 ring-[#0071e3] ring-inset bg-[#0071e3]/5')}
+            >
+              <div className="group/g flex items-center gap-1.5 px-2 py-1.5 rounded-[8px] cursor-pointer text-white/50 hover:text-white/80 hover:bg-[#2a2a2d]/40 transition-colors"
+                onClick={() => toggleProjectGroup(g.id)}
+                onDoubleClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}>
+                <ChevronRight size={13} className={cn('shrink-0 transition-transform', !g.collapsed && 'rotate-90')} />
+                {g.collapsed ? <Folder size={13} className="shrink-0" /> : <FolderOpen size={13} className="shrink-0" />}
+                {editingGroupId === g.id ? (
+                  <input autoFocus value={editGroupName}
+                    onChange={(e) => setEditGroupName(e.target.value)}
+                    onBlur={() => { if (editGroupName.trim()) renameProjectGroup(g.id, editGroupName.trim()); setEditingGroupId(null); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { if (editGroupName.trim()) renameProjectGroup(g.id, editGroupName.trim()); setEditingGroupId(null); }
+                      if (e.key === 'Escape') setEditingGroupId(null);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex-1 min-w-0 bg-black border border-[#0071e3] rounded-[5px] px-1 py-0.5 text-[12px] text-white outline-none" />
+                ) : (
+                  <span className="flex-1 truncate text-[12px] font-semibold tracking-tight">{g.name}</span>
+                )}
+                <span className="shrink-0 text-[10px] text-white/25 tabular-nums group-hover/g:hidden">{inGroup.length}</span>
+                {g.collapsed && groupRunning && <Loader2 size={12} className="shrink-0 text-[#0071e3] animate-spin" />}
+                {g.collapsed && !groupRunning && groupUnseen > 0 && (
+                  <span title={`이 그룹에 새로 완성된 영상 ${groupUnseen}개`}
+                    className="shrink-0 min-w-[16px] h-[16px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[9px] font-bold leading-[16px] text-center tabular-nums">
+                    {groupUnseen > 99 ? '99+' : groupUnseen}
+                  </span>
+                )}
+                <div className="shrink-0 hidden group-hover/g:flex items-center gap-0.5">
+                  <button onClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}
+                    title="그룹 이름 변경" className="p-0.5 text-white/40 hover:text-white transition-colors"><Edit2 size={12} /></button>
+                  <button onClick={(e) => { e.stopPropagation(); deleteProjectGroup(g.id); }}
+                    title="그룹 해제 (안의 프로젝트는 그대로 남습니다)" className="p-0.5 text-white/40 hover:text-[#ff3b30] transition-colors"><Trash2 size={12} /></button>
+                </div>
+              </div>
+              {!g.collapsed && (
+                <div className="pl-3 space-y-1 pb-0.5">
+                  {inGroup.length === 0
+                    ? <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
+                    : inGroup.map(renderProjectRow)}
+                </div>
               )}
             </div>
-            {!editingId && (() => {
-              const running = project.messages.some(m => m.status === 'running' || m.status === 'queued');
-              const unseen = unseenDoneCount(project, currentProjectId === project.id);
-              return (
-                // Status lives on the RIGHT, not on the icon. Stacking a badge on a 16px
-                // icon buries whatever the user picked — the point of choosing an icon is
-                // that you can see it. Status and actions share this slot and cross-fade:
-                // status when idle, rename/delete on hover.
-                <div className="relative shrink-0 ml-2 flex items-center" style={{ minWidth: 44, height: 22 }}>
-                  <div className="absolute inset-0 flex items-center justify-end gap-1 opacity-100 group-hover:opacity-0 transition-opacity pointer-events-none">
-                    {running && <Loader2 size={14} className="text-[#0071e3] animate-spin" />}
-                    {!running && unseen > 0 && (
-                      <span title={`새로 완성된 영상 ${unseen}개`}
-                        className="min-w-[17px] h-[17px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[10px] font-bold leading-[17px] text-center tabular-nums">
-                        {unseen > 99 ? '99+' : unseen}
-                      </span>
-                    )}
-                  </div>
-                  <div className="absolute inset-0 flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={(e) => { e.stopPropagation(); setEditingId(project.id); setEditName(project.name); }} className="p-1 text-white/40 hover:text-white transition-colors" title="Rename">
-                      <Edit2 size={14} />
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); setPendingDelete({ id: project.id, name: project.name }); }} className="p-1 text-white/40 hover:text-[#ff3b30] transition-colors" title="Delete">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
-        ))}
+          );
+        })}
+        {(searchQuery.trim()
+          // While searching, groups and their collapsed state are ignored — you asked for
+          // a name, not for a place. Hiding a match inside a folded folder would be wrong.
+          ? filteredProjects
+          : ungroupedProjects
+        ).map(renderProjectRow)}
       </div>
       {/* Footer: download folder + dashboard link + cache cleanup */}
       <div className="p-3 border-t border-[#2a2a2d] shrink-0 space-y-2">

@@ -2642,20 +2642,10 @@ export function ChatArea() {
                                 </button>
                               )}
                             </div>
-                            {/* Clip metadata, one line. The chips above say WHAT was asked
-                                for; this says when it was fired, when it landed, and how
-                                long it took — the three things you need to identify a take. */}
-                            <div className="text-[11px] text-gray-400 whitespace-nowrap shrink-0 flex items-center gap-1.5 tabular-nums">
-                              <span title={`생성 시각 ${formatStampFull(msg.timestamp)}`}>{formatStamp(msg.timestamp)}</span>
-                              {msg.endTime && (
-                                <>
-                                  <span className="text-gray-300">→</span>
-                                  <span title={`완료 시각 ${formatStampFull(msg.endTime)}`}>{formatStamp(msg.endTime)}</span>
-                                </>
-                              )}
-                              <span className="text-gray-300">·</span>
-                              <span>소요 <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></span>
-                            </div>
+                            {/* Just the duration. The start/finish timestamps used to sit here
+                                too, but the clip already carries its stamp in the top-left
+                                corner — repeating it two lines below is noise, not detail. */}
+                            <div className="text-[11px] text-gray-400 whitespace-nowrap shrink-0">소요 시간: <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></div>
                           </div>
                         </div>
                       ) : null}

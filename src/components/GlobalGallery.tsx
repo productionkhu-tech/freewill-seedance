@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, MessageSquare, ChevronDown } from 'lucide-react';
+import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, MessageSquare, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAppStore, MODELS, type ChatMessage } from '../store';
 import { VideoPlayer, ClipStamp, downloadClip, revealClipFile } from './ChatArea';
 import { formatStamp, formatStampFull } from '../lib/utils';
@@ -150,6 +150,13 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   const [note, setNote] = useState<string | null>(null);
   const [shown, setShown] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const [scrolled, setScrolled] = useState(false);
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (el) setScrolled(el.scrollTop > 300);
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -345,7 +352,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       </div>
 
       {/* Grid */}
-      <div className="flex-1 overflow-y-auto p-5">
+      <div ref={scrollRef} onScroll={onScroll} className="relative flex-1 overflow-y-auto p-5">
         {rows.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3">
             <LayoutGrid size={44} className="text-gray-300" />
@@ -433,9 +440,56 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
               {rows.length - shown}개 더 불러오는 중…
             </div>
           )}
+          {/* End marker for the "최하단" button — an element to aim at, so the target
+              survives the list growing as content-visibility resolves real card heights. */}
+          <div ref={bottomRef} className="h-px" />
           </>
         )}
       </div>
+
+      {/* Jump to top / bottom. Fixed to the viewport, not the scroll container, so it
+          can't be dragged out of reach by the content.
+          ★ "최하단" first mounts the whole remaining list. Without that it would only
+          reach the bottom of the current page and the sentinel would quietly load more —
+          i.e. it wouldn't actually be the bottom, which is the one thing the button
+          promises. Two frames: one for React to mount the rest, one to measure it. */}
+      {rows.length > PAGE_SIZE && (
+        <div className="fixed bottom-5 right-5 z-[93] flex flex-col gap-1.5">
+          <button
+            onClick={() => scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}
+            title="최상단으로"
+            className={`w-9 h-9 flex items-center justify-center rounded-full bg-white/95 border border-gray-200 text-gray-500 shadow-md backdrop-blur-sm transition-all hover:text-indigo-600 hover:border-indigo-200
+              ${scrolled ? 'opacity-100' : 'opacity-0 pointer-events-none translate-y-1'}`}>
+            <ChevronUp size={17} />
+          </button>
+          <button
+            onClick={() => {
+              setShown(rows.length);
+              // ★ Aim at the END MARKER, not at a pixel offset. content-visibility:auto only
+              // ESTIMATES off-screen cards (contain-intrinsic-size); as the scroll passes over
+              // them their real heights land and the document grows underneath the animation,
+              // so any precomputed scrollTop stops short. An element reference survives that —
+              // it's still the last thing in the list however tall the list became.
+              // Two passes: one to travel, one to settle after the growth stops.
+              // Travel by element, finish by pixel: scrollIntoView gets us to the marker
+              // while the list is still resolving, then once heights have settled a plain
+              // scrollTo closes the last gap (the marker aligns to its own bottom edge, not
+              // past the container's padding).
+              const toMarker = (behavior: ScrollBehavior) => bottomRef.current?.scrollIntoView({ behavior, block: 'end' });
+              const toEnd = () => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight; };
+              requestAnimationFrame(() => requestAnimationFrame(() => {
+                toMarker('smooth');
+                setTimeout(() => toMarker('auto'), 600);
+                setTimeout(toEnd, 900);
+                setTimeout(toEnd, 1400); // last word, after content-visibility has settled
+              }));
+            }}
+            title={hasMore ? `최하단으로 (남은 ${rows.length - shown}개까지 모두 표시)` : '최하단으로'}
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-white/95 border border-gray-200 text-gray-500 shadow-md backdrop-blur-sm transition-colors hover:text-indigo-600 hover:border-indigo-200">
+            <ChevronDown size={17} />
+          </button>
+        </div>
+      )}
 
       {/* Local toast — this view is a portal above ChatArea, so it can't use ChatArea's. */}
       <AnimatePresence>

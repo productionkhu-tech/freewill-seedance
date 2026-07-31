@@ -287,6 +287,16 @@ export interface ChatMessage {
                            // browser picked the location (dev/anchor fallback).
 }
 
+// A sidebar folder. Purely an organisational shell: it owns no settings and no data,
+// only a name, an order (its position in the array) and whether it's folded shut.
+// Projects point AT a group rather than groups holding a list of projects — one place
+// to update on a move, and a project can never end up in two folders.
+export interface ProjectGroup {
+  id: string;
+  name: string;
+  collapsed?: boolean;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -298,6 +308,10 @@ export interface Project {
   icon?: string; // sidebar icon: an emoji character, OR a data: URL for an uploaded 64px PNG.
                  // ONE field, not two — `startsWith('data:')` tells them apart, and two
                  // fields would permit a meaningless both-set state. Undefined = default icon.
+  groupId?: string; // sidebar folder this project sits in. Undefined = ungrouped (shown
+                    // in a flat list below the groups). A dangling id — group deleted
+                    // some other way — is treated as ungrouped rather than hiding the
+                    // project, so a project can never become unreachable.
   lastSeenAt?: number; // completion timestamp of the newest finished clip the user has
                        // actually looked at. Drives the sidebar "done" badge: anything
                        // that finished after this is unseen. Stores the CLIP's time (not
@@ -335,6 +349,12 @@ interface AppState {
   renameProject: (id: string, name: string) => void;
   setProjectIcon: (id: string, icon: string | undefined) => void;
   markProjectSeen: (projectId: string) => void;
+  createProjectGroup: (name?: string) => string;
+  renameProjectGroup: (id: string, name: string) => void;
+  deleteProjectGroup: (id: string) => void;          // projects inside fall back to ungrouped
+  toggleProjectGroup: (id: string) => void;
+  setProjectGroup: (projectId: string, groupId: string | undefined) => void;
+  moveProjectBefore: (draggedId: string, targetId: string) => void;
   deleteProject: (id: string) => void;
   updateProjectSettings: (projectId: string, settings: Partial<GenerationSettings>) => void;
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
@@ -353,6 +373,7 @@ interface AppState {
   // ─── Element library ───
   assetCollections: AssetCollection[];
   elementAssets: ElementAsset[];
+  projectGroups: ProjectGroup[];
   projectCollectionId: Record<string, string>; // chat-projectId → bound collectionId
   createCollection: (name: string) => string;   // returns the new collection id
   renameCollection: (id: string, name: string) => void;
@@ -524,6 +545,7 @@ export const useAppStore = create<AppState>()(
       // ─── Element library state + actions ───
       assetCollections: [],
       elementAssets: [],
+      projectGroups: [],
       projectCollectionId: {},
       createCollection: (name) => {
         const id = uuidv4();
@@ -614,6 +636,56 @@ export const useAppStore = create<AppState>()(
             x.id === projectId ? { ...x, lastSeenAt: newest } : x
           ),
         }));
+      },
+      createProjectGroup: (name) => {
+        const g: ProjectGroup = { id: uuidv4(), name: name || `그룹 ${get().projectGroups.length + 1}` };
+        set((state) => ({ projectGroups: [...state.projectGroups, g] }));
+        return g.id;
+      },
+      renameProjectGroup: (id, name) => {
+        set((state) => ({ projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, name } : g) }));
+      },
+      // Deleting a folder must never delete what's inside it. Projects are released to the
+      // ungrouped list — visibly still there, one drag from being refiled.
+      deleteProjectGroup: (id) => {
+        set((state) => ({
+          projectGroups: state.projectGroups.filter(g => g.id !== id),
+          projects: state.projects.map(p => p.groupId === id ? { ...p, groupId: undefined } : p),
+        }));
+      },
+      toggleProjectGroup: (id) => {
+        set((state) => ({ projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, collapsed: !g.collapsed } : g) }));
+      },
+      setProjectGroup: (projectId, groupId) => {
+        set((state) => {
+          const moved = state.projects.find(p => p.id === projectId);
+          if (!moved || moved.groupId === groupId) return state;
+          // Re-append at the end of the target group so the drop lands somewhere
+          // predictable instead of wherever the project happened to sit before.
+          const rest = state.projects.filter(p => p.id !== projectId);
+          const updated = { ...moved, groupId };
+          const lastIdx = rest.map(p => p.groupId === groupId).lastIndexOf(true);
+          const next = [...rest];
+          next.splice(lastIdx + 1, 0, updated);
+          return { projects: next };
+        });
+      },
+      // Drop a project onto another: it lands directly before the target AND adopts the
+      // target's group. One gesture covers both reordering and moving between folders,
+      // which is what dragging onto a row visually promises.
+      moveProjectBefore: (draggedId, targetId) => {
+        if (draggedId === targetId) return;
+        set((state) => {
+          const dragged = state.projects.find(p => p.id === draggedId);
+          const target = state.projects.find(p => p.id === targetId);
+          if (!dragged || !target) return state;
+          const rest = state.projects.filter(p => p.id !== draggedId);
+          const at = rest.findIndex(p => p.id === targetId);
+          if (at < 0) return state;
+          const next = [...rest];
+          next.splice(at, 0, { ...dragged, groupId: target.groupId });
+          return { projects: next };
+        });
       },
       deleteProject: (id) => {
         set((state) => {
@@ -948,6 +1020,7 @@ export const useAppStore = create<AppState>()(
         currentProjectId: state.currentProjectId,
         autoDownload: state.autoDownload,
         assetCollections: state.assetCollections,
+        projectGroups: state.projectGroups,
         projectCollectionId: state.projectCollectionId,
       }),
       onRehydrateStorage: () => {

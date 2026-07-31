@@ -626,14 +626,15 @@ export async function downloadViaProxy(remoteUrl: string, filename: string): Pro
 }
 
 // Clip timestamps. Two forms on purpose:
-//   formatStamp  → "07/30 22:08"          — the badge on a clip; must stay narrow
-//   formatStampFull → "2026-07-30 22:08:41" — tooltips / detail, where the year and
-//                                             seconds are what you came for
-// Both are local time and zero-padded so they line up in a column (tabular-nums).
+//   formatStamp     → "26.07.30 22:08"      — the badge on a clip
+//   formatStampFull → "2026-07-30 22:08:41" — tooltips / detail, where seconds matter
+// The year is in the short form too: a project can span months, and "07/30" alone is
+// ambiguous the moment last year's footage is in the same gallery. Two digits keeps the
+// badge narrow. Both are local time and zero-padded so they line up (tabular-nums).
 const pad2 = (n: number) => String(n).padStart(2, '0');
 export function formatStamp(ms: number): string {
   const d = new Date(ms);
-  return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${pad2(d.getFullYear() % 100)}.${pad2(d.getMonth() + 1)}.${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 export function formatStampFull(ms: number): string {
   const d = new Date(ms);
