@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, MessageSquare, ChevronDown, ChevronUp } from 'lucide-react';
-import { useAppStore, MODELS, type ChatMessage } from '../store';
+import { useAppStore, MODELS, groupTree, type ChatMessage } from '../store';
 import { VideoPlayer, ClipStamp, downloadClip, revealClipFile } from './ChatArea';
 import { formatStamp, formatStampFull } from '../lib/utils';
 
@@ -25,7 +25,10 @@ import { formatStamp, formatStampFull } from '../lib/utils';
 //   3. VideoPlayer already lazy-mounts on intersection, so bytes only move for what's visible.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Row = ChatMessage & { projectId: string; projectName: string; projectIcon?: string; groupName: string };
+// groupId, not groupName. Filter values used to be names, and names are neither stable
+// (rename → the filter points at nothing) nor unique (two subfolders called "1차" under
+// different parents would merge into one option). Ids are both.
+type Row = ChatMessage & { projectId: string; projectName: string; projectIcon?: string; groupId?: string };
 
 const NO_GROUP = '그룹 없음';
 
@@ -68,7 +71,9 @@ const todayISO = () => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
-type Opt = { value: string; count: number };
+// `value` is what gets compared; `label` is what gets shown, when the two differ (group
+// options carry an id as their value and the folder's name as their label).
+type Opt = { value: string; count: number; label?: string };
 
 // Compact filter dropdown.
 // A native <select> was wrong here for two reasons: its popup grows with the option
@@ -90,11 +95,13 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8 }: {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [open]);
 
+  const text = (o: Opt) => o.label ?? o.value;
   const searchable = options.length > searchAfter;
   const shown = q.trim()
-    ? options.filter(o => o.value.toLowerCase().includes(q.trim().toLowerCase()))
+    ? options.filter(o => text(o).toLowerCase().includes(q.trim().toLowerCase()))
     : options;
   const active = value !== ALL;
+  const current = text(options.find(o => o.value === value) ?? { value, count: 0 });
 
   return (
     <div className="flex items-center gap-1.5 text-[12px]" ref={boxRef}>
@@ -103,7 +110,7 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8 }: {
         <button onClick={() => setOpen(v => !v)}
           className={`flex items-center gap-1 bg-white border rounded-lg pl-2 pr-1.5 py-1 text-[12px] transition-colors max-w-[170px]
             ${active ? 'border-indigo-300 text-indigo-700 font-medium' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>
-          <span className="truncate">{value}</span>
+          <span className="truncate">{current}</span>
           <ChevronDown size={13} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
         {open && (
@@ -123,7 +130,7 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8 }: {
                     // 4K footage at all?" instead of hiding the question.
                     className={`w-full flex items-center gap-2 text-left px-2.5 py-1.5 text-[12px] transition-colors
                       ${value === o.value ? 'bg-indigo-50 text-indigo-700 font-medium' : o.count === 0 ? 'text-gray-300 hover:bg-gray-50' : 'text-gray-700 hover:bg-gray-50'}`}>
-                    <span className="truncate flex-1">{o.value}</span>
+                    <span className="truncate flex-1">{text(o)}</span>
                     <span className="shrink-0 tabular-nums text-[11px] opacity-60">{o.count}</span>
                   </button>
                 ))}
@@ -171,7 +178,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   // Flatten every project's finished clips once. Newest first — the thing you are
   // looking for is almost always recent.
   const allRows = useMemo<Row[]>(() => {
-    const groupName = new Map(projectGroups.map(g => [g.id, g.name]));
+    const live = new Set(projectGroups.map(g => g.id));
     const out: Row[] = [];
     for (const p of projects) {
       for (const m of p.messages) {
@@ -180,7 +187,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           ...m, projectId: p.id, projectName: p.name, projectIcon: p.icon,
           // A project filed under a group that no longer exists counts as ungrouped —
           // same rule the sidebar uses, so the two views can't disagree.
-          groupName: (p.groupId && groupName.get(p.groupId)) || NO_GROUP,
+          groupId: p.groupId && live.has(p.groupId) ? p.groupId : undefined,
         });
       }
     }
@@ -210,7 +217,6 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     const withAll = (m: Map<string, number>, keys: string[]): Opt[] =>
       [{ value: ALL, count: allRows.length }, ...keys.map(k => ({ value: k, count: m.get(k) || 0 }))];
 
-    const gm = tally(r => r.groupName);
     const pm = tally(r => r.projectName);
     const mm = tally(r => modelLabel(r.usedSettings?.model));
     const rm = tally(r => resLabel(r.usedSettings?.resolution));
@@ -218,10 +224,32 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     // Any stray value not in the canonical ladder (older clip, future preset) still gets
     // listed — appended after the ladder rather than dropped.
     const extra = (m: Map<string, number>, ladder: string[]) => [...m.keys()].filter(k => !ladder.includes(k));
+    // Groups in sidebar order — parent, then its subfolders indented — with '그룹 없음'
+    // last, so the filter reads the way the sidebar looks.
+    // A PARENT counts (and selects) its whole subtree: asking for "광고" and being shown
+    // only the clips that happen to sit directly in it, while its subfolders are excluded,
+    // would be a filter that lies about what it contains.
+    const byGroup = new Map<string, number>();
+    let ungrouped = 0;
+    for (const r of allRows) {
+      if (r.groupId) byGroup.set(r.groupId, (byGroup.get(r.groupId) || 0) + 1);
+      else ungrouped++;
+    }
+    const t = groupTree(projectGroups);
+    const groups: Opt[] = [{ value: ALL, count: allRows.length }];
+    for (const root of t.roots) {
+      const kids = t.childrenOf(root.id);
+      groups.push({
+        value: root.id, label: root.name,
+        count: (byGroup.get(root.id) || 0) + kids.reduce((n, k) => n + (byGroup.get(k.id) || 0), 0),
+      });
+      // "부모 › 자식" rather than an indent: the label also has to work as the chip on the
+      // closed dropdown, where a bare "1차" says nothing about which folder's 1차 it is.
+      for (const k of kids) groups.push({ value: k.id, label: `${root.name} › ${k.name}`, count: byGroup.get(k.id) || 0 });
+    }
+    if (ungrouped) groups.push({ value: NO_GROUP, count: ungrouped });
     return {
-      // Groups in sidebar order, with '그룹 없음' last — matching how the sidebar
-      // stacks them, so the two views read the same way.
-      groups: withAll(gm, [...projectGroups.map(g => g.name).filter(n => gm.has(n)), ...(gm.has(NO_GROUP) ? [NO_GROUP] : [])]),
+      groups,
       projects: withAll(pm, [...pm.keys()]),
       models: withAll(mm, MODELS.map(m => m.name).filter(n => mm.has(n)).concat(extra(mm, MODELS.map(m => m.name)))),
       res: withAll(rm, [...RES_LADDER, ...extra(rm, RES_LADDER)]),
@@ -248,8 +276,16 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     ? [dayStart(fromDate) ?? 0, dayEnd(toDate) ?? Infinity]
     : [presetStart(period), Infinity];
 
+  // Which group ids a group selection accepts. Picking a parent accepts its subfolders
+  // too — one set built once, rather than a tree walk per row per render.
+  const groupMatch = useMemo(() => {
+    if (groupFilter === ALL || groupFilter === NO_GROUP) return null;
+    return new Set([groupFilter, ...groupTree(projectGroups).childrenOf(groupFilter).map(g => g.id)]);
+  }, [groupFilter, projectGroups]);
+
   const rows = useMemo(() => allRows.filter(r => {
-    if (groupFilter !== ALL && r.groupName !== groupFilter) return false;
+    if (groupFilter === NO_GROUP) { if (r.groupId) return false; }
+    else if (groupMatch && !(r.groupId && groupMatch.has(r.groupId))) return false;
     if (projectFilter !== ALL && r.projectName !== projectFilter) return false;
     if (modelFilter !== ALL && modelLabel(r.usedSettings?.model) !== modelFilter) return false;
     if (resFilter !== ALL) {
@@ -260,7 +296,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     if (r.timestamp < since || r.timestamp > until) return false;
     if (starredOnly && !r.starred) return false;
     return true;
-  }), [allRows, groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
+  }), [allRows, groupFilter, groupMatch, projectFilter, modelFilter, resFilter, ratioFilter, since, until, starredOnly]);
 
   // Any filter change resets the window — otherwise you narrow to 3 results and still
   // carry a "shown = 96" from before, or worse, land past the end of a shorter list.

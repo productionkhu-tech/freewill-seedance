@@ -447,6 +447,54 @@ export interface ProjectGroup {
   id: string;
   name: string;
   collapsed?: boolean;
+  parentId?: string; // the folder this folder sits in. Undefined = top level.
+                     // ★ EXACTLY ONE LEVEL. A group that has a parent can never itself be
+                     // a parent. Deeper trees were deliberately not built: past two levels
+                     // the sidebar runs out of horizontal room, the badge has to aggregate
+                     // over an arbitrary depth, and every drop needs a cycle check — all to
+                     // replace something project names already do well.
+}
+
+// The one rule that keeps nesting at one level, applied at READ time rather than trusted
+// from the data: a group is a SUBGROUP only if its parent exists AND that parent is itself
+// top-level. Anything failing the test renders at the top level instead of disappearing —
+// a dangling parentId, a parent that is itself nested, even a two-group cycle (A→B→A) all
+// resolve to "top-level", which is wrong-but-visible rather than right-but-gone.
+// Same principle as a project with a dangling groupId: whatever exists must be reachable.
+// Guarantees every group renders exactly once — a root, or a child of exactly one root.
+export function groupTree(groups: ProjectGroup[]) {
+  const byId = new Map(groups.map(g => [g.id, g]));
+  const isSub = (g: ProjectGroup) => {
+    if (!g.parentId) return false;
+    const parent = byId.get(g.parentId);
+    return !!parent && !parent.parentId;
+  };
+  return {
+    isSub,
+    roots: groups.filter(g => !isSub(g)),
+    childrenOf: (id: string) => groups.filter(g => g.parentId === id && isSub(g)),
+  };
+}
+
+// Is `parentId` a legal home for group `id`? The single gate every nesting path goes
+// through — drag, the folder menu, and creation all call it, so the one-level rule can't
+// be true in one path and false in another.
+// The sidebar also hides illegal drop targets, so reaching a `false` here means the data
+// or a caller is wrong. Refuse rather than guess: a silently-built three-deep tree is far
+// worse than a drop that doesn't take.
+function canNest(groups: ProjectGroup[], id: string, parentId: string | undefined): boolean {
+  if (!parentId) return true;                                       // → top level is always fine
+  if (parentId === id) return false;                                // never its own parent
+  const parent = groups.find(g => g.id === parentId);
+  if (!parent || parent.parentId) return false;                     // parent must itself be top-level
+  return !groups.some(g => g.parentId === id);                      // and the mover must be childless
+}
+
+// Unfold a destination folder so what just moved into it is actually on screen. Moving
+// something into a folded folder is indistinguishable from deleting it.
+function openChain(groups: ProjectGroup[], parentId: string | undefined): ProjectGroup[] {
+  if (!parentId) return groups;
+  return groups.map(g => g.id === parentId ? { ...g, collapsed: false } : g);
 }
 
 export interface Project {
@@ -501,16 +549,17 @@ interface AppState {
   renameProject: (id: string, name: string) => void;
   setProjectIcon: (id: string, icon: string | undefined) => void;
   markProjectSeen: (projectId: string) => void;
-  createProjectGroup: (name?: string) => string;
+  createProjectGroup: (name?: string, parentId?: string) => string;
   renameProjectGroup: (id: string, name: string) => void;
-  deleteProjectGroup: (id: string) => void;              // folder only — projects released
-  deleteProjectGroupWithProjects: (id: string) => void;  // folder AND everything in it
+  deleteProjectGroup: (id: string) => void;              // folder only — projects released, subfolders promoted
+  deleteProjectGroupWithProjects: (id: string) => void;  // folder, its subfolders, AND every project in them
   toggleProjectGroup: (id: string) => void;
+  setGroupParent: (groupId: string, parentId: string | undefined) => void;
   setProjectGroup: (projectId: string, groupId: string | undefined) => void;
   moveProjectBefore: (draggedId: string, targetId: string) => void;
   moveProjectToEnd: (projectId: string, groupId: string | undefined) => void;
   moveGroupBefore: (draggedId: string, targetId: string) => void;
-  moveGroupToEnd: (draggedId: string) => void;
+  moveGroupToEnd: (draggedId: string, parentId?: string) => void;
   deleteProject: (id: string) => void;
   updateProjectSettings: (projectId: string, settings: Partial<GenerationSettings>) => void;
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
@@ -793,9 +842,19 @@ export const useAppStore = create<AppState>()(
           ),
         }));
       },
-      createProjectGroup: (name) => {
-        const g: ProjectGroup = { id: uuidv4(), name: name || `그룹 ${get().projectGroups.length + 1}` };
-        set((state) => ({ projectGroups: [...state.projectGroups, g] }));
+      createProjectGroup: (name, parentId) => {
+        // A subfolder is only allowed under a top-level folder — same one-level rule as
+        // every other path. An illegal parent degrades to a top-level folder rather than
+        // failing: the user asked for a folder and gets one.
+        const parent = parentId ? get().projectGroups.find(g => g.id === parentId) : undefined;
+        const under = parent && !parent.parentId ? parent.id : undefined;
+        const g: ProjectGroup = { id: uuidv4(), name: name || `그룹 ${get().projectGroups.length + 1}`, parentId: under };
+        set((state) => ({
+          projectGroups: [...state.projectGroups, g].map(x =>
+            // Opening the destination is not optional: creating a subfolder inside a folded
+            // folder would otherwise put the user straight into renaming something invisible.
+            under && x.id === under ? { ...x, collapsed: false } : x),
+        }));
         return g.id;
       },
       renameProjectGroup: (id, name) => {
@@ -806,13 +865,20 @@ export const useAppStore = create<AppState>()(
       // could be reached by forgetting to pass something. The UI asks which one.
       deleteProjectGroup: (id) => {
         set((state) => ({
-          projectGroups: state.projectGroups.filter(g => g.id !== id),
+          projectGroups: state.projectGroups
+            .filter(g => g.id !== id)
+            // Subfolders are promoted, not destroyed. "그룹만 삭제" promises the contents
+            // survive, and a subfolder is contents.
+            .map(g => g.parentId === id ? { ...g, parentId: undefined } : g),
           projects: state.projects.map(p => p.groupId === id ? { ...p, groupId: undefined } : p),
         }));
       },
       deleteProjectGroupWithProjects: (id) => {
         set((state) => {
-          const doomed = new Set(state.projects.filter(p => p.groupId === id).map(p => p.id));
+          // The whole subtree: this folder and its subfolders. The confirm dialog counts
+          // the same set, so the number the user agreed to is the number that goes.
+          const gone = new Set([id, ...state.projectGroups.filter(g => g.parentId === id).map(g => g.id)]);
+          const doomed = new Set(state.projects.filter(p => p.groupId && gone.has(p.groupId)).map(p => p.id));
           const projects = state.projects.filter(p => !doomed.has(p.id));
           // If the open project was inside, fall back to whatever is left rather than
           // leaving currentProjectId pointing at something that no longer exists.
@@ -825,34 +891,62 @@ export const useAppStore = create<AppState>()(
           // If we had to jump to another project, make sure it is actually VISIBLE.
           // Landing on something tucked inside a folded folder looks like the app moved
           // you nowhere — the header changes but the sidebar shows no selection.
-          let projectGroups = state.projectGroups.filter(g => g.id !== id);
+          let projectGroups = state.projectGroups.filter(g => !gone.has(g.id));
           const landed = projects.find(p => p.id === currentProjectId);
           if (landed?.groupId) {
-            projectGroups = projectGroups.map(g => g.id === landed.groupId ? { ...g, collapsed: false } : g);
+            // Unfold the whole chain down to it. Unfolding only the immediate folder isn't
+            // enough once folders nest — an open subfolder inside a folded parent is just
+            // as invisible as a folded one.
+            const home = projectGroups.find(g => g.id === landed.groupId);
+            const open = new Set([landed.groupId, ...(home?.parentId ? [home.parentId] : [])]);
+            projectGroups = projectGroups.map(g => open.has(g.id) ? { ...g, collapsed: false } : g);
           }
           return { projectGroups, projects, currentProjectId, projectCollectionId: binding };
         });
       },
       // Reorder folders themselves. Same "insert before the target" rule as projects, so
-      // both drags mean the same thing.
+      // both drags mean the same thing — and, exactly like dropping a project onto a row,
+      // the dragged folder ADOPTS the target's parent. One gesture both reorders and files.
       moveGroupBefore: (draggedId, targetId) => {
         if (draggedId === targetId) return;
         set((state) => {
-          const from = state.projectGroups.findIndex(g => g.id === draggedId);
-          if (from < 0) return state;
+          const dragged = state.projectGroups.find(g => g.id === draggedId);
+          const target = state.projectGroups.find(g => g.id === targetId);
+          if (!dragged || !target) return state;
+          const parentId = target.parentId;
+          if (!canNest(state.projectGroups, draggedId, parentId)) return state;
           const rest = state.projectGroups.filter(g => g.id !== draggedId);
-          const at = targetId === null ? rest.length : rest.findIndex(g => g.id === targetId);
+          const at = rest.findIndex(g => g.id === targetId);
           if (at < 0) return state;
           const next = [...rest];
-          next.splice(at, 0, state.projectGroups[from]);
-          return { projectGroups: next };
+          next.splice(at, 0, { ...dragged, parentId });
+          return { projectGroups: openChain(next, parentId) };
         });
       },
-      moveGroupToEnd: (draggedId) => {
+      // Drop on the strip at the end of a folder list: land last among that parent's
+      // children (parentId undefined = last at the top level).
+      moveGroupToEnd: (draggedId, parentId) => {
         set((state) => {
           const g = state.projectGroups.find(x => x.id === draggedId);
           if (!g) return state;
-          return { projectGroups: [...state.projectGroups.filter(x => x.id !== draggedId), g] };
+          if (!canNest(state.projectGroups, draggedId, parentId)) return state;
+          const rest = state.projectGroups.filter(x => x.id !== draggedId);
+          const lastIdx = rest.map(x => (x.parentId || undefined) === parentId).lastIndexOf(true);
+          const next = [...rest];
+          next.splice(lastIdx + 1, 0, { ...g, parentId });
+          return { projectGroups: openChain(next, parentId) };
+        });
+      },
+      // Move a folder in or out of another without touching its position in the order.
+      setGroupParent: (groupId, parentId) => {
+        set((state) => {
+          const g = state.projectGroups.find(x => x.id === groupId);
+          if (!g || (g.parentId || undefined) === (parentId || undefined)) return state;
+          if (!canNest(state.projectGroups, groupId, parentId)) return state;
+          return {
+            projectGroups: openChain(
+              state.projectGroups.map(x => x.id === groupId ? { ...x, parentId } : x), parentId),
+          };
         });
       },
       toggleProjectGroup: (id) => {
@@ -869,7 +963,18 @@ export const useAppStore = create<AppState>()(
         set((state) => {
           const cur = state.projects.find(p => p.id === projectId);
           if (!cur || cur.groupId === groupId) return state;
-          return { projects: state.projects.map(p => p.id === projectId ? { ...p, groupId } : p) };
+          // Unfold the destination — the folder and, if it's a subfolder, its parent too.
+          // This path is the right-click menu, which gives no other feedback: without it,
+          // filing something into a folded folder just makes the row disappear.
+          // (Drag doesn't do this on purpose — the drop strip already says where it went,
+          // and unfolding under the cursor mid-drag would yank the list around.)
+          let projectGroups = state.projectGroups;
+          if (groupId) {
+            const home = projectGroups.find(g => g.id === groupId);
+            const open = new Set([groupId, ...(home?.parentId ? [home.parentId] : [])]);
+            projectGroups = projectGroups.map(g => open.has(g.id) ? { ...g, collapsed: false } : g);
+          }
+          return { projectGroups, projects: state.projects.map(p => p.id === projectId ? { ...p, groupId } : p) };
         });
       },
       // Drop on the strip at the end of a section: land last inside it.

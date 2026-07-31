@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo, Fragment, type DragEvent } from '
 import { createPortal } from 'react-dom';
 import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useAppStore, type Project } from '../store';
+import { useAppStore, groupTree, type Project, type ProjectGroup } from '../store';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
 import { GlobalGallery } from './GlobalGallery';
 
@@ -243,7 +243,9 @@ function IconPicker({ anchor, current, onPick, onClose }: {
 function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
   at: { x: number; y: number };
   project: Project;
-  groups: { id: string; name: string }[];
+  // Already in tree order (parent, then its children) — the menu is a flat list of
+  // buttons, so the order and the indent are the only things carrying the hierarchy.
+  groups: ProjectGroup[];
   onPick: (groupId: string | undefined) => void;
   onNewGroup: () => void;
   onClose: () => void;
@@ -291,9 +293,12 @@ function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
           {groups.length > 0 && shown.length === 0 && <div className="px-3 py-1.5 text-[12px] text-gray-300">일치하는 그룹 없음</div>}
           {shown.map(g => (
             <button key={g.id} onClick={() => { onPick(g.id); onClose(); }} disabled={project.groupId === g.id}
-              className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12.5px] text-left transition-colors ${
+              // Subfolders are indented rather than prefixed with their parent's name:
+              // a name that doesn't appear in the sidebar would be a second thing to read.
+              style={{ paddingLeft: g.parentId ? 26 : 12 }}
+              className={`w-full flex items-center gap-2 pr-3 py-1.5 text-[12.5px] text-left transition-colors ${
                 project.groupId === g.id ? 'text-indigo-600 font-medium bg-indigo-50/60 cursor-default' : 'text-gray-700 hover:bg-gray-100'}`}>
-              <Folder size={13} className="shrink-0 opacity-60" />
+              <Folder size={13} className={`shrink-0 ${g.parentId ? 'opacity-35' : 'opacity-60'}`} />
               <span className="truncate flex-1">{g.name}</span>
               {project.groupId === g.id && <span className="shrink-0 text-[10px]">현재</span>}
             </button>
@@ -338,7 +343,7 @@ function formatBytes(bytes: number | null): string {
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
-    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
+    projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, setGroupParent, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
     autoDownload, setAutoDownload } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
@@ -354,15 +359,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const [dragKind, setDragKind] = useState<'project' | 'group' | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [plan, setPlan] = useState<{ beforeId: string | null; groupId?: string } | null>(null);
-  const [groupPlan, setGroupPlan] = useState<{ beforeId: string | null } | null>(null);
+  const [groupPlan, setGroupPlan] = useState<{ beforeId: string | null; parentId?: string } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const snapRef = useRef<{
     slots: { y: number; beforeId: string | null; groupId?: string }[];
-    groupSlots: { y: number; beforeId: string | null }[];
+    groupSlots: { y: number; beforeId: string | null; parentId?: string }[];
     scrollTop: number;
   } | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const [pendingGroupDelete, setPendingGroupDelete] = useState<{ id: string; name: string; count: number } | null>(null);
+  const [pendingGroupDelete, setPendingGroupDelete] = useState<{ id: string; name: string; count: number; subCount: number } | null>(null);
   // ── Why dropTarget is set through these two helpers ──────────────────────────
   // HTML5 drag fires dragleave every time the pointer crosses into a CHILD of the row
   // (icon button, name span, action buttons). Clearing on each of those made the
@@ -375,15 +380,20 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     const list = listRef.current;
     if (!list) return;
     const slots: { y: number; beforeId: string | null; groupId?: string }[] = [];
-    const groupSlots: { y: number; beforeId: string | null }[] = [];
+    const groupSlots: { y: number; beforeId: string | null; parentId?: string }[] = [];
     list.querySelectorAll<HTMLElement>('[data-row-id]').forEach(el =>
       slots.push({ y: el.getBoundingClientRect().top, beforeId: el.dataset.rowId!, groupId: el.dataset.rowGroup || undefined }));
     list.querySelectorAll<HTMLElement>('[data-section-end]').forEach(el =>
       slots.push({ y: el.getBoundingClientRect().top, beforeId: null, groupId: el.dataset.sectionEnd || undefined }));
+    // Folder slots carry the parent they'd file into, exactly like project slots carry
+    // their group. Subfolder headers are in here too, so folders reorder within a parent.
     list.querySelectorAll<HTMLElement>('[data-group-id]').forEach(el =>
-      groupSlots.push({ y: el.getBoundingClientRect().top, beforeId: el.dataset.groupId! }));
-    const tail = list.querySelector<HTMLElement>('[data-group-end]');
-    if (tail) groupSlots.push({ y: tail.getBoundingClientRect().top, beforeId: null });
+      groupSlots.push({ y: el.getBoundingClientRect().top, beforeId: el.dataset.groupId!, parentId: el.dataset.groupParent || undefined }));
+    // One tail per parent plus the global one — querySelectorAll, not querySelector: the
+    // single-element version only ever found the top-level tail, so "last child of this
+    // folder" would have been unreachable.
+    list.querySelectorAll<HTMLElement>('[data-group-end]').forEach(el =>
+      groupSlots.push({ y: el.getBoundingClientRect().top, beforeId: null, parentId: el.dataset.groupEnd || undefined }));
     slots.sort((a, b) => a.y - b.y);
     groupSlots.sort((a, b) => a.y - b.y);
     snapRef.current = { slots, groupSlots, scrollTop: list.scrollTop };
@@ -394,6 +404,14 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     e.dataTransfer.effectAllowed = 'move';
     setDragKind(kind); setDragId(id);
     takeSnapshot();
+    // A folder that has folders in it can only move at the top level (one level, hard).
+    // Drop those targets from the snapshot rather than rejecting the drop at the end:
+    // an illegal slot that still lights up promises a move that then doesn't happen, and
+    // the user has no way to know why. Deleted from the snapshot, it simply never aims
+    // there — the nearest LEGAL slot wins instead.
+    if (kind === 'group' && projectGroups.some(x => x.parentId === id) && snapRef.current) {
+      snapRef.current.groupSlots = snapRef.current.groupSlots.filter(s => !s.parentId);
+    }
   };
 
   // Nearest slot to the pointer, corrected for scrolling since the snapshot.
@@ -409,7 +427,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     if (dragKind === 'group') {
       const i = nearest(snap.groupSlots);
       const g = i < 0 ? null : snap.groupSlots[i];
-      setGroupPlan(prev => (prev?.beforeId === (g ? g.beforeId : null) ? prev : (g ? { beforeId: g.beforeId } : null)));
+      setGroupPlan(prev => (prev && g && prev.beforeId === g.beforeId && prev.parentId === g.parentId
+        ? prev : (g ? { beforeId: g.beforeId, parentId: g.parentId } : null)));
     } else {
       const i = nearest(snap.slots);
       const sl = i < 0 ? null : snap.slots[i];
@@ -421,7 +440,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const applyDrop = () => {
     if (dragId) {
       if (dragKind === 'group' && groupPlan) {
-        if (groupPlan.beforeId) moveGroupBefore(dragId, groupPlan.beforeId); else moveGroupToEnd(dragId);
+        if (groupPlan.beforeId) moveGroupBefore(dragId, groupPlan.beforeId);
+        else moveGroupToEnd(dragId, groupPlan.parentId);
       } else if (dragKind === 'project' && plan) {
         if (plan.beforeId && plan.beforeId !== dragId) moveProjectBefore(dragId, plan.beforeId);
         else if (!plan.beforeId) moveProjectToEnd(dragId, plan.groupId);
@@ -715,6 +735,147 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     );
   };
 
+  // ── Folders, one level deep ───────────────────────────────────────────────────
+  // The tree is DERIVED at render time rather than trusted from the data — see
+  // groupTree() in the store. Anything malformed surfaces at the top level instead of
+  // vanishing, and every group renders exactly once.
+  const tree = useMemo(() => groupTree(projectGroups), [projectGroups]);
+  // Tree order (parent, then its children) for the right-click menu, which has no
+  // indentation of its own to fall back on.
+  const orderedGroups = useMemo(
+    () => tree.roots.flatMap(r => [r, ...tree.childrenOf(r.id)]),
+    [tree]);
+
+  // Where a dragged FOLDER lands at the end of a list — the top level, or inside a parent.
+  // ★ Plain function, not <GroupTailDrop/>: same remount trap as renderTailDrop.
+  const renderGroupTailDrop = (parentId: string | undefined, label: string) => {
+    const on = !!dragId && dragKind === 'group' && groupPlan?.beforeId === null && groupPlan?.parentId === parentId;
+    return (
+      <div data-group-end={parentId ?? ''}
+        className={cn('overflow-hidden transition-[height] duration-150 ease-out', on ? 'h-[30px]' : 'h-0')}>
+        <div className="h-[26px] flex items-center gap-1.5 px-2 rounded-[7px] border border-dashed border-[#0071e3]/70 bg-[#0071e3]/10">
+          <Folder size={12} className="shrink-0 text-[#4da3ff]" />
+          <span className="truncate text-[11px] text-[#4da3ff]">{label}</span>
+        </div>
+      </div>
+    );
+  };
+
+  // One folder and everything under it. depth 0 = top level, depth 1 = subfolder.
+  // Recursion stops at depth 0 asking for children, so two levels is structural here, not
+  // a convention someone can drift past.
+  const renderGroup = (g: ProjectGroup, depth: number) => {
+    const kids = depth === 0 ? tree.childrenOf(g.id) : [];
+    // The EFFECTIVE parent — where this row actually sits on screen. Reading g.parentId
+    // directly would publish a dangling id as a drop target: the slot would light up and
+    // then refuse the drop, with nothing on screen explaining why.
+    const parentId = depth === 0 ? undefined : g.parentId;
+    const own = projects.filter(p => p.groupId === g.id);
+    const kidIds = new Set(kids.map(k => k.id));
+    const all = kids.length ? [...own, ...projects.filter(p => p.groupId && kidIds.has(p.groupId))] : own;
+    // ★ The badge appears in exactly ONE place at a time. Folded: this header carries the
+    // total for its whole subtree. Unfolded: it shows nothing, and each child — subfolder
+    // header or project row — carries its own. Showing both double-counts the same clips
+    // in a single glance; with two levels it would treble-count.
+    const unseen = all.reduce((n, p) => n + unseenDoneCount(p, currentProjectId === p.id), 0);
+    const running = all.some(p => p.messages.some(m => m.status === 'running' || m.status === 'queued'));
+    const aimed = !!dragId && dragKind === 'group' && groupPlan?.beforeId === g.id;
+    const draggedName = projectGroups.find(x => x.id === dragId)?.name;
+    const intoName = parentId ? projectGroups.find(x => x.id === parentId)?.name : null;
+    return (
+      <Fragment key={g.id}>
+        {/* Gap for reordering the FOLDERS themselves. */}
+        <div className={cn('overflow-hidden transition-[height] duration-150 ease-out', aimed ? 'h-[30px]' : 'h-0')}>
+          <div className="h-[26px] flex items-center gap-1.5 px-2 rounded-[7px] border border-dashed border-[#0071e3]/70 bg-[#0071e3]/10">
+            <Folder size={12} className="shrink-0 text-[#4da3ff]" />
+            {/* Landing beside a subfolder means going INSIDE its parent. Say so on the
+                strip — otherwise the only way to find out is to drop and see. */}
+            <span className="truncate text-[11px] text-[#4da3ff]">
+              {draggedName} {intoName ? `→ ${intoName} 안으로` : '여기로'}
+            </span>
+          </div>
+        </div>
+        <div data-group-id={g.id} data-group-parent={parentId ?? ''}
+          className={cn('rounded-[8px]', dragId === g.id && 'opacity-40')}>
+          <div className="group/g flex items-center gap-1.5 px-2 py-1.5 rounded-[8px] cursor-pointer text-white/50 hover:text-white/80 hover:bg-[#2a2a2d]/40 transition-colors"
+            draggable={editingGroupId !== g.id}
+            onDragStart={(e) => { e.stopPropagation(); beginDrag('group', g.id, e); }}
+            onDragEnd={endDrag}
+            onClick={() => toggleProjectGroup(g.id)}
+            onDoubleClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}>
+            <ChevronRight size={13} className={cn('shrink-0 transition-transform', !g.collapsed && 'rotate-90')} />
+            {g.collapsed ? <Folder size={13} className="shrink-0" /> : <FolderOpen size={13} className="shrink-0" />}
+            {editingGroupId === g.id ? (
+              <input autoFocus value={editGroupName}
+                onChange={(e) => setEditGroupName(e.target.value)}
+                onBlur={() => { if (editGroupName.trim()) renameProjectGroup(g.id, editGroupName.trim()); setEditingGroupId(null); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { if (editGroupName.trim()) renameProjectGroup(g.id, editGroupName.trim()); setEditingGroupId(null); }
+                  if (e.key === 'Escape') setEditingGroupId(null);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="flex-1 min-w-0 bg-black border border-[#0071e3] rounded-[5px] px-1 py-0.5 text-[12px] text-white outline-none" />
+            ) : (
+              <span className={cn('flex-1 truncate tracking-tight', depth === 0 ? 'text-[12px] font-semibold' : 'text-[11.5px] font-medium')}>{g.name}</span>
+            )}
+            <span className="shrink-0 text-[10px] text-white/25 tabular-nums group-hover/g:hidden">{all.length}</span>
+            {g.collapsed && running && <Loader2 size={12} className="shrink-0 text-[#0071e3] animate-spin" />}
+            {g.collapsed && !running && unseen > 0 && (
+              <span title={`이 그룹에 새로 완성된 영상 ${unseen}개`}
+                className="shrink-0 min-w-[16px] h-[16px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[9px] font-bold leading-[16px] text-center tabular-nums">
+                {unseen > 99 ? '99+' : unseen}
+              </span>
+            )}
+            <div className="shrink-0 hidden group-hover/g:flex items-center gap-0.5">
+              {depth === 0 ? (
+                // Only top-level folders can hold folders, so only they offer it. An
+                // always-present button that refuses on a subfolder would be worse than
+                // no button at all.
+                <button onClick={(e) => {
+                  e.stopPropagation();
+                  const id = createProjectGroup(undefined, g.id);
+                  setEditingGroupId(id); setEditGroupName('');
+                }} title="하위 그룹 추가" className="p-0.5 text-white/40 hover:text-white transition-colors"><FolderPlus size={12} /></button>
+              ) : (
+                <button onClick={(e) => { e.stopPropagation(); setGroupParent(g.id, undefined); }}
+                  title="상위로 빼기" className="p-0.5 text-white/40 hover:text-white transition-colors"><RotateCcw size={12} /></button>
+              )}
+              <button onClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}
+                title="그룹 이름 변경" className="p-0.5 text-white/40 hover:text-white transition-colors"><Edit2 size={12} /></button>
+              <button onClick={(e) => { e.stopPropagation(); setPendingGroupDelete({ id: g.id, name: g.name, count: all.length, subCount: kids.length }); }}
+                title="그룹 삭제" className="p-0.5 text-white/40 hover:text-[#ff3b30] transition-colors"><Trash2 size={12} /></button>
+            </div>
+          </div>
+          {g.collapsed ? (
+            // A folded folder still has to be a destination. Without a slot here the only
+            // way to file something into it was to unfold it first — and people fold
+            // folders precisely to get them out of the way.
+            // Both strips live here; only one can ever be lit, because a drag is either a
+            // project or a folder and each reads its own slot list.
+            <div className="pl-3">
+              {renderTailDrop(g.id, `${g.name}(으)로`)}
+              {depth === 0 && renderGroupTailDrop(g.id, `${g.name} 안으로`)}
+            </div>
+          ) : (
+            <div className="pl-3 space-y-1 pb-0.5">
+              {kids.map(k => renderGroup(k, 1))}
+              {depth === 0 && kids.length > 0 && renderGroupTailDrop(g.id, `${g.name} 안 맨 아래로`)}
+              {own.map(renderProjectRow)}
+              {renderTailDrop(g.id, own.length ? '이 그룹 맨 아래로' : '이 그룹으로')}
+              {/* A folder holding only subfolders isn't empty — don't tell the user it is. */}
+              {all.length === 0 && kids.length === 0 && !dragId && (
+                <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
+              )}
+              {/* With no children yet, this is the only way in by drag. It has to exist
+                  before the folder has anything in it, which is exactly when it's needed. */}
+              {depth === 0 && kids.length === 0 && renderGroupTailDrop(g.id, `${g.name} 안으로`)}
+            </div>
+          )}
+        </div>
+      </Fragment>
+    );
+  };
+
   return (
     <motion.div
       animate={{ width: collapsed ? 48 : 256 }}
@@ -802,88 +963,9 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       >
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
             callers below. */}
-        {!searchQuery.trim() && projectGroups.map((g) => {
-          const inGroup = projects.filter(p => p.groupId === g.id);
-          // ★ The badge appears in exactly ONE place at a time. Folded: the header carries
-          // the group's total. Unfolded: the header shows nothing and each row carries its
-          // own. Showing both would double-count the same clips in the same glance.
-          const groupUnseen = inGroup.reduce((n, p) => n + unseenDoneCount(p, currentProjectId === p.id), 0);
-          const groupRunning = inGroup.some(p => p.messages.some(m => m.status === 'running' || m.status === 'queued'));
-          const groupAimed = !!dragId && dragKind === 'group' && groupPlan?.beforeId === g.id;
-          return (
-            <Fragment key={g.id}>
-            {/* Gap for reordering the FOLDERS themselves. */}
-            <div className={cn('overflow-hidden transition-[height] duration-150 ease-out', groupAimed ? 'h-[30px]' : 'h-0')}>
-              <div className="h-[26px] flex items-center gap-1.5 px-2 rounded-[7px] border border-dashed border-[#0071e3]/70 bg-[#0071e3]/10">
-                <Folder size={12} className="shrink-0 text-[#4da3ff]" />
-                <span className="truncate text-[11px] text-[#4da3ff]">{projectGroups.find(x => x.id === dragId)?.name} 여기로</span>
-              </div>
-            </div>
-            <div data-group-id={g.id} className={cn('rounded-[8px]', dragId === g.id && 'opacity-40')}>
-              <div className="group/g flex items-center gap-1.5 px-2 py-1.5 rounded-[8px] cursor-pointer text-white/50 hover:text-white/80 hover:bg-[#2a2a2d]/40 transition-colors"
-                draggable={editingGroupId !== g.id}
-                onDragStart={(e) => { e.stopPropagation(); beginDrag('group', g.id, e); }}
-                onDragEnd={endDrag}
-                onClick={() => toggleProjectGroup(g.id)}
-                onDoubleClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}>
-                <ChevronRight size={13} className={cn('shrink-0 transition-transform', !g.collapsed && 'rotate-90')} />
-                {g.collapsed ? <Folder size={13} className="shrink-0" /> : <FolderOpen size={13} className="shrink-0" />}
-                {editingGroupId === g.id ? (
-                  <input autoFocus value={editGroupName}
-                    onChange={(e) => setEditGroupName(e.target.value)}
-                    onBlur={() => { if (editGroupName.trim()) renameProjectGroup(g.id, editGroupName.trim()); setEditingGroupId(null); }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') { if (editGroupName.trim()) renameProjectGroup(g.id, editGroupName.trim()); setEditingGroupId(null); }
-                      if (e.key === 'Escape') setEditingGroupId(null);
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    className="flex-1 min-w-0 bg-black border border-[#0071e3] rounded-[5px] px-1 py-0.5 text-[12px] text-white outline-none" />
-                ) : (
-                  <span className="flex-1 truncate text-[12px] font-semibold tracking-tight">{g.name}</span>
-                )}
-                <span className="shrink-0 text-[10px] text-white/25 tabular-nums group-hover/g:hidden">{inGroup.length}</span>
-                {g.collapsed && groupRunning && <Loader2 size={12} className="shrink-0 text-[#0071e3] animate-spin" />}
-                {g.collapsed && !groupRunning && groupUnseen > 0 && (
-                  <span title={`이 그룹에 새로 완성된 영상 ${groupUnseen}개`}
-                    className="shrink-0 min-w-[16px] h-[16px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[9px] font-bold leading-[16px] text-center tabular-nums">
-                    {groupUnseen > 99 ? '99+' : groupUnseen}
-                  </span>
-                )}
-                <div className="shrink-0 hidden group-hover/g:flex items-center gap-0.5">
-                  <button onClick={(e) => { e.stopPropagation(); setEditingGroupId(g.id); setEditGroupName(g.name); }}
-                    title="그룹 이름 변경" className="p-0.5 text-white/40 hover:text-white transition-colors"><Edit2 size={12} /></button>
-                  <button onClick={(e) => { e.stopPropagation(); setPendingGroupDelete({ id: g.id, name: g.name, count: inGroup.length }); }}
-                    title="그룹 삭제" className="p-0.5 text-white/40 hover:text-[#ff3b30] transition-colors"><Trash2 size={12} /></button>
-                </div>
-              </div>
-              {g.collapsed ? (
-                // A folded folder still has to be a destination. Without a slot here the
-                // only way to file something into it was to unfold it first — and people
-                // fold folders precisely to get them out of the way.
-                <div className="pl-3">{renderTailDrop(g.id, `${g.name}(으)로`)}</div>
-              ) : (
-                <div className="pl-3 space-y-1 pb-0.5">
-                  {inGroup.map(renderProjectRow)}
-                  {renderTailDrop(g.id, inGroup.length ? '이 그룹 맨 아래로' : '이 그룹으로')}
-                  {inGroup.length === 0 && !dragId && (
-                    <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
-                  )}
-                </div>
-              )}
-            </div>
-            </Fragment>
-          );
-        })}
-        {/* Tail slot for folder reordering — measurable even when idle. */}
-        {!searchQuery.trim() && projectGroups.length > 0 && (
-          <div data-group-end="" className={cn('overflow-hidden transition-[height] duration-150 ease-out',
-            (!!dragId && dragKind === 'group' && groupPlan?.beforeId === null) ? 'h-[30px]' : 'h-0')}>
-            <div className="h-[26px] flex items-center gap-1.5 px-2 rounded-[7px] border border-dashed border-[#0071e3]/70 bg-[#0071e3]/10">
-              <Folder size={12} className="shrink-0 text-[#4da3ff]" />
-              <span className="truncate text-[11px] text-[#4da3ff]">맨 아래 그룹으로</span>
-            </div>
-          </div>
-        )}
+        {!searchQuery.trim() && tree.roots.map((g) => renderGroup(g, 0))}
+        {/* Tail slot for top-level folder reordering — measurable even when idle. */}
+        {!searchQuery.trim() && projectGroups.length > 0 && renderGroupTailDrop(undefined, '맨 아래 그룹으로')}
         {(searchQuery.trim()
           // While searching, groups and their collapsed state are ignored — you asked for
           // a name, not for a place. Hiding a match inside a folded folder would be wrong.
@@ -952,7 +1034,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         <ProjectMenu
           at={{ x: menu.x, y: menu.y }}
           project={p}
-          groups={projectGroups}
+          groups={orderedGroups}
           onPick={(gid) => setProjectGroup(p.id, gid)}
           onNewGroup={() => {
             // Make the folder AROUND this project: create it, move the project in, and
@@ -1028,27 +1110,36 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                   <h3 className="text-[16px] font-semibold tracking-tight leading-snug">그룹을 삭제할까요?</h3>
                   <p className="text-[13px] text-gray-500 mt-0.5 break-all">
                     {pendingGroupDelete.name}
+                    {pendingGroupDelete.subCount > 0 && <span className="text-gray-400"> · 하위 그룹 {pendingGroupDelete.subCount}개</span>}
                     {pendingGroupDelete.count > 0 && <span className="text-gray-400"> · 프로젝트 {pendingGroupDelete.count}개</span>}
                   </p>
                 </div>
               </div>
+              {/* The counts above are for the WHOLE subtree, and so is the destructive
+                  button below — the number shown is the number that goes. */}
               {pendingGroupDelete.count > 0
                 ? <p className="text-[12.5px] text-gray-600 leading-relaxed">
                     안에 있는 프로젝트를 어떻게 할지 골라주세요.
+                    {pendingGroupDelete.subCount > 0 && ' 하위 그룹까지 포함한 숫자입니다.'}
                   </p>
-                : <p className="text-[12.5px] text-gray-500">비어 있는 그룹입니다.</p>}
+                : <p className="text-[12.5px] text-gray-500">
+                    {pendingGroupDelete.subCount > 0 ? '프로젝트는 없고 하위 그룹만 있습니다.' : '비어 있는 그룹입니다.'}
+                  </p>}
             </div>
             <div className="px-5 pb-5 space-y-2">
               <button
                 autoFocus
                 onClick={() => { deleteProjectGroup(pendingGroupDelete.id); setPendingGroupDelete(null); }}
                 className="w-full px-4 py-2.5 rounded-xl text-[14px] font-semibold text-white bg-[#0071e3] hover:bg-[#0060c0] transition-colors focus:outline-none focus:ring-2 focus:ring-[#0071e3]/40 focus:ring-offset-2">
-                그룹만 삭제 {pendingGroupDelete.count > 0 && '(프로젝트는 남김)'}
+                그룹만 삭제 {pendingGroupDelete.subCount > 0
+                  ? '(하위 그룹·프로젝트는 밖으로)'
+                  : pendingGroupDelete.count > 0 && '(프로젝트는 남김)'}
               </button>
               {pendingGroupDelete.count > 0 && (
                 <button
                   onClick={() => { deleteProjectGroupWithProjects(pendingGroupDelete.id); setPendingGroupDelete(null); }}
                   className="w-full px-4 py-2.5 rounded-xl text-[13.5px] font-medium text-[#ff3b30] bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
+                  {pendingGroupDelete.subCount > 0 && `하위 그룹 ${pendingGroupDelete.subCount}개와 `}
                   프로젝트 {pendingGroupDelete.count}개까지 함께 삭제 · 되돌릴 수 없음
                 </button>
               )}
