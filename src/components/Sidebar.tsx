@@ -634,7 +634,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             <div
               data-row-id={project.id}
               data-row-group={project.groupId || ''}
-              draggable={editingId !== project.id}
+              // No dragging while a search is active. The list is flat then — groups
+              // aren't drawn — so a drop would silently re-file the project into a group
+              // the user can't even see. Moving things is a decision about a place; don't
+              // allow it while the places are hidden.
+              draggable={editingId !== project.id && !searchQuery.trim()}
               onDragStart={(e) => beginDrag('project', project.id, e)}
               onDragEnd={endDrag}
               className={cn(
@@ -852,7 +856,12 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                     title="그룹 삭제" className="p-0.5 text-white/40 hover:text-[#ff3b30] transition-colors"><Trash2 size={12} /></button>
                 </div>
               </div>
-              {!g.collapsed && (
+              {g.collapsed ? (
+                // A folded folder still has to be a destination. Without a slot here the
+                // only way to file something into it was to unfold it first — and people
+                // fold folders precisely to get them out of the way.
+                <div className="pl-3">{renderTailDrop(g.id, `${g.name}(으)로`)}</div>
+              ) : (
                 <div className="pl-3 space-y-1 pb-0.5">
                   {inGroup.map(renderProjectRow)}
                   {renderTailDrop(g.id, inGroup.length ? '이 그룹 맨 아래로' : '이 그룹으로')}

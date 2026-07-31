@@ -229,6 +229,19 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     };
   }, [allRows, projectGroups]);
 
+  // ★ Filter values are NAMES, and names are not stable — rename a group or a project and
+  // the selection points at something that no longer exists. The grid then shows 0 of N
+  // with a filter chip naming a group you just renamed, which reads as a broken gallery.
+  // Whenever a selection falls out of its own option list, drop it back to 전체.
+  useEffect(() => {
+    const has = (opts: Opt[], v: string) => opts.some(o => o.value === v);
+    if (!has(opts.groups, groupFilter)) setGroupFilter(ALL);
+    if (!has(opts.projects, projectFilter)) setProjectFilter(ALL);
+    if (!has(opts.models, modelFilter)) setModelFilter(ALL);
+    if (!has(opts.res, resFilter)) setResFilter(ALL);
+    if (!has(opts.ratios, ratioFilter)) setRatioFilter(ALL);
+  }, [opts, groupFilter, projectFilter, modelFilter, resFilter, ratioFilter]);
+
   // In 직접 mode an empty box means "unbounded on that side", so you can ask for
   // "everything before the 5th" without inventing a start date.
   const [since, until] = period === 'custom'

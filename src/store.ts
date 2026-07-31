@@ -822,10 +822,15 @@ export const useAppStore = create<AppState>()(
           }
           const binding = { ...state.projectCollectionId };
           for (const pid of doomed) delete binding[pid];
-          return {
-            projectGroups: state.projectGroups.filter(g => g.id !== id),
-            projects, currentProjectId, projectCollectionId: binding,
-          };
+          // If we had to jump to another project, make sure it is actually VISIBLE.
+          // Landing on something tucked inside a folded folder looks like the app moved
+          // you nowhere — the header changes but the sidebar shows no selection.
+          let projectGroups = state.projectGroups.filter(g => g.id !== id);
+          const landed = projects.find(p => p.id === currentProjectId);
+          if (landed?.groupId) {
+            projectGroups = projectGroups.map(g => g.id === landed.groupId ? { ...g, collapsed: false } : g);
+          }
+          return { projectGroups, projects, currentProjectId, projectCollectionId: binding };
         });
       },
       // Reorder folders themselves. Same "insert before the target" rule as projects, so
