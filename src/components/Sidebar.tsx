@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, Fragment, type DragEvent } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type RefObject, type DragEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -163,12 +163,17 @@ function IconPicker({ anchor, current, onPick, onClose }: {
     current?.startsWith('data:') ? CUSTOM
       : ICON_CATEGORIES.find(c => current && c.items.includes(current))?.id ?? ICON_CATEGORIES[0].id);
   const items = ICON_CATEGORIES.find(c => c.id === tab)?.items ?? [];
-  const PANEL_W = 300, PANEL_H = 330; // keep in step with the real height (tabs + grid + actions + spec)
-  // Keep the panel on screen when the row is near the bottom / right edge.
-  const left = Math.min(anchor.left, window.innerWidth - PANEL_W - 8);
-  const top = anchor.bottom + PANEL_H > window.innerHeight
-    ? Math.max(8, anchor.top - PANEL_H - 6)
-    : anchor.bottom + 6;
+  // PANEL_H is now only a HINT for which side of the row to prefer. Being on screen is
+  // guaranteed by useClampToViewport from the real measured box, so this drifting out of
+  // step with the contents can no longer put the panel where it cannot be seen.
+  const PANEL_W = 300, PANEL_H = 330;
+  const boxRef = useRef<HTMLDivElement>(null);
+  const { left, top } = useClampToViewport(
+    boxRef,
+    anchor.left,
+    anchor.bottom + PANEL_H > window.innerHeight ? anchor.top - PANEL_H - 6 : anchor.bottom + 6,
+    tab,
+  );
 
   return createPortal(
     <div className="fixed inset-0 z-[110]" onClick={onClose}>
@@ -176,6 +181,7 @@ function IconPicker({ anchor, current, onPick, onClose }: {
         initial={{ opacity: 0, scale: 0.96, y: -4 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         transition={{ duration: 0.12, ease: 'easeOut' }}
+        ref={boxRef}
         onClick={(e) => e.stopPropagation()}
         style={{ left, top, width: PANEL_W }}
         className="absolute bg-white rounded-xl shadow-2xl border border-gray-200 p-2.5 text-gray-900"
@@ -235,6 +241,32 @@ function IconPicker({ anchor, current, onPick, onClose }: {
   );
 }
 
+// Put a portalled popup where it was asked to go, then CORRECT it once the browser has
+// actually laid it out.
+// Every popup here used to position itself against a hard-coded height constant, and a
+// constant is a promise to update it whenever the contents change — a promise nobody keeps.
+// Measured after adding subgroup indentation to the project menu: the constant said 356px,
+// the real panel was 367px, and it hung 3px off the bottom of the screen. The estimate is
+// now only a hint for the nicer of two placements; THIS is what guarantees it is on screen.
+// useLayoutEffect, not useEffect: the correction lands before paint, so nothing jumps.
+function useClampToViewport(ref: RefObject<HTMLElement | null>, wantLeft: number, wantTop: number, dep?: unknown) {
+  const [pos, setPos] = useState({ left: wantLeft, top: wantTop });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // ★ offsetWidth/offsetHeight, NOT getBoundingClientRect(). These popups mount with a
+    // scale-up entrance animation, and getBoundingClientRect reports the TRANSFORMED box —
+    // at scale 0.97 a 367px panel measures 356px, and the clamp politely leaves it 3px off
+    // the bottom of the screen. Measured exactly that. offset* are layout metrics and
+    // ignore transforms, so they give the size the panel will actually settle at.
+    const w = el.offsetWidth, h = el.offsetHeight;
+    const left = Math.max(8, Math.min(wantLeft, window.innerWidth - w - 8));
+    const top = Math.max(8, Math.min(wantTop, window.innerHeight - h - 8));
+    setPos(p => (p.left === left && p.top === top ? p : { left, top }));
+  }, [ref, wantLeft, wantTop, dep]);
+  return pos;
+}
+
 // Right-click menu for a project row. Portaled and pinned to the cursor, with the same
 // edge-flip as the icon picker so it never opens off-screen.
 // Exists because drag-and-drop is the wrong and only way to file a project when the list
@@ -253,20 +285,19 @@ function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
   const [q, setQ] = useState('');
   const searchable = groups.length > 7;   // same threshold as the gallery filters
   const shown = q.trim() ? groups.filter(g => g.name.toLowerCase().includes(q.trim().toLowerCase())) : groups;
-  // Height estimate drives the edge-flip only; keep it in step with the real layout so the
-  // menu doesn't get pushed off-screen. header 28 + new-group 36 + rule 9 + label 18
-  // + list (capped 190) + search 30? + ungroup 45?
   const W = 220;
   const LIST_MAX = 190;
-  const H = 91 + Math.min(LIST_MAX, Math.max(28, groups.length * 28))
-    + (searchable ? 30 : 0) + (project.groupId ? 45 : 0);
-  const left = Math.min(at.x, window.innerWidth - W - 8);
-  const top = Math.min(at.y, window.innerHeight - H - 8);
+  // No height estimate any more. The menu opens at the cursor and useClampToViewport pulls
+  // it back on screen from the real measured box — including after the search box filters
+  // the list and the panel shrinks.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const { left, top } = useClampToViewport(boxRef, at.x, at.y, shown.length);
   return createPortal(
     <div className="fixed inset-0 z-[115]" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }}>
       <motion.div
         initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.1, ease: 'easeOut' }}
+        ref={boxRef}
         onClick={(e) => e.stopPropagation()}
         style={{ left, top, width: W }}
         className="absolute bg-white rounded-xl shadow-2xl border border-gray-200 py-1 text-gray-900 overflow-hidden"

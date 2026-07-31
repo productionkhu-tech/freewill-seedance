@@ -929,13 +929,17 @@ export const useAppStore = create<AppState>()(
         });
       },
       setProjectIcon: (id, icon) => {
-        set((state) => ({
+        set((state) => {
+          const cur = state.projects.find(p => p.id === id);
+          if (!cur || cur.icon === icon) return state;   // re-picking the same icon writes nothing
+          return {
           projects: state.projects.map((p) =>
             // updatedAt is deliberately NOT bumped: the icon is decoration, and the
             // project list is ordered/《recently touched》 by real work, not by cosmetics.
             p.id === id ? { ...p, icon } : p
           ),
-        }));
+        };
+        });
       },
       // Mark every finished clip in this project as seen (clears the sidebar badge).
       // ★ The guard runs BEFORE set(): this is called on every render pass that touches
@@ -984,6 +988,7 @@ export const useAppStore = create<AppState>()(
           const t = groupTree(state.projectGroups);
           const final = uniqueName(name, namesInContainer(state.projectGroups, state.projects,
             t.isSub(me) ? me.parentId : undefined, { groupId: id }));
+          if (final === me.name) return state;   // confirming the same name writes nothing
           return { projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, name: final } : g) };
         });
       },
@@ -1077,7 +1082,14 @@ export const useAppStore = create<AppState>()(
         });
       },
       toggleProjectGroup: (id) => {
-        set((state) => ({ projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, collapsed: !g.collapsed } : g) }));
+        set((state) => {
+          // Guard before the map(): a miss would still hand every subscriber a brand-new
+          // array — a full re-render AND a re-serialize of the whole state for nothing.
+          // Reachable in practice: the sidebar delays a folder-name click by 220ms to see
+          // if it becomes a double-click, and the folder can be gone by the time it fires.
+          if (!state.projectGroups.some(g => g.id === id)) return state;
+          return { projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, collapsed: !g.collapsed } : g) };
+        });
       },
       // Change which folder a project is filed under — and NOTHING else.
       // `projects` array order is the one master order in the sidebar; groups are just a
