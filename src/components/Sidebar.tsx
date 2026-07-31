@@ -732,6 +732,67 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     return projects.filter(p => !p.groupId || !live.has(p.groupId));
   }, [projects, projectGroups]);
 
+  // ── Folders, one level deep ───────────────────────────────────────────────────
+  // The tree is DERIVED at render time rather than trusted from the data — see
+  // groupTree() in the store. Anything malformed surfaces at the top level instead of
+  // vanishing, and every group renders exactly once.
+  const tree = useMemo(() => groupTree(projectGroups), [projectGroups]);
+  // Tree order (parent, then its children) for the right-click menu, which has no
+  // indentation of its own to fall back on.
+  const orderedGroups = useMemo(
+    () => tree.roots.flatMap(r => [r, ...tree.childrenOf(r.id)]),
+    [tree]);
+
+  // ── Would this drop actually move anything? ─────────────────────────────────
+  // An indicator that promises a move and then does nothing is worse than no indicator:
+  // you let go, the list sits still, and you conclude the drag is broken. The commonest
+  // case is dropping something next to itself — the gap opening directly above the very
+  // row being dragged, which can only ever be a no-op.
+  // Judged in VISUAL order, not array order. Two projects can be array-neighbours without
+  // being screen-neighbours (another folder's project sits between them), and the reverse;
+  // what the user is promised is what they can see, so that is what gets checked.
+  const liveGroupOf = (gid?: string) => (gid && projectGroups.some(g => g.id === gid) ? gid : undefined);
+
+  const projectDropIsNoop = (p: { beforeId: string | null; groupId?: string }, id: string): boolean => {
+    const me = projects.find(x => x.id === id);
+    if (!me) return true;
+    const myG = liveGroupOf(me.groupId);
+    const seq = projects.filter(x => liveGroupOf(x.groupId) === myG); // array order == on-screen order within a container
+    const i = seq.findIndex(x => x.id === id);
+    if (p.beforeId) {
+      if (p.beforeId === id) return true;                       // onto itself
+      const t = projects.find(x => x.id === p.beforeId);
+      if (!t) return true;
+      if (liveGroupOf(t.groupId) !== myG) return false;         // changes folder → real move
+      return seq[i + 1]?.id === p.beforeId;                     // already sitting right before it
+    }
+    if (p.groupId !== myG) return false;                        // into a different folder → real move
+    return seq.length > 0 && seq[seq.length - 1].id === id;     // already last in this folder
+  };
+
+  const groupDropIsNoop = (gp: { beforeId: string | null; parentId?: string }, id: string): boolean => {
+    const me = projectGroups.find(g => g.id === id);
+    if (!me) return true;
+    const myParent = tree.isSub(me) ? me.parentId : undefined;
+    const seq = myParent ? tree.childrenOf(myParent) : tree.roots;
+    const i = seq.findIndex(g => g.id === id);
+    if (gp.beforeId) {
+      if (gp.beforeId === id) return true;
+      const t = projectGroups.find(g => g.id === gp.beforeId);
+      if (!t) return true;
+      const tParent = tree.isSub(t) ? t.parentId : undefined;
+      if (tParent !== myParent) return false;
+      return seq[i + 1]?.id === gp.beforeId;
+    }
+    if (gp.parentId !== myParent) return false;
+    return seq.length > 0 && seq[seq.length - 1].id === id;
+  };
+
+  // The live plans, blanked out when they would achieve nothing. Everything that draws an
+  // indicator reads THESE, so there is one place where "this drop is real" is decided.
+  const livePlan = dragId && dragKind === 'project' && plan && !projectDropIsNoop(plan, dragId) ? plan : null;
+  const liveGroupPlan = dragId && dragKind === 'group' && groupPlan && !groupDropIsNoop(groupPlan, dragId) ? groupPlan : null;
+
   // The strip at the end of a section. Only exists while something is being dragged —
   // it's an affordance, not furniture. It also fills a real gap: dropping on a row inserts
   // BEFORE that row, so without this there is no way to reach the last slot of a list.
@@ -742,7 +803,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // JSX into this render, so the same element persists and the transition can run.
   const renderTailDrop = (groupId: string | undefined, label: string) => {
     // Always rendered (zero height when idle) so the snapshot can measure this slot.
-    const on = !!dragId && dragKind === 'project' && plan?.beforeId === null && plan?.groupId === groupId && !plan?.into;
+    const on = !!livePlan && livePlan.beforeId === null && livePlan.groupId === groupId && !livePlan.into;
     return (
       <div
         data-section-end={groupId ?? ''}
@@ -776,7 +837,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   // rather than the row, the aim clears, the gap closes, the row slides back under the
   // cursor, and it opens again — forever.
   const renderProjectRow = (project: Project) => {
-    const aimed = !!dragId && dragKind === 'project' && plan?.beforeId === project.id;
+    const aimed = !!livePlan && livePlan.beforeId === project.id;
     const dragging = dragId ? projects.find(p => p.id === dragId) : null;
     return (
       <Fragment key={project.id}>
@@ -884,21 +945,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     );
   };
 
-  // ── Folders, one level deep ───────────────────────────────────────────────────
-  // The tree is DERIVED at render time rather than trusted from the data — see
-  // groupTree() in the store. Anything malformed surfaces at the top level instead of
-  // vanishing, and every group renders exactly once.
-  const tree = useMemo(() => groupTree(projectGroups), [projectGroups]);
-  // Tree order (parent, then its children) for the right-click menu, which has no
-  // indentation of its own to fall back on.
-  const orderedGroups = useMemo(
-    () => tree.roots.flatMap(r => [r, ...tree.childrenOf(r.id)]),
-    [tree]);
-
   // Where a dragged FOLDER lands at the end of a list — the top level, or inside a parent.
   // ★ Plain function, not <GroupTailDrop/>: same remount trap as renderTailDrop.
   const renderGroupTailDrop = (parentId: string | undefined, label: string) => {
-    const on = !!dragId && dragKind === 'group' && groupPlan?.beforeId === null && groupPlan?.parentId === parentId;
+    const on = !!liveGroupPlan && liveGroupPlan.beforeId === null && liveGroupPlan.parentId === parentId;
     return (
       <div data-group-end={parentId ?? ''}
         className={cn('overflow-hidden transition-[height] duration-150 ease-out', on ? 'h-[30px]' : 'h-0')}>
@@ -928,8 +978,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     // in a single glance; with two levels it would treble-count.
     const unseen = all.reduce((n, p) => n + unseenDoneCount(p, currentProjectId === p.id), 0);
     const running = all.some(p => p.messages.some(m => m.status === 'running' || m.status === 'queued'));
-    const aimed = !!dragId && dragKind === 'group' && groupPlan?.beforeId === g.id;
-    const dropInto = !!dragId && dragKind === 'project' && plan?.into === true && plan?.groupId === g.id;
+    const aimed = !!liveGroupPlan && liveGroupPlan.beforeId === g.id;
+    const dropInto = !!livePlan && livePlan.into === true && livePlan.groupId === g.id;
     const draggedName = projectGroups.find(x => x.id === dragId)?.name;
     const intoName = parentId ? projectGroups.find(x => x.id === parentId)?.name : null;
     return (
@@ -1037,8 +1087,9 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             // folders precisely to get them out of the way.
             // Both strips live here; only one can ever be lit, because a drag is either a
             // project or a folder and each reads its own slot list.
+            // The folder header itself now lights up as the destination, so the strip
+            // that used to sit under a folded folder is gone — one signal, not two.
             <div className="pl-3">
-              {renderTailDrop(g.id, `${g.name}(으)로`)}
               {depth === 0 && renderGroupTailDrop(g.id, `${g.name} 안으로`)}
             </div>
           ) : (
@@ -1046,7 +1097,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               {kids.map(k => renderGroup(k, 1))}
               {depth === 0 && kids.length > 0 && renderGroupTailDrop(g.id, `${g.name} 안 맨 아래로`)}
               {own.map(renderProjectRow)}
-              {renderTailDrop(g.id, own.length ? '이 그룹 맨 아래로' : '이 그룹으로')}
+              {/* No "이 그룹 맨 아래로" strip any more. "Put it in this folder" is what the
+                  glowing header says, and saying it twice in two places was the thing that
+                  made it unclear which folder was meant. The strip survives only where
+                  there is no header to light up — the ungrouped list at the bottom. */}
               {/* A folder holding only subfolders isn't empty — don't tell the user it is.
                   ★ Stays mounted during a drag. It used to hide on `!dragId`, which shrank
                   the folder the instant a drag began and invalidated every measured
