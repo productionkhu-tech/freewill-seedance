@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, MessageSquare } from 'lucide-react';
+import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, MessageSquare, ChevronDown } from 'lucide-react';
 import { useAppStore, MODELS, type ChatMessage } from '../store';
 import { VideoPlayer, ClipStamp, downloadClip, revealClipFile } from './ChatArea';
 import { formatStamp, formatStampFull } from '../lib/utils';
@@ -66,18 +66,71 @@ const todayISO = () => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
-function Select({ label, value, options, onChange }: {
-  label: string; value: string; options: string[]; onChange: (v: string) => void;
+type Opt = { value: string; count: number };
+
+// Compact filter dropdown.
+// A native <select> was wrong here for two reasons: its popup grows with the option
+// count (18 projects reaches halfway down the screen, and it only gets worse), and it
+// can't show a per-option count. This one caps its height, scrolls, and filters by
+// typing once the list is long enough to warrant it.
+function FilterSelect({ label, value, options, onChange, searchAfter = 8 }: {
+  label: string; value: string; options: Opt[]; onChange: (v: string) => void; searchAfter?: number;
 }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const boxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (!open) setQ(''); }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    // capture: beat the gallery's own Escape handler, or one press would close everything
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [open]);
+
+  const searchable = options.length > searchAfter;
+  const shown = q.trim()
+    ? options.filter(o => o.value.toLowerCase().includes(q.trim().toLowerCase()))
+    : options;
+  const active = value !== ALL;
+
   return (
-    <label className="flex items-center gap-1.5 text-[12px]">
+    <div className="flex items-center gap-1.5 text-[12px]" ref={boxRef}>
       <span className="text-gray-500 shrink-0">{label}</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)}
-        className={`bg-white border rounded-lg px-2 py-1 text-[12px] outline-none transition-colors cursor-pointer
-          ${value === ALL ? 'border-gray-200 text-gray-600' : 'border-indigo-300 text-indigo-700 font-medium'}`}>
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
-    </label>
+      <div className="relative">
+        <button onClick={() => setOpen(v => !v)}
+          className={`flex items-center gap-1 bg-white border rounded-lg pl-2 pr-1.5 py-1 text-[12px] transition-colors max-w-[170px]
+            ${active ? 'border-indigo-300 text-indigo-700 font-medium' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>
+          <span className="truncate">{value}</span>
+          <ChevronDown size={13} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+        {open && (
+          <>
+            <div className="fixed inset-0 z-[91]" onClick={() => setOpen(false)} />
+            <div className="absolute z-[92] mt-1 min-w-full w-max max-w-[260px] bg-white border border-gray-200 rounded-lg shadow-xl overflow-hidden">
+              {searchable && (
+                <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="검색…"
+                  className="w-full px-2.5 py-1.5 text-[12px] border-b border-gray-100 outline-none placeholder-gray-300" />
+              )}
+              {/* Height cap is the whole point — the list scrolls instead of growing. */}
+              <div className="max-h-[240px] overflow-y-auto">
+                {shown.length === 0 && <div className="px-2.5 py-2 text-[12px] text-gray-400">일치하는 항목 없음</div>}
+                {shown.map(o => (
+                  <button key={o.value} onClick={() => { onChange(o.value); setOpen(false); }}
+                    // count 0 is dimmed but still selectable — it answers "is there any
+                    // 4K footage at all?" instead of hiding the question.
+                    className={`w-full flex items-center gap-2 text-left px-2.5 py-1.5 text-[12px] transition-colors
+                      ${value === o.value ? 'bg-indigo-50 text-indigo-700 font-medium' : o.count === 0 ? 'text-gray-300 hover:bg-gray-50' : 'text-gray-700 hover:bg-gray-50'}`}>
+                    <span className="truncate flex-1">{o.value}</span>
+                    <span className="shrink-0 tabular-nums text-[11px] opacity-60">{o.count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -117,19 +170,41 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     return out.sort((a, b) => b.timestamp - a.timestamp);
   }, [projects]);
 
-  // Option lists are built from what actually EXISTS, not from the full catalog —
-  // offering "4K" when nothing was ever rendered at 4K is a dead end for the user.
   const modelLabel = (id?: string) =>
     MODELS.find(m => m.id === id)?.name || id || '알 수 없음';
+  // API stores '4k' lowercase; show it the way the Resolution dropdown does.
+  const resLabel = (r?: string) => (r === '4k' ? '4K' : r);
+
+  // Two kinds of filter, deliberately built differently:
+  //   · FIXED vocabularies (resolution, ratio) → show the WHOLE ladder, in its canonical
+  //     order, even at count 0. "Is there any 4K in here?" is a real question, and a list
+  //     that silently omits 4K answers it by looking broken.
+  //   · OPEN sets (project, model) → only what exists. These grow without bound and
+  //     listing every model that ever shipped would be noise.
+  // Everything carries a count, so an empty choice is visibly empty rather than a dead end.
+  const RES_LADDER = ['480p', '720p', '1080p', '4K'];
+  const RATIO_LADDER = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
   const opts = useMemo(() => {
-    const uniq = (xs: (string | undefined)[]) =>
-      [ALL, ...Array.from(new Set(xs.filter(Boolean) as string[]))];
+    const tally = (pick: (r: Row) => string | undefined) => {
+      const m = new Map<string, number>();
+      for (const r of allRows) { const k = pick(r); if (k) m.set(k, (m.get(k) || 0) + 1); }
+      return m;
+    };
+    const withAll = (m: Map<string, number>, keys: string[]): Opt[] =>
+      [{ value: ALL, count: allRows.length }, ...keys.map(k => ({ value: k, count: m.get(k) || 0 }))];
+
+    const pm = tally(r => r.projectName);
+    const mm = tally(r => modelLabel(r.usedSettings?.model));
+    const rm = tally(r => resLabel(r.usedSettings?.resolution));
+    const am = tally(r => r.usedSettings?.ratio);
+    // Any stray value not in the canonical ladder (older clip, future preset) still gets
+    // listed — appended after the ladder rather than dropped.
+    const extra = (m: Map<string, number>, ladder: string[]) => [...m.keys()].filter(k => !ladder.includes(k));
     return {
-      projects: [ALL, ...Array.from(new Set(allRows.map(r => r.projectName)))],
-      models: uniq(allRows.map(r => modelLabel(r.usedSettings?.model))),
-      // API stores '4k' lowercase; show it the way the Resolution dropdown does.
-      res: uniq(allRows.map(r => r.usedSettings?.resolution === '4k' ? '4K' : r.usedSettings?.resolution)),
-      ratios: uniq(allRows.map(r => r.usedSettings?.ratio)),
+      projects: withAll(pm, [...pm.keys()]),
+      models: withAll(mm, MODELS.map(m => m.name).filter(n => mm.has(n)).concat(extra(mm, MODELS.map(m => m.name)))),
+      res: withAll(rm, [...RES_LADDER, ...extra(rm, RES_LADDER)]),
+      ratios: withAll(am, [...RATIO_LADDER, ...extra(am, RATIO_LADDER)]),
     };
   }, [allRows]);
 
@@ -219,10 +294,10 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
         </div>
         <div className="flex items-center gap-3 px-5 pb-3 flex-wrap">
           <Filter size={13} className="text-gray-400 shrink-0" />
-          <Select label="프로젝트" value={projectFilter} options={opts.projects} onChange={setProjectFilter} />
-          <Select label="모델" value={modelFilter} options={opts.models} onChange={setModelFilter} />
-          <Select label="해상도" value={resFilter} options={opts.res} onChange={setResFilter} />
-          <Select label="비율" value={ratioFilter} options={opts.ratios} onChange={setRatioFilter} />
+          <FilterSelect label="프로젝트" value={projectFilter} options={opts.projects} onChange={setProjectFilter} />
+          <FilterSelect label="모델" value={modelFilter} options={opts.models} onChange={setModelFilter} />
+          <FilterSelect label="해상도" value={resFilter} options={opts.res} onChange={setResFilter} />
+          <FilterSelect label="비율" value={ratioFilter} options={opts.ratios} onChange={setRatioFilter} />
           <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
             {PERIODS.map(p => (
               <button key={p.id} onClick={() => setPeriod(p.id)}

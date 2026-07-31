@@ -10,12 +10,75 @@ import { GlobalGallery } from './GlobalGallery';
 // Emoji are just characters — the OS font draws them (Apple emoji on macOS, Segoe UI
 // Emoji on Windows), so "기본 이모티콘" costs literally nothing to ship and always
 // matches the platform the user is on.
-const ICON_EMOJIS = [
-  '🎬', '🎥', '📹', '🎞️', '🍿', '✨', '🔥', '⭐',
-  '💡', '🎨', '🖌️', '🧪', '🚀', '🛠️', '📦', '🗂️',
-  '📌', '🏷️', '🎯', '✅', '⏳', '🐣', '🐳', '🦊',
-  '🐼', '🌊', '🌋', '🌙', '☀️', '🌈', '🍀', '🌸',
-  '🍎', '🍕', '☕', '🎧', '🎸', '🕹️', '💎', '👑',
+// Numbers and letters come from contiguous Unicode blocks, so they're generated rather
+// than typed out — 56 characters of literal for nothing, and easy to typo.
+const codeRange = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, i) => String.fromCodePoint(from + i));
+
+const ICON_CATEGORIES: { id: string; label: string; items: string[] }[] = [
+  { id: 'work', label: '작업', items: [
+    '🎬','🎥','📹','📽️','🎞️','📷','📸','🎦','🍿','🎭','🎪','🎨','🖌️','🖍️','✏️','📝',
+    '💡','✨','🔥','⭐','🌟','💫','⚡','🚀','🛠️','🔧','🔩','⚙️','🧪','🔬','🧲','🧰',
+    '📦','🗂️','📁','📂','🗃️','📋','📌','📍','🏷️','🔖','🎯','✅','☑️','⏳','⌛','🕐',
+  ]},
+  { id: 'face', label: '표정', items: [
+    '😀','😃','😄','😁','😆','🥹','😊','🙂','😉','😍','🥰','😘','😗','😋','😛','🤪',
+    '🤨','🧐','🤓','😎','🥸','🤩','🥳','😏','😒','😞','😔','😟','😕','🙁','😣','😖',
+    '😫','😩','🥺','😢','😭','😤','😠','😡','🤬','🤯','😳','🥵','🥶','😱','😨','😰',
+    '🤗','🤔','🤭','🤫','🤥','😶','😐','😑','😬','🙄','😴','🤤','😪','🤢','🤮','🤧',
+  ]},
+  { id: 'people', label: '사람', items: [
+    '👋','🤚','✋','🖖','👌','🤌','🤏','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','👇',
+    '👍','👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🙏','✍️','💪','🦾','🦿','🦵',
+    '👀','👁️','👂','👃','🧠','🫀','🦷','👤','👥','🗣️','👶','🧒','👦','👧','🧑','👨',
+    '👩','🧓','👴','👵','🤴','👸','🦸','🦹','🧙','🧚','🧛','🧜','🧝','🧞','🧟','👻',
+  ]},
+  { id: 'animal', label: '동물', items: [
+    '🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈',
+    '🙉','🙊','🐔','🐧','🐦','🐤','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛',
+    '🦋','🐌','🐞','🐜','🦗','🕷️','🦂','🐢','🐍','🦎','🦖','🦕','🐙','🦑','🦐','🦞',
+    '🦀','🐡','🐠','🐟','🐬','🐳','🐋','🦈','🐊','🐅','🐆','🦓','🦍','🦧','🐘','🦛',
+    '🐪','🦒','🦘','🐃','🐄','🐎','🐖','🐏','🐑','🦙','🐐','🦌','🐕','🐩','🦮','🐈',
+  ]},
+  { id: 'nature', label: '자연', items: [
+    '🌵','🎄','🌲','🌳','🌴','🪵','🌱','🌿','☘️','🍀','🎍','🎋','🍃','🍂','🍁','🍄',
+    '🌾','💐','🌷','🌹','🥀','🌺','🌸','🌼','🌻','🌞','🌝','🌛','🌜','🌚','🌕','🌖',
+    '🌗','🌘','🌑','🌒','🌓','🌔','🌙','🌎','🌍','🌏','🪐','💫','⭐','🌟','✨','⚡',
+    '☄️','💥','🔥','🌪️','🌈','☀️','🌤️','⛅','🌥️','☁️','🌦️','🌧️','⛈️','🌩️','🌨️','❄️',
+    '☃️','⛄','🌬️','💨','💧','💦','🌊','🌋','🏔️','⛰️','🏕️','🏝️','🏜️','🌅','🌄','🌇',
+  ]},
+  { id: 'food', label: '음식', items: [
+    '🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥',
+    '🥝','🍅','🍆','🥑','🥦','🥬','🥒','🌶️','🌽','🥕','🧄','🧅','🥔','🍠','🥐','🥯',
+    '🍞','🥖','🧀','🥚','🍳','🧈','🥞','🧇','🥓','🍔','🍟','🍕','🌭','🥪','🌮','🌯',
+    '🥙','🧆','🥘','🍝','🍜','🍲','🍛','🍣','🍱','🥟','🍤','🍙','🍚','🍘','🥠','🍢',
+    '🍡','🍧','🍨','🍦','🥧','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🧂','☕','🍵',
+    '🧃','🥤','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🍾',
+  ]},
+  { id: 'object', label: '사물', items: [
+    '⌚','📱','💻','⌨️','🖥️','🖨️','🖱️','💽','💾','💿','📀','🧮','🎥','📞','☎️','📟',
+    '📺','📻','🎙️','🎚️','🎛️','🧭','⏱️','⏲️','⏰','🕰️','🔋','🔌','💡','🔦','🕯️','🧯',
+    '🛢️','💸','💵','💴','💶','💷','🪙','💰','💳','💎','⚖️','🪜','🧰','🪛','🔧','🔨',
+    '⛏️','🪚','🔩','⚙️','🧱','⛓️','🧲','🔫','💣','🧨','🪓','🔪','🗡️','⚔️','🛡️','🚬',
+    '⚰️','🪦','🏺','🔮','📿','🧿','💈','⚗️','🔭','🔬','🕳️','🩹','🩺','💊','💉','🩸',
+    '🚪','🪑','🛏️','🛋️','🚽','🚿','🛁','🧴','🧷','🧹','🧺','🧻','🪣','🧼','🪥','🧽',
+  ]},
+  { id: 'symbol', label: '기호', items: [
+    '❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖',
+    '💘','💝','☮️','✝️','☪️','🕉️','☸️','✡️','🔯','🕎','☯️','☦️','🛐','⛎','♈','♉',
+    '♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','🆔','⚛️','🉑','☢️','☣️','📴','📳','🈶',
+    '🔰','⭕','✅','☑️','✔️','❌','❎','➰','➿','〽️','✳️','✴️','❇️','‼️','⁉️','❓','❔',
+    '❕','❗','〰️','©️','®️','™️','🔺','🔻','🔸','🔹','🔶','🔷','🔳','🔲','▪️','▫️',
+    '◾','◽','◼️','◻️','🟥','🟧','🟨','🟩','🟦','🟪','⬛','⬜','🟫','🔈','🔊','🔔',
+  ]},
+  { id: 'number', label: '숫자·문자', items: [
+    ...Array.from({ length: 10 }, (_, i) => `${i}️⃣`),          // 0️⃣–9️⃣
+    '🔟', '#️⃣', '*️⃣',
+    ...codeRange(0x2460, 0x2473),                                          // ①–⑳
+    ...codeRange(0x24B6, 0x24CF),                                          // Ⓐ–Ⓩ
+    '🔠','🔡','🔢','🔣','🔤','🅰️','🅱️','🅾️','🅿️','ℹ️','Ⓜ️','🆎','🆑','🆒','🆓','🆕',
+    '🆖','🆗','🆘','🆙','🆚','🔴','🟠','🟡','🟢','🔵','🟣','🟤','⚫','⚪',
+  ]},
 ];
 
 // Upload limits. These are enforced, not just advertised — this data URL is written into
@@ -90,7 +153,12 @@ function IconPicker({ anchor, current, onPick, onClose }: {
   onClose: () => void;
 }) {
   const [err, setErr] = useState<string | null>(null);
-  const PANEL_W = 268, PANEL_H = 276; // keep in step with the panel's real height (emoji grid + actions + spec line)
+  // Open on the tab that already holds the current icon, so re-picking doesn't start
+  // you on a page that doesn't contain what you chose last time.
+  const [tab, setTab] = useState(() =>
+    ICON_CATEGORIES.find(c => current && c.items.includes(current))?.id ?? ICON_CATEGORIES[0].id);
+  const items = ICON_CATEGORIES.find(c => c.id === tab)?.items ?? [];
+  const PANEL_W = 300, PANEL_H = 330; // keep in step with the real height (tabs + grid + actions + spec)
   // Keep the panel on screen when the row is near the bottom / right edge.
   const left = Math.min(anchor.left, window.innerWidth - PANEL_W - 8);
   const top = anchor.bottom + PANEL_H > window.innerHeight
@@ -107,10 +175,21 @@ function IconPicker({ anchor, current, onPick, onClose }: {
         style={{ left, top, width: PANEL_W }}
         className="absolute bg-white rounded-xl shadow-2xl border border-gray-200 p-2.5 text-gray-900"
       >
-        <div className="grid grid-cols-8 gap-0.5 max-h-[152px] overflow-y-auto">
-          {ICON_EMOJIS.map(e => (
-            <button key={e} onClick={() => { onPick(e); onClose(); }}
-              className={`h-[30px] rounded-md text-[17px] leading-none transition-colors ${current === e ? 'bg-indigo-100 ring-1 ring-indigo-300' : 'hover:bg-gray-100'}`}>
+        {/* Category tabs. A single flat grid of ~600 glyphs is a scroll-hunt; tabs keep
+            any one page to a couple of screenfuls. */}
+        <div className="flex gap-0.5 mb-1.5 overflow-x-auto pb-0.5 -mx-0.5 px-0.5">
+          {ICON_CATEGORIES.map(c => (
+            <button key={c.id} onClick={() => setTab(c.id)}
+              className={`shrink-0 px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-colors ${
+                tab === c.id ? 'bg-indigo-500 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+        <div className="grid grid-cols-8 gap-0.5 h-[168px] overflow-y-auto content-start">
+          {items.map(e => (
+            <button key={e} onClick={() => { onPick(e); onClose(); }} title={e}
+              className={`h-[32px] rounded-md text-[18px] leading-none transition-colors ${current === e ? 'bg-indigo-100 ring-1 ring-indigo-300' : 'hover:bg-gray-100'}`}>
               {e}
             </button>
           ))}

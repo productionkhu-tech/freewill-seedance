@@ -59,7 +59,7 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    title: '프리윌 시댄스',
+    title: 'Freewill Seedance',
     icon: getIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
@@ -108,7 +108,7 @@ function createWindow() {
       e.preventDefault();
       mainWindow.hide();
       tray?.displayBalloon({
-        title: '프리윌 시댄스',
+        title: 'Freewill Seedance',
         content: 'Running in system tray. Double-click to reopen.',
         iconType: 'info',
       });
@@ -126,9 +126,9 @@ function createTray() {
   }
 
   tray = new Tray(trayIcon);
-  tray.setToolTip('프리윌 시댄스');
+  tray.setToolTip('Freewill Seedance');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '프리윌 시댄스', enabled: false },
+    { label: 'Freewill Seedance', enabled: false },
     { type: 'separator' },
     { label: 'Open', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },

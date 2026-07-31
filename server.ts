@@ -849,7 +849,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n  프리윌 시댄스`);
+    console.log(`\n  Freewill Seedance`);
     console.log(`  ========================`);
     console.log(`  http://localhost:${PORT}`);
     console.log(`  Press Ctrl+C to stop\n`);

@@ -1,5 +1,5 @@
 appId: com.freewill.seedance
-productName: 프리윌 시댄스
+productName: Freewill Seedance
 # ★ appId is FROZEN. electron-builder derives the NSIS upgrade GUID from it
 #   (UUID.v5(appId) — verified against the live registry key 692f1479-3e76-5b20-9562-3e01b3da4a16).
 #   Change appId and every installed copy becomes a SEPARATE app: no in-place upgrade,
@@ -38,9 +38,9 @@ extraResources:
   - from: "dist/"
     to: "dist"
 
-# Pinned to ASCII on purpose. The default is "${productName} Setup ${version}.${ext}", which
-# would put Hangul in the GitHub asset name — and that name is the one electron-updater
-# fetches over HTTP. The display name can be Korean; the thing on the wire should not be.
+# Pinned, and hyphenated. This name becomes the GitHub asset name — the one electron-updater
+# fetches over HTTP — so it is kept free of spaces and of anything non-ASCII, independently of
+# whatever productName happens to be. Renaming the app must never be able to reach the wire.
 artifactName: Freewill-Seedance-Setup-${version}.${ext}
 
 win:
@@ -54,7 +54,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: 프리윌 시댄스
+  shortcutName: Freewill Seedance
 
 publish:
   provider: github
