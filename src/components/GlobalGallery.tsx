@@ -225,7 +225,6 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     const withAll = (m: Map<string, number>, keys: string[]): Opt[] =>
       [{ value: ALL, count: allRows.length }, ...keys.map(k => ({ value: k, count: m.get(k) || 0 }))];
 
-    const pm = tally(r => r.projectName);
     const mm = tally(r => modelLabel(r.usedSettings?.model));
     const rm = tally(r => resLabel(r.usedSettings?.resolution));
     const am = tally(r => r.usedSettings?.ratio);
@@ -266,10 +265,25 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       if (b === '자동') return -1;
       return parseInt(a) - parseInt(b);
     });
+    // Projects by id, for the same reason groups are: a name is neither stable nor
+    // guaranteed unique. New names can't collide (the store appends "(1)"), but data
+    // written before that rule — or restored from an old backup — still can, and a
+    // name-keyed filter MERGES those two projects into one option that shows both
+    // projects' clips. By id they stay separate whatever they are called.
+    const seenP = new Set<string>();
+    const projectOpts: Opt[] = [{ value: ALL, count: allRows.length }];
+    for (const r of allRows) {
+      if (seenP.has(r.projectId)) continue;
+      seenP.add(r.projectId);
+      projectOpts.push({
+        value: r.projectId, label: r.projectName,
+        count: allRows.reduce((n, x) => n + (x.projectId === r.projectId ? 1 : 0), 0),
+      });
+    }
     return {
       groups,
       durations: withAll(dm, durKeys),
-      projects: withAll(pm, [...pm.keys()]),
+      projects: projectOpts,
       models: withAll(mm, MODELS.map(m => m.name).filter(n => mm.has(n)).concat(extra(mm, MODELS.map(m => m.name)))),
       res: withAll(rm, [...RES_LADDER, ...extra(rm, RES_LADDER)]),
       ratios: withAll(am, [...RATIO_LADDER, ...extra(am, RATIO_LADDER)]),
@@ -306,7 +320,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   const rows = useMemo(() => allRows.filter(r => {
     if (groupFilter === NO_GROUP) { if (r.groupId) return false; }
     else if (groupMatch && !(r.groupId && groupMatch.has(r.groupId))) return false;
-    if (projectFilter !== ALL && r.projectName !== projectFilter) return false;
+    if (projectFilter !== ALL && r.projectId !== projectFilter) return false;
     if (modelFilter !== ALL && modelLabel(r.usedSettings?.model) !== modelFilter) return false;
     if (resFilter !== ALL) {
       const res = r.usedSettings?.resolution === '4k' ? '4K' : r.usedSettings?.resolution;

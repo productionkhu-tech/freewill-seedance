@@ -513,6 +513,43 @@ function canNest(groups: ProjectGroup[], id: string, parentId: string | undefine
   return !groups.some(g => g.parentId === id);                      // and the mover must be childless
 }
 
+// ── Names have to be tellable apart ──────────────────────────────────────────
+// Two rows with identical text are two rows you cannot choose between: which "광고" holds
+// last week's cut? The list can't answer, so the name has to.
+//
+// Numbering starts at (1), not (2). Windows starts at (2) because it is naming a COPY and
+// counts the original as 1; nothing is being copied here, so (1) is simply "the second one".
+//
+// An existing " (N)" is stripped before searching, or renaming 광고(1) next to a 광고 would
+// grow "광고 (1) (1)" and then "광고 (1) (1) (1)". A deliberate "시즌 (2)" that happens to
+// be free is returned untouched — the strip only happens on an actual collision.
+function uniqueName(desired: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  if (!used.has(desired)) return desired;
+  const base = desired.replace(/\s*\(\d+\)$/, '').trim() || desired;
+  for (let n = 1; n < 10000; n++) {
+    const cand = `${base} (${n})`;
+    if (!used.has(cand)) return cand;
+  }
+  return `${base} (${used.size + 1})`; // unreachable in practice; never loop forever
+}
+
+// ── Scope: why the two differ ────────────────────────────────────────────────
+// PROJECTS are unique app-wide. The sidebar search FLATTENS the tree (matches are listed
+// without their folders) and the gallery's project filter is a flat list, so two projects
+// called "1차" in different folders are genuinely indistinguishable in both places.
+//
+// GROUPS are unique only among SIBLINGS. A folder is never shown without its parent —
+// indented in the sidebar, "부모 › 자식" in the gallery — so "광고 › 1차" and "예능 › 1차"
+// already read as different things. Forcing "1차 (1)" on the second client would be noise.
+function siblingGroupNames(groups: ProjectGroup[], exceptId: string | null, parentId: string | undefined): string[] {
+  // Effective parent (groupTree), not the raw field: a group with a dangling parentId is
+  // DRAWN at the top level, so that is who it has to be distinguishable from.
+  const t = groupTree(groups);
+  const sibs = parentId ? t.childrenOf(parentId) : t.roots;
+  return sibs.filter(g => g.id !== exceptId).map(g => g.name);
+}
+
 // Unfold a destination folder so what just moved into it is actually on screen. Moving
 // something into a folded folder is indistinguishable from deleting it.
 function openChain(groups: ProjectGroup[], parentId: string | undefined): ProjectGroup[] {
@@ -816,9 +853,12 @@ export const useAppStore = create<AppState>()(
       }),
       setCurrentProjectId: (id) => set({ currentProjectId: id }),
       createProject: () => {
+        const existing = get().projects.map(p => p.name);
         const newProject: Project = {
           id: uuidv4(),
-          name: `Project ${get().projects.length + 1}`,
+          // The counter is a position, not an identity: delete one project and the next
+          // "Project N" collides with one that is still sitting in the list.
+          name: uniqueName(`Project ${get().projects.length + 1}`, existing),
           messages: [],
           settings: { ...defaultSettings },
           assets: [],
@@ -830,11 +870,16 @@ export const useAppStore = create<AppState>()(
         }));
       },
       renameProject: (id, name) => {
-        set((state) => ({
-          projects: state.projects.map((p) =>
-            p.id === id ? { ...p, name, updatedAt: Date.now() } : p
-          ),
-        }));
+        set((state) => {
+          // Excluding self matters: without it, re-confirming a project's own name would
+          // bump it to "이름 (1)" every time you opened the rename box.
+          const final = uniqueName(name, state.projects.filter(p => p.id !== id).map(p => p.name));
+          return {
+            projects: state.projects.map((p) =>
+              p.id === id ? { ...p, name: final, updatedAt: Date.now() } : p
+            ),
+          };
+        });
       },
       setProjectIcon: (id, icon) => {
         set((state) => ({
@@ -871,7 +916,12 @@ export const useAppStore = create<AppState>()(
         // failing: the user asked for a folder and gets one.
         const parent = parentId ? get().projectGroups.find(g => g.id === parentId) : undefined;
         const under = parent && !parent.parentId ? parent.id : undefined;
-        const g: ProjectGroup = { id: uuidv4(), name: name || `그룹 ${get().projectGroups.length + 1}`, parentId: under };
+        const wanted = name || `그룹 ${get().projectGroups.length + 1}`;
+        const g: ProjectGroup = {
+          id: uuidv4(),
+          name: uniqueName(wanted, siblingGroupNames(get().projectGroups, null, under)),
+          parentId: under,
+        };
         set((state) => ({
           projectGroups: [...state.projectGroups, g].map(x =>
             // Opening the destination is not optional: creating a subfolder inside a folded
@@ -881,7 +931,13 @@ export const useAppStore = create<AppState>()(
         return g.id;
       },
       renameProjectGroup: (id, name) => {
-        set((state) => ({ projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, name } : g) }));
+        set((state) => {
+          const me = state.projectGroups.find(g => g.id === id);
+          if (!me) return state;
+          const t = groupTree(state.projectGroups);
+          const final = uniqueName(name, siblingGroupNames(state.projectGroups, id, t.isSub(me) ? me.parentId : undefined));
+          return { projectGroups: state.projectGroups.map(g => g.id === id ? { ...g, name: final } : g) };
+        });
       },
       // Removing the folder and destroying its contents are different intentions, so they
       // are different calls — never a flag with a default, where the destructive branch
@@ -942,7 +998,10 @@ export const useAppStore = create<AppState>()(
           const at = rest.findIndex(g => g.id === targetId);
           if (at < 0) return state;
           const next = [...rest];
-          next.splice(at, 0, { ...dragged, parentId });
+          // Landing next to a folder of the same name would produce two identical rows in
+          // one list — the exact ambiguity the naming rule exists to prevent, arriving by
+          // a different door. The "(1)" also tells you there was already one there.
+          next.splice(at, 0, { ...dragged, parentId, name: uniqueName(dragged.name, siblingGroupNames(state.projectGroups, draggedId, parentId)) });
           return { projectGroups: openChain(next, parentId) };
         });
       },
@@ -956,7 +1015,7 @@ export const useAppStore = create<AppState>()(
           const rest = state.projectGroups.filter(x => x.id !== draggedId);
           const lastIdx = rest.map(x => (x.parentId || undefined) === parentId).lastIndexOf(true);
           const next = [...rest];
-          next.splice(lastIdx + 1, 0, { ...g, parentId });
+          next.splice(lastIdx + 1, 0, { ...g, parentId, name: uniqueName(g.name, siblingGroupNames(state.projectGroups, draggedId, parentId)) });
           return { projectGroups: openChain(next, parentId) };
         });
       },
@@ -966,9 +1025,10 @@ export const useAppStore = create<AppState>()(
           const g = state.projectGroups.find(x => x.id === groupId);
           if (!g || (g.parentId || undefined) === (parentId || undefined)) return state;
           if (!canNest(state.projectGroups, groupId, parentId)) return state;
+          const final = uniqueName(g.name, siblingGroupNames(state.projectGroups, groupId, parentId));
           return {
             projectGroups: openChain(
-              state.projectGroups.map(x => x.id === groupId ? { ...x, parentId } : x), parentId),
+              state.projectGroups.map(x => x.id === groupId ? { ...x, parentId, name: final } : x), parentId),
           };
         });
       },
