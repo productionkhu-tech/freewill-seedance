@@ -908,6 +908,23 @@ export function ChatArea() {
     () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && m.starred).length,
     [project.messages]);
 
+  // Gallery paging — see the note on the grid. Reset whenever the visible set changes
+  // (opening it, switching project, toggling 채택만) so we never open mid-list.
+  const GALLERY_PAGE = 24;
+  const [gallShown, setGallShown] = useState(GALLERY_PAGE);
+  const gallSentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { setGallShown(GALLERY_PAGE); }, [showGallery, project.id, starredOnly]);
+  useEffect(() => {
+    if (!showGallery || galleryVideos.length <= gallShown) return;
+    const el = gallSentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => {
+      if (e.isIntersecting) setGallShown(n => n + GALLERY_PAGE);
+    }, { rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [showGallery, galleryVideos.length, gallShown]);
+
   const revealDownloaded = (filePath?: string) => revealClipFile(filePath, warn);
 
   // 컷 채택 토글. downloadedAt과 같은 경로(updateMessage)라 별도 배선이 없다.
@@ -2351,9 +2368,18 @@ export function ChatArea() {
         </div>
       )}
 
-      {/* Gallery */}
+      {/* Gallery ⇄ chat cross-fade.
+          mode="wait" so one fades fully out before the other fades in — they can't overlap,
+          which means no layout coexistence and no absolutely-positioned overlay to get wrong.
+          initial={false} so a cold app launch doesn't fade the chat in; only real switches animate.
+          Both branches need a stable `key` — without it AnimatePresence can't track the exit. */}
+      <AnimatePresence mode="wait" initial={false}>
       {showGallery ? (
-        <div className="flex-1 overflow-y-auto p-6 bg-[#f5f5f7]">
+        <motion.div
+          key="gallery"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.15, ease: 'easeOut' }}
+          className="flex-1 overflow-y-auto p-6 bg-[#f5f5f7]">
           {/* 채택만 보기 — 채택된 컷이 하나도 없으면 굳이 노출하지 않는다 */}
           {starredCount > 0 && (
             <div className="flex items-center gap-2 mb-4">
@@ -2375,9 +2401,15 @@ export function ChatArea() {
               )}
             </div>
           ) : (
+            <>
             <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
-              {galleryVideos.map((item, idx) => (
-                <div key={item.id} className="bg-white rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200 animate-fade-in-up" >
+              {galleryVideos.slice(0, gallShown).map((item, idx) => (
+                <div key={item.id}
+                  // Same two perf levers as the all-projects gallery: only a page of cards
+                  // is mounted at a time (mounting hundreds of IntersectionObservers in one
+                  // frame is the open-hitch), and the browser skips painting off-screen ones.
+                  style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
+                  className="bg-white rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200" >
                   <div className="aspect-video bg-black relative group">
                     <VideoPlayer src={item.videoUrl!} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
                     <ClipStamp ms={item.timestamp} />
@@ -2421,10 +2453,24 @@ export function ChatArea() {
                 </div>
               ))}
             </div>
+            {galleryVideos.length > gallShown && (
+              <div ref={gallSentinelRef} className="py-6 flex items-center justify-center gap-2 text-[12px] text-gray-400">
+                <Loader2 size={14} className="animate-spin" />
+                {galleryVideos.length - gallShown}개 더 불러오는 중…
+              </div>
+            )}
+            </>
           )}
-        </div>
+        </motion.div>
       ) : (
-        <>
+        // Wrapper reproduces what the bare fragment used to contribute to the parent flex
+        // column: the messages pane stays the flexible child, the composer stays pinned.
+        // min-h-0 is load-bearing — without it the overflow-y-auto child refuses to shrink.
+        <motion.div
+          key="chat"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.15, ease: 'easeOut' }}
+          className="flex-1 flex flex-col min-h-0">
           {/* Messages */}
           <div ref={messagesScrollRef} onScroll={handleMessagesScroll} className="flex-1 overflow-y-auto p-6 space-y-5 bg-[#f5f5f7]">
             {displayMessages.length === 0 ? (
@@ -2743,8 +2789,9 @@ export function ChatArea() {
               </div>
             </div>
           </div>
-        </>
+        </motion.div>
       )}
+      </AnimatePresence>
 
     </div>
   );

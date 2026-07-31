@@ -771,8 +771,11 @@ async function startServer() {
       // never delayed or corrupted.
       // ★ Demo generations are deliberately NOT reported: they run on a separate
       // BytePlus contract, aren't part of team credit, and TEAM_NAME (derived by
-      // hashing SEEDANCE_API_KEY) would be meaningless for them anyway. Usage is
-      // auditable directly from BytePlus's task list on the demo key.
+      // hashing SEEDANCE_API_KEY) would be meaningless for them anyway.
+      // NOTE: BytePlus's task list is NOT a substitute ledger for the demo key —
+      // measured 2026-07-30, that account is SHARED (2186 tasks, oldest 7/23, i.e.
+      // 5 days before our endpoint existed, plus traffic while we were idle). The
+      // app's own taskIds are the only trustworthy record of what WE generated.
       if (!isDemo && data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(req.params.id)) {
         reportedTasks.add(req.params.id);
         fetch(TRACKER_URL, {
@@ -846,7 +849,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n  Freewill Seedance 2.0`);
+    console.log(`\n  프리윌 시댄스`);
     console.log(`  ========================`);
     console.log(`  http://localhost:${PORT}`);
     console.log(`  Press Ctrl+C to stop\n`);

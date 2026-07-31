@@ -1,5 +1,12 @@
 appId: com.freewill.seedance
-productName: Freewill Seedance 2.0
+productName: 프리윌 시댄스
+# ★ appId is FROZEN. electron-builder derives the NSIS upgrade GUID from it
+#   (UUID.v5(appId) — verified against the live registry key 692f1479-3e76-5b20-9562-3e01b3da4a16).
+#   Change appId and every installed copy becomes a SEPARATE app: no in-place upgrade,
+#   two entries in Programs & Features. productName has zero influence on that GUID.
+# ★ package.json `name` is also FROZEN — it is what app.getName() returns (productName is
+#   NOT injected into the packaged package.json; verified by extracting it from app.asar),
+#   so userData stays at %APPDATA%reewill-seedance and no user loses their projects.
 copyright: Copyright (c) 2026 Freewill
 
 directories:
@@ -31,6 +38,11 @@ extraResources:
   - from: "dist/"
     to: "dist"
 
+# Pinned to ASCII on purpose. The default is "${productName} Setup ${version}.${ext}", which
+# would put Hangul in the GitHub asset name — and that name is the one electron-updater
+# fetches over HTTP. The display name can be Korean; the thing on the wire should not be.
+artifactName: Freewill-Seedance-Setup-${version}.${ext}
+
 win:
   target:
     - target: nsis
@@ -42,7 +54,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Freewill Seedance 2.0
+  shortcutName: 프리윌 시댄스
 
 publish:
   provider: github

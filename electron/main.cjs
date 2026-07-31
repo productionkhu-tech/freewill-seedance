@@ -59,7 +59,7 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    title: 'Freewill Seedance 2.0',
+    title: '프리윌 시댄스',
     icon: getIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
@@ -108,7 +108,7 @@ function createWindow() {
       e.preventDefault();
       mainWindow.hide();
       tray?.displayBalloon({
-        title: 'Freewill Seedance 2.0',
+        title: '프리윌 시댄스',
         content: 'Running in system tray. Double-click to reopen.',
         iconType: 'info',
       });
@@ -126,9 +126,9 @@ function createTray() {
   }
 
   tray = new Tray(trayIcon);
-  tray.setToolTip('Freewill Seedance 2.0');
+  tray.setToolTip('프리윌 시댄스');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Freewill Seedance 2.0', enabled: false },
+    { label: '프리윌 시댄스', enabled: false },
     { type: 'separator' },
     { label: 'Open', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
     { type: 'separator' },
@@ -248,6 +248,9 @@ ipcMain.handle('get-cache-size', async () => {
 // (rename of app `name`, uninstall+reinstall, AppData cleaners). Mirror the
 // entire persisted state to Documents/ — outside userData — so it survives any
 // of those. Restore on app start if IDB is empty.
+// ★ Do NOT rename this to match the new app name. Every existing user already has a
+// backup sitting in this exact folder; renaming would point the restore path at an empty
+// directory and quietly orphan the only copy of their data that lives outside userData.
 const BACKUP_DIR = path.join(app.getPath('documents'), 'Freewill Seedance Backup');
 const BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-backup.json');
 

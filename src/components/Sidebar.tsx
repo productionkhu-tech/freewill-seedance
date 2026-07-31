@@ -18,40 +18,67 @@ const ICON_EMOJIS = [
   '🍎', '🍕', '☕', '🎧', '🎸', '🕹️', '💎', '👑',
 ];
 
+// Upload limits. These are enforced, not just advertised — this data URL is written into
+// the persisted blob, which is re-serialized on every save, so an unbounded image here
+// would tax every future write, not just this one.
+const ICON_MAX_BYTES = 5 * 1024 * 1024; // 5MB — generous for a logo, cheap to decode
+const ICON_MIN_PX = 48;                 // below this the 64px output is an upscale (blurry)
+const ICON_OUT_PX = 64;                 // rendered at 16px, so 64 covers 4x displays
+const ICON_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif';
+const ICON_SPEC = `PNG·JPG·WebP · 정사각 권장 · ${ICON_MIN_PX}px 이상 · 5MB 이하`;
+
 // Downscale an uploaded image to a 64px square PNG data URL.
-// 64px because the icon renders at 16px (≈32px on a 2x display) — anything larger is
-// bytes that live in the persisted blob forever and never reach a pixel. Center-crop
-// rather than letterbox: the slot is square, and fitting a wide logo into it would
-// shrink the logo to an unreadable band.
+// Center-crop rather than letterbox: the slot is square, and fitting a wide logo into it
+// would shrink the logo to an unreadable band.
 function fileToIconDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) return reject(new Error('이미지 파일이 아닙니다'));
+    if (file.size > ICON_MAX_BYTES) {
+      return reject(new Error(`파일이 너무 큽니다 (${(file.size / 1048576).toFixed(1)}MB · 최대 5MB)`));
+    }
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
       URL.revokeObjectURL(url);
-      const S = 64;
+      const side = Math.min(img.width, img.height);
+      if (side < ICON_MIN_PX) {
+        return reject(new Error(`너무 작습니다 (${img.width}×${img.height} · 짧은 변 ${ICON_MIN_PX}px 이상)`));
+      }
       const canvas = document.createElement('canvas');
-      canvas.width = S; canvas.height = S;
+      canvas.width = ICON_OUT_PX; canvas.height = ICON_OUT_PX;
       const ctx = canvas.getContext('2d');
       if (!ctx) return reject(new Error('canvas 사용 불가'));
-      const side = Math.min(img.width, img.height);
-      ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, S, S);
+      ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, ICON_OUT_PX, ICON_OUT_PX);
       resolve(canvas.toDataURL('image/png'));
     };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('이미지를 읽을 수 없습니다')); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('이미지를 읽을 수 없습니다 (손상되었거나 지원하지 않는 형식)')); };
     img.src = url;
   });
 }
 
 // The icon itself: uploaded PNG › emoji › default chat glyph.
+// ★ All three variants MUST sit in one identical box or the column zig-zags — they are
+// three different layout species: <img> is a replaced block, an emoji is inline TEXT
+// (baseline-positioned, and its glyph advance is wider than the font-size), and a lucide
+// <svg> is a third thing again. Sizing each one separately can't line them up.
+// So: one fixed flex-centred square, and whatever goes inside centres within it.
 function ProjectIcon({ icon, size = 16 }: { icon?: string; size?: number }) {
-  if (icon?.startsWith('data:')) {
-    return <img src={icon} alt="" className="rounded-[4px] object-cover shrink-0" style={{ width: size, height: size }} />;
-  }
-  if (icon) {
-    return <span className="shrink-0 leading-none text-center" style={{ fontSize: size - 1, width: size }}>{icon}</span>;
-  }
-  return <MessageSquare size={size} className="shrink-0 opacity-70" />;
+  return (
+    // No overflow-hidden: an emoji glyph measures ~19px in this 16px box (its advance
+    // exceeds the em), and clipping it would shave the edges off wide emoji. Overflow is
+    // symmetric so the CENTRES still line up — which is what makes the column look straight —
+    // and ~1.5px of bleed is well inside the 8px gap to the project name.
+    <span className="inline-flex items-center justify-center shrink-0 leading-none"
+      style={{ width: size, height: size }}>
+      {icon?.startsWith('data:')
+        ? <img src={icon} alt="" className="w-full h-full rounded-[4px] object-cover" />
+        : icon
+          // 0.86× because an emoji glyph overshoots its em box; at 1× it visually
+          // outgrows the 16px column that the svg/img variants respect.
+          ? <span className="leading-none" style={{ fontSize: Math.round(size * 0.86) }}>{icon}</span>
+          : <MessageSquare size={size} className="opacity-70" />}
+    </span>
+  );
 }
 
 // Emoji/PNG picker, portaled and anchored to the icon that opened it. Portaled for the
@@ -63,7 +90,7 @@ function IconPicker({ anchor, current, onPick, onClose }: {
   onClose: () => void;
 }) {
   const [err, setErr] = useState<string | null>(null);
-  const PANEL_W = 268, PANEL_H = 250;
+  const PANEL_W = 268, PANEL_H = 276; // keep in step with the panel's real height (emoji grid + actions + spec line)
   // Keep the panel on screen when the row is near the bottom / right edge.
   const left = Math.min(anchor.left, window.innerWidth - PANEL_W - 8);
   const top = anchor.bottom + PANEL_H > window.innerHeight
@@ -88,14 +115,14 @@ function IconPicker({ anchor, current, onPick, onClose }: {
             </button>
           ))}
         </div>
-        {err && <p className="text-[11px] text-red-500 mt-1.5 px-0.5">{err}</p>}
         <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-gray-100">
           <label className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[11.5px] font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer transition-colors">
-            <Upload size={12} /> PNG 업로드
-            <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+            <Upload size={12} /> 이미지 업로드
+            <input type="file" accept={ICON_ACCEPT} className="hidden"
               onChange={async (e) => {
                 const f = e.target.files?.[0]; e.target.value = '';
                 if (!f) return;
+                setErr(null);
                 try { onPick(await fileToIconDataUrl(f)); onClose(); }
                 catch (x: any) { setErr(x?.message || '변환 실패'); }
               }} />
@@ -106,6 +133,11 @@ function IconPicker({ anchor, current, onPick, onClose }: {
             <RotateCcw size={12} /> 기본
           </button>
         </div>
+        {/* State the spec where the upload is, and say what actually happens to the file
+            (crop + downscale) — otherwise a rejected upload reads as a bug. */}
+        <p className={`text-[10px] leading-snug mt-1.5 px-0.5 ${err ? 'text-red-500' : 'text-gray-400'}`}>
+          {err || `${ICON_SPEC} · 가운데를 정사각으로 잘라 ${ICON_OUT_PX}px로 저장합니다`}
+        </p>
       </motion.div>
     </div>,
     document.body
@@ -354,32 +386,16 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               {/* Icon slot. The icon itself is always the project's own — the run/done
                   state rides as a small corner overlay instead of replacing it, so
                   picking a 🎬 doesn't mean losing it every time you hit generate. */}
-              {(() => {
-                const running = project.messages.some(m => m.status === 'running' || m.status === 'queued');
-                const unseen = unseenDoneCount(project, currentProjectId === project.id);
-                return (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setIconPicker({ id: project.id, rect: (e.currentTarget as HTMLElement).getBoundingClientRect() });
-                    }}
-                    title="아이콘 변경"
-                    className="relative shrink-0 w-[18px] h-[18px] flex items-center justify-center rounded hover:bg-white/10 transition-colors"
-                  >
-                    <ProjectIcon icon={project.icon} />
-                    {running && (
-                      <Loader2 size={10} className="absolute -bottom-0.5 -right-1 text-[#0071e3] animate-spin bg-[#1d1d1f] rounded-full" />
-                    )}
-                    {!running && unseen > 0 && (
-                      // Unread-style dot: this project finished something while you were
-                      // elsewhere. Clicking in clears it (App marks the open project seen).
-                      <span className="absolute -bottom-0.5 -right-1 min-w-[13px] h-[13px] px-[3px] rounded-full bg-[#30d158] text-[#0b2c16] text-[8px] font-bold leading-[13px] text-center ring-2 ring-[#1d1d1f]">
-                        {unseen > 9 ? '9+' : unseen}
-                      </span>
-                    )}
-                  </button>
-                );
-              })()}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIconPicker({ id: project.id, rect: (e.currentTarget as HTMLElement).getBoundingClientRect() });
+                }}
+                title="아이콘 변경"
+                className="shrink-0 w-[18px] h-[18px] flex items-center justify-center rounded hover:bg-white/10 transition-colors"
+              >
+                <ProjectIcon icon={project.icon} />
+              </button>
               {editingId === project.id ? (
                 <input
                   ref={inputRef}
@@ -394,16 +410,35 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 <span className="truncate text-[14px] font-medium">{project.name}</span>
               )}
             </div>
-            {!editingId && (
-              <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity shrink-0 ml-2">
-                <button onClick={(e) => { e.stopPropagation(); setEditingId(project.id); setEditName(project.name); }} className="p-1 text-white/40 hover:text-white transition-colors" title="Rename">
-                  <Edit2 size={14} />
-                </button>
-                <button onClick={(e) => { e.stopPropagation(); setPendingDelete({ id: project.id, name: project.name }); }} className="p-1 text-white/40 hover:text-[#ff3b30] transition-colors" title="Delete">
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            )}
+            {!editingId && (() => {
+              const running = project.messages.some(m => m.status === 'running' || m.status === 'queued');
+              const unseen = unseenDoneCount(project, currentProjectId === project.id);
+              return (
+                // Status lives on the RIGHT, not on the icon. Stacking a badge on a 16px
+                // icon buries whatever the user picked — the point of choosing an icon is
+                // that you can see it. Status and actions share this slot and cross-fade:
+                // status when idle, rename/delete on hover.
+                <div className="relative shrink-0 ml-2 flex items-center" style={{ minWidth: 44, height: 22 }}>
+                  <div className="absolute inset-0 flex items-center justify-end gap-1 opacity-100 group-hover:opacity-0 transition-opacity pointer-events-none">
+                    {running && <Loader2 size={14} className="text-[#0071e3] animate-spin" />}
+                    {!running && unseen > 0 && (
+                      <span title={`새로 완성된 영상 ${unseen}개`}
+                        className="min-w-[17px] h-[17px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[10px] font-bold leading-[17px] text-center tabular-nums">
+                        {unseen > 99 ? '99+' : unseen}
+                      </span>
+                    )}
+                  </div>
+                  <div className="absolute inset-0 flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button onClick={(e) => { e.stopPropagation(); setEditingId(project.id); setEditName(project.name); }} className="p-1 text-white/40 hover:text-white transition-colors" title="Rename">
+                      <Edit2 size={14} />
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); setPendingDelete({ id: project.id, name: project.name }); }} className="p-1 text-white/40 hover:text-[#ff3b30] transition-colors" title="Delete">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         ))}
       </div>
@@ -469,14 +504,31 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       />
     )}
 
-    {/* ★ Deliberately NOT wrapped in <AnimatePresence>.
-        GlobalGallery renders through a portal, and an AnimatePresence sitting OUTSIDE a
-        portal never receives the exit completion from inside it — the overlay stayed
-        mounted at opacity:0, invisible but still `fixed inset-0`, swallowing every click
-        in the app. (The delete modal below is fine because it portals FIRST and puts
-        AnimatePresence inside.)
-        Mounting conditionally also means the all-projects scan doesn't run while closed. */}
-    {galleryOpen && <GlobalGallery onClose={() => setGalleryOpen(false)} />}
+    {/* ★ Exactly the shape of the delete modal below, and it has to be exactly this:
+        portal FIRST → AnimatePresence inside it → a KEYED motion element as the direct
+        child → the actual content inside that.
+        Two ways this goes wrong, both already hit here:
+          · AnimatePresence outside the portal — the exit finish never crosses the boundary.
+          · A plain function component as the presence child — it animates but never unmounts.
+        Both leave the overlay at opacity:0 while it is still `fixed inset-0`, so the app
+        looks normal and silently ignores every click. Don't "simplify" this nesting.
+        Still conditionally mounted, so the all-projects scan doesn't run while closed. */}
+    {createPortal(
+      <AnimatePresence>
+        {galleryOpen && (
+          <motion.div
+            key="global-gallery"
+            initial={{ opacity: 0, scale: 0.995 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.995 }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+            className="fixed inset-0 z-[90] bg-[#f5f5f7] flex flex-col text-gray-900"
+          >
+            <GlobalGallery onClose={() => setGalleryOpen(false)} />
+          </motion.div>
+        )}
+      </AnimatePresence>,
+      document.body)}
 
     {/* Delete confirmation — irreversible, so it states exactly what is lost.
         Rendered through a portal: the sidebar wrapper is overflow-hidden AND runs a
