@@ -216,93 +216,6 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   // Everything carries a count, so an empty choice is visibly empty rather than a dead end.
   const RES_LADDER = ['480p', '720p', '1080p', '4K'];
   const RATIO_LADDER = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
-  const opts = useMemo(() => {
-    const tally = (pick: (r: Row) => string | undefined) => {
-      const m = new Map<string, number>();
-      for (const r of allRows) { const k = pick(r); if (k) m.set(k, (m.get(k) || 0) + 1); }
-      return m;
-    };
-    const withAll = (m: Map<string, number>, keys: string[]): Opt[] =>
-      [{ value: ALL, count: allRows.length }, ...keys.map(k => ({ value: k, count: m.get(k) || 0 }))];
-
-    const mm = tally(r => modelLabel(r.usedSettings?.model));
-    const rm = tally(r => resLabel(r.usedSettings?.resolution));
-    const am = tally(r => r.usedSettings?.ratio);
-    // Any stray value not in the canonical ladder (older clip, future preset) still gets
-    // listed — appended after the ladder rather than dropped.
-    const extra = (m: Map<string, number>, ladder: string[]) => [...m.keys()].filter(k => !ladder.includes(k));
-    // Groups in sidebar order — parent, then its subfolders indented — with '그룹 없음'
-    // last, so the filter reads the way the sidebar looks.
-    // A PARENT counts (and selects) its whole subtree: asking for "광고" and being shown
-    // only the clips that happen to sit directly in it, while its subfolders are excluded,
-    // would be a filter that lies about what it contains.
-    const byGroup = new Map<string, number>();
-    let ungrouped = 0;
-    for (const r of allRows) {
-      if (r.groupId) byGroup.set(r.groupId, (byGroup.get(r.groupId) || 0) + 1);
-      else ungrouped++;
-    }
-    const t = groupTree(projectGroups);
-    const groups: Opt[] = [{ value: ALL, count: allRows.length }];
-    for (const root of t.roots) {
-      const kids = t.childrenOf(root.id);
-      groups.push({
-        value: root.id, label: root.name,
-        count: (byGroup.get(root.id) || 0) + kids.reduce((n, k) => n + (byGroup.get(k.id) || 0), 0),
-      });
-      // "부모 › 자식" rather than an indent: the label also has to work as the chip on the
-      // closed dropdown, where a bare "1차" says nothing about which folder's 1차 it is.
-      for (const k of kids) groups.push({ value: k.id, label: `${root.name} › ${k.name}`, count: byGroup.get(k.id) || 0 });
-    }
-    if (ungrouped) groups.push({ value: NO_GROUP, count: ungrouped });
-
-    // Duration is an OPEN set spanning three different models' ranges (2.0 is 4–15,
-    // 2.5 demo 4–30, 옴니 3–10), so a fixed ladder would either be mostly empty rows or
-    // wrong. Only what exists, sorted as numbers — '자동' last, since it isn't one.
-    const dm = tally(r => durKey(r.usedSettings?.duration));
-    const durKeys = [...dm.keys()].sort((a, b) => {
-      if (a === '자동') return 1;
-      if (b === '자동') return -1;
-      return parseInt(a) - parseInt(b);
-    });
-    // Projects by id, for the same reason groups are: a name is neither stable nor
-    // guaranteed unique. New names can't collide (the store appends "(1)"), but data
-    // written before that rule — or restored from an old backup — still can, and a
-    // name-keyed filter MERGES those two projects into one option that shows both
-    // projects' clips. By id they stay separate whatever they are called.
-    const seenP = new Set<string>();
-    const projectOpts: Opt[] = [{ value: ALL, count: allRows.length }];
-    for (const r of allRows) {
-      if (seenP.has(r.projectId)) continue;
-      seenP.add(r.projectId);
-      projectOpts.push({
-        value: r.projectId, label: r.projectName,
-        count: allRows.reduce((n, x) => n + (x.projectId === r.projectId ? 1 : 0), 0),
-      });
-    }
-    return {
-      groups,
-      durations: withAll(dm, durKeys),
-      projects: projectOpts,
-      models: withAll(mm, MODELS.map(m => m.name).filter(n => mm.has(n)).concat(extra(mm, MODELS.map(m => m.name)))),
-      res: withAll(rm, [...RES_LADDER, ...extra(rm, RES_LADDER)]),
-      ratios: withAll(am, [...RATIO_LADDER, ...extra(am, RATIO_LADDER)]),
-    };
-  }, [allRows, projectGroups]);
-
-  // ★ Filter values are NAMES, and names are not stable — rename a group or a project and
-  // the selection points at something that no longer exists. The grid then shows 0 of N
-  // with a filter chip naming a group you just renamed, which reads as a broken gallery.
-  // Whenever a selection falls out of its own option list, drop it back to 전체.
-  useEffect(() => {
-    const has = (opts: Opt[], v: string) => opts.some(o => o.value === v);
-    if (!has(opts.groups, groupFilter)) setGroupFilter(ALL);
-    if (!has(opts.projects, projectFilter)) setProjectFilter(ALL);
-    if (!has(opts.models, modelFilter)) setModelFilter(ALL);
-    if (!has(opts.res, resFilter)) setResFilter(ALL);
-    if (!has(opts.ratios, ratioFilter)) setRatioFilter(ALL);
-    if (!has(opts.durations, durFilter)) setDurFilter(ALL);
-  }, [opts, groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter]);
 
   // In 직접 mode an empty box means "unbounded on that side", so you can ask for
   // "everything before the 5th" without inventing a start date.
@@ -317,21 +230,122 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     return new Set([groupFilter, ...groupTree(projectGroups).childrenOf(groupFilter).map(g => g.id)]);
   }, [groupFilter, projectGroups]);
 
-  const rows = useMemo(() => allRows.filter(r => {
-    if (groupFilter === NO_GROUP) { if (r.groupId) return false; }
-    else if (groupMatch && !(r.groupId && groupMatch.has(r.groupId))) return false;
-    if (projectFilter !== ALL && r.projectId !== projectFilter) return false;
-    if (modelFilter !== ALL && modelLabel(r.usedSettings?.model) !== modelFilter) return false;
-    if (resFilter !== ALL) {
-      const res = r.usedSettings?.resolution === '4k' ? '4K' : r.usedSettings?.resolution;
-      if (res !== resFilter) return false;
+  // ── The grid, and every filter's numbers, from one pass ─────────────────────
+  // ★ Each filter is counted against every OTHER active filter, but NOT against itself.
+  // The numbers used to be totals for the whole library, so narrowing to a 27-clip project
+  // still offered "1080p 338" and the resolution column added up to 418. A count that does
+  // not match what clicking it would give you is decoration, not information.
+  // Excluding a filter from its own count is the other half of the rule: count 720p against
+  // the 720p selection and every other resolution reads 0, and you could never switch
+  // without clearing first.
+  // The option LISTS still come from the unfiltered library, so entries never vanish
+  // mid-use — they just go to 0, which is a visible "nothing here" rather than a row that
+  // silently disappeared from under the cursor.
+  const { opts, rows } = useMemo(() => {
+    const pass = {
+      group: (r: Row) => groupFilter === ALL ? true
+        : groupFilter === NO_GROUP ? !r.groupId
+        : !!(r.groupId && groupMatch && groupMatch.has(r.groupId)),
+      project: (r: Row) => projectFilter === ALL || r.projectId === projectFilter,
+      model: (r: Row) => modelFilter === ALL || modelLabel(r.usedSettings?.model) === modelFilter,
+      res: (r: Row) => resFilter === ALL || resLabel(r.usedSettings?.resolution) === resFilter,
+      ratio: (r: Row) => ratioFilter === ALL || r.usedSettings?.ratio === ratioFilter,
+      dur: (r: Row) => durFilter === ALL || durKey(r.usedSettings?.duration) === durFilter,
+      when: (r: Row) => r.timestamp >= since && r.timestamp <= until,
+      star: (r: Row) => !starredOnly || !!r.starred,
+    };
+    type Dim = keyof typeof pass;
+    const dims = Object.keys(pass) as Dim[];
+    const subset = (skip?: Dim) => allRows.filter(r => dims.every(d => d === skip || pass[d](r)));
+
+    const tally = (arr: Row[], pick: (r: Row) => string | undefined) => {
+      const m = new Map<string, number>();
+      for (const r of arr) { const k = pick(r); if (k) m.set(k, (m.get(k) || 0) + 1); }
+      return m;
+    };
+    // Keys from the WHOLE library (stable list); counts from the faceted subset.
+    const build = (dim: Dim, pick: (r: Row) => string | undefined, order?: (keys: string[]) => string[]): Opt[] => {
+      const arr = subset(dim);
+      const now = tally(arr, pick);
+      const keys0 = [...tally(allRows, pick).keys()];
+      const keys = order ? order(keys0) : keys0;
+      return [{ value: ALL, count: arr.length }, ...keys.map(k => ({ value: k, count: now.get(k) || 0 }))];
+    };
+    const extra = (keys: string[], ladder: string[]) => keys.filter(k => !ladder.includes(k));
+
+    // Groups in sidebar order — parent, then its subfolders — with '그룹 없음' last, so the
+    // filter reads the way the sidebar looks. A PARENT counts its whole subtree: asking for
+    // "광고" and being shown only what sits directly in it would be a filter that lies.
+    const gArr = subset('group');
+    const byGroup = new Map<string, number>();
+    let ungrouped = 0;
+    for (const r of gArr) {
+      if (r.groupId) byGroup.set(r.groupId, (byGroup.get(r.groupId) || 0) + 1);
+      else ungrouped++;
     }
-    if (ratioFilter !== ALL && r.usedSettings?.ratio !== ratioFilter) return false;
-    if (durFilter !== ALL && durKey(r.usedSettings?.duration) !== durFilter) return false;
-    if (r.timestamp < since || r.timestamp > until) return false;
-    if (starredOnly && !r.starred) return false;
-    return true;
-  }), [allRows, groupFilter, groupMatch, projectFilter, modelFilter, resFilter, ratioFilter, durFilter, since, until, starredOnly]);
+    const anyUngrouped = allRows.some(r => !r.groupId);
+    const t = groupTree(projectGroups);
+    const groups: Opt[] = [{ value: ALL, count: gArr.length }];
+    for (const root of t.roots) {
+      const kids = t.childrenOf(root.id);
+      groups.push({
+        value: root.id, label: root.name,
+        count: (byGroup.get(root.id) || 0) + kids.reduce((n, k) => n + (byGroup.get(k.id) || 0), 0),
+      });
+      // "부모 › 자식" rather than an indent: the label also has to work as the chip on the
+      // closed dropdown, where a bare "1차" says nothing about which folder's 1차 it is.
+      for (const k of kids) groups.push({ value: k.id, label: `${root.name} › ${k.name}`, count: byGroup.get(k.id) || 0 });
+    }
+    if (anyUngrouped) groups.push({ value: NO_GROUP, count: ungrouped });
+
+    // Projects by id, for the same reason groups are: a name is neither stable nor
+    // guaranteed unique. New names can't collide (the store appends "(1)"), but data
+    // written before that rule — or restored from an old backup — still can, and a
+    // name-keyed filter MERGES those two projects into one option showing both projects'
+    // clips. By id they stay separate whatever they are called.
+    const pArr = subset('project');
+    const pCount = tally(pArr, r => r.projectId);
+    const seenP = new Set<string>();
+    const projects: Opt[] = [{ value: ALL, count: pArr.length }];
+    for (const r of allRows) {
+      if (seenP.has(r.projectId)) continue;
+      seenP.add(r.projectId);
+      projects.push({ value: r.projectId, label: r.projectName, count: pCount.get(r.projectId) || 0 });
+    }
+
+    return {
+      rows: subset(),
+      opts: {
+        groups,
+        projects,
+        models: build('model', r => modelLabel(r.usedSettings?.model),
+          keys => MODELS.map(m => m.name).filter(n => keys.includes(n)).concat(extra(keys, MODELS.map(m => m.name)))),
+        res: build('res', r => resLabel(r.usedSettings?.resolution),
+          keys => [...RES_LADDER, ...extra(keys, RES_LADDER)]),
+        ratios: build('ratio', r => r.usedSettings?.ratio,
+          keys => [...RATIO_LADDER, ...extra(keys, RATIO_LADDER)]),
+        // Duration is an OPEN set spanning three models' ranges (2.0 4–15, 2.5 demo 4–30,
+        // 옴니 3–10), so a fixed ladder would be mostly empty rows or simply wrong.
+        durations: build('dur', r => durKey(r.usedSettings?.duration),
+          keys => keys.sort((a, b) => a === '자동' ? 1 : b === '자동' ? -1 : parseInt(a) - parseInt(b))),
+      },
+    };
+  }, [allRows, projectGroups, groupFilter, groupMatch, projectFilter, modelFilter,
+      resFilter, ratioFilter, durFilter, since, until, starredOnly]);
+
+  // ★ Filter values are NAMES, and names are not stable — rename a group or a project and
+  // the selection points at something that no longer exists. The grid then shows 0 of N
+  // with a filter chip naming a group you just renamed, which reads as a broken gallery.
+  // Whenever a selection falls out of its own option list, drop it back to 전체.
+  useEffect(() => {
+    const has = (opts: Opt[], v: string) => opts.some(o => o.value === v);
+    if (!has(opts.groups, groupFilter)) setGroupFilter(ALL);
+    if (!has(opts.projects, projectFilter)) setProjectFilter(ALL);
+    if (!has(opts.models, modelFilter)) setModelFilter(ALL);
+    if (!has(opts.res, resFilter)) setResFilter(ALL);
+    if (!has(opts.ratios, ratioFilter)) setRatioFilter(ALL);
+    if (!has(opts.durations, durFilter)) setDurFilter(ALL);
+  }, [opts, groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter]);
 
   // Any filter change resets the window — otherwise you narrow to 3 results and still
   // carry a "shown = 96" from before, or worse, land past the end of a shorter list.
