@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import {
   S3Client,
@@ -436,6 +437,111 @@ async function startServer() {
       }
       console.log(`[Cache] keep-alive: ${touched} refreshed, ${missing} already gone`);
       res.json({ ok: true, touched, missing });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // ── Disaster-recovery backup, over HTTP ─────────────────────────────────────
+  // The Windows app mirrors its state to Documents\Freewill Seedance Backup via Electron
+  // IPC. In a browser there is no IPC, so that mirror did nothing at all — and a browser
+  // was the ONLY thing holding those projects. Clear site data, or let a browser evict
+  // storage under pressure, and the work was gone with no second copy anywhere.
+  // These routes are the same four operations the IPC handlers expose, so the client can
+  // keep one code path and just swap the transport. Same directory, same filenames, same
+  // atomic write — a backup written on one platform restores on the other.
+  const BACKUP_DIR = path.join(os.homedir(), 'Documents', 'Freewill Seedance Backup');
+  const BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-backup.json');
+  const ELEMENTS_BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-elements.json');
+  const LEGACY_COMBINED_PATH = path.join(BACKUP_DIR, 'seedance-backup-combined-legacy.json');
+  const ELEMENTS_MANIFEST_PATH = path.join(BACKUP_DIR, 'seedance-elements-manifest.json');
+  const elementsChunkPath = (i: number) => path.join(BACKUP_DIR, `seedance-elements-${String(i).padStart(3, '0')}.json`);
+  const STATE_RESTORE_MAX = 150 * 1024 * 1024;
+  const ELEMENTS_RESTORE_MAX = 150 * 1024 * 1024;
+
+  function writeAtomic(target: string, content: string) {
+    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const tmp = target + '.tmp';
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, target);   // atomic: a power cut can't leave a half-written backup
+  }
+
+  // Raw, not express.json(): this is a 20MB+ JSON string and re-parsing it here only to
+  // stringify it back out would double the memory for nothing.
+  app.post('/api/backup/state', express.raw({ type: '*/*', limit: '400mb' }), (req, res) => {
+    try {
+      const content = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
+      if (!content) return res.status(400).json({ ok: false, error: 'empty content' });
+      if (fs.existsSync(BACKUP_PATH) && !fs.existsSync(LEGACY_COMBINED_PATH)) {
+        // First state-only write on this machine. Whatever is there predates the split and
+        // may be the only copy of the library — move it aside rather than over it.
+        try { fs.renameSync(BACKUP_PATH, LEGACY_COMBINED_PATH); } catch {}
+      }
+      writeAtomic(BACKUP_PATH, content);
+      res.json({ ok: true, path: BACKUP_PATH, bytes: content.length });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  app.post('/api/backup/elements/:index', express.raw({ type: '*/*', limit: '80mb' }), (req, res) => {
+    try {
+      const index = Number(req.params.index);
+      const total = Number(req.query.total);
+      const count = Number(req.query.count) || 0;
+      if (!Number.isInteger(index) || index < 0 || !Number.isInteger(total) || total <= 0) {
+        return res.status(400).json({ ok: false, error: 'bad index/total' });
+      }
+      const content = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
+      writeAtomic(elementsChunkPath(index), content);
+      if (index === total - 1) {
+        // Manifest last — until it lands, a partial run is simply not a valid backup.
+        writeAtomic(ELEMENTS_MANIFEST_PATH, JSON.stringify({ v: 2, chunks: total, count, savedAt: Date.now() }));
+        for (let i = total; i < total + 40; i++) {
+          try { if (fs.existsSync(elementsChunkPath(i))) fs.unlinkSync(elementsChunkPath(i)); } catch {}
+        }
+        try { if (fs.existsSync(ELEMENTS_BACKUP_PATH)) fs.unlinkSync(ELEMENTS_BACKUP_PATH); } catch {}
+      }
+      res.json({ ok: true, bytes: content.length });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  app.get('/api/backup/elements/:index', (req, res) => {
+    try {
+      const f = elementsChunkPath(Number(req.params.index));
+      if (!fs.existsSync(f)) return res.json({ ok: false, error: 'missing' });
+      res.json({ ok: true, content: fs.readFileSync(f, 'utf8') });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  app.get('/api/backup/state', (_req, res) => {
+    try {
+      let p = BACKUP_PATH;
+      if (!fs.existsSync(p)) p = LEGACY_COMBINED_PATH;
+      if (!fs.existsSync(p)) return res.json({ ok: true, content: null });
+      // A pre-split backup is state AND library in one file. Reading that whole thing at
+      // startup is what used to kill the app — booting empty and saying so is better.
+      const stateSize = fs.statSync(p).size;
+      if (stateSize > STATE_RESTORE_MAX) {
+        console.warn(`[Backup] ${p} is ${(stateSize / 1048576).toFixed(0)}MB — too large to load safely; skipping.`);
+        return res.json({ ok: true, content: null, stateSkipped: true, stateBytes: stateSize, path: p });
+      }
+      const content = fs.readFileSync(p, 'utf8');
+      let elementsChunks = 0, elementsCount = 0;
+      try {
+        if (fs.existsSync(ELEMENTS_MANIFEST_PATH)) {
+          const man = JSON.parse(fs.readFileSync(ELEMENTS_MANIFEST_PATH, 'utf8'));
+          if (man && man.chunks > 0) { elementsChunks = man.chunks; elementsCount = man.count || 0; }
+        }
+      } catch (e: any) { console.warn('[Backup] manifest unreadable:', e.message); }
+      let elements: string | null = null, elementsBytes = 0, elementsSkipped = false;
+      if (!elementsChunks) {
+        try {
+          if (fs.existsSync(ELEMENTS_BACKUP_PATH)) {
+            elementsBytes = fs.statSync(ELEMENTS_BACKUP_PATH).size;
+            if (elementsBytes <= ELEMENTS_RESTORE_MAX) elements = fs.readFileSync(ELEMENTS_BACKUP_PATH, 'utf8');
+            else elementsSkipped = true;
+          }
+        } catch (e: any) { console.warn('[Backup] elements file unreadable:', e.message); }
+      }
+      res.json({ ok: true, content, elements, elementsBytes, elementsSkipped, elementsChunks, elementsCount,
+                 elementsPath: ELEMENTS_BACKUP_PATH, path: p, bytes: content.length });
     } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
   });
 

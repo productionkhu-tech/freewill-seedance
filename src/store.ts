@@ -192,6 +192,49 @@ async function loadElementAssets(legacy: ElementAsset[]): Promise<ElementAsset[]
 // write blocked the main thread for the full stringify of a multi-MB blob.
 // On-disk format is unchanged (same JSON string under the same key), so this is
 // fully backward/forward compatible with data written by older versions.
+// ── Where the disaster-recovery mirror goes ─────────────────────────────────
+// Same four operations, two transports. On Windows the packaged app talks to Electron
+// over IPC; in a browser (the Mac build runs as a local web app) there is no IPC, so it
+// talks to its own local server, which writes the identical files to the identical folder.
+//
+// This existed as `window.electronAPI` inline at every call site, which meant the browser
+// simply fell out of every backup path — silently. The Mac had ONE copy of a user's
+// projects, in browser storage, with nothing behind it: clear site data and the work was
+// gone. A one-line `if` was the whole safety net, and in a browser it was always false.
+//
+// Returning the SAME shapes as the IPC handlers is the point — every guard, the 5-minute
+// debounce, the chunking and the restore path above stay exactly as they are and as they
+// were tested. Only the wire changes.
+type BackupApi = {
+  backupSave(content: string, kind?: string): Promise<any>;
+  backupSaveElementsChunk(index: number, content: string, total: number, count: number): Promise<any>;
+  backupLoadElementsChunk(index: number): Promise<any>;
+  backupLoad(): Promise<any>;
+};
+
+const httpBackupApi: BackupApi = {
+  // text/plain, not JSON: the body IS the blob. Wrapping 20MB of JSON inside more JSON
+  // just to unwrap it server-side doubles the work and the memory.
+  backupSave: (content) =>
+    fetch('/api/backup/state', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: content })
+      .then(r => r.json()).catch(e => ({ ok: false, error: String(e) })),
+  backupSaveElementsChunk: (index, content, total, count) =>
+    fetch(`/api/backup/elements/${index}?total=${total}&count=${count}`,
+      { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: content })
+      .then(r => r.json()).catch(e => ({ ok: false, error: String(e) })),
+  backupLoadElementsChunk: (index) =>
+    fetch(`/api/backup/elements/${index}`).then(r => r.json()).catch(e => ({ ok: false, error: String(e) })),
+  backupLoad: () =>
+    fetch('/api/backup/state').then(r => r.json()).catch(e => ({ ok: false, error: String(e) })),
+};
+
+function getBackupApi(): BackupApi | null {
+  if (typeof window === 'undefined') return null;
+  const el = (window as any).electronAPI;
+  if (el?.backupSave) return el as BackupApi;      // packaged app — keep IPC exactly as it was
+  return httpBackupApi;                            // browser — same files, over the local server
+}
+
 const idbPersistStorage: PersistStorage<unknown> = {
   getItem: async (name: string): Promise<StorageValue<unknown> | null> => {
     const parse = (raw: string): StorageValue<unknown> | null => {
@@ -201,7 +244,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
     if (fromIdb) return parse(fromIdb);
     // IDB empty — likely fresh install OR userData was wiped. Try external backup.
     try {
-      const api = (window as any).electronAPI;
+      const api = getBackupApi();
       if (api?.backupLoad) {
         const result = await api.backupLoad();
         if (result?.ok && result.content) {
@@ -282,7 +325,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
     // snapshot at fire time (once per 5 min, not per set).
     if (backupTimer) clearTimeout(backupTimer);
     backupTimer = setTimeout(() => {
-      const api = (window as any).electronAPI;
+      const api = getBackupApi();
       if (!api?.backupSave) return;
       // ★ SAFETY: never write a backup before the library has loaded. Backing up an
       // empty/half-loaded elementAssets would OVERWRITE a good backup with one that

@@ -58,6 +58,21 @@ export default function App() {
     }).catch(() => { /* 캐시 수명 연장 실패는 조용히 넘어간다 */ });
   }, [_hasHydrated]);
 
+  // Ask the browser not to throw our storage away. Without this an origin's IndexedDB is
+  // "best effort": browsers evict it under disk pressure, and Safari clears script-written
+  // storage for sites it hasn't seen in a while. On Windows that only costs a re-read from
+  // the backup file; in the browser build the projects live here, so it matters more.
+  // Granting is the browser's call, not ours — this is a request, and the file mirror
+  // (store.ts) is what actually guarantees the data survives. Belt and braces.
+  useEffect(() => {
+    if (!navigator.storage?.persist) return;
+    navigator.storage.persisted?.().then(already => {
+      if (already) return;
+      navigator.storage.persist().then(granted =>
+        console.log(`[Storage] persistent storage ${granted ? 'granted' : 'refused'}`));
+    }).catch(() => { /* 지원 안 하면 그냥 넘어간다 */ });
+  }, []);
+
   // Single interval polls ALL active tasks every 10 seconds — no setTimeout chains
   useEffect(() => {
     if (!_hasHydrated) return;
@@ -156,7 +171,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.8.304
+        v26.8.305
       </div>
     </div>
   );
