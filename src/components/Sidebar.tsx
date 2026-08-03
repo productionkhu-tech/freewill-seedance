@@ -168,6 +168,8 @@ function IconPicker({ anchor, current, onPick, onClose }: {
   // step with the contents can no longer put the panel where it cannot be seen.
   const PANEL_W = 300, PANEL_H = 330;
   const boxRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  useWheelToHorizontal(tabsRef);
   const { left, top } = useClampToViewport(
     boxRef,
     anchor.left,
@@ -188,7 +190,7 @@ function IconPicker({ anchor, current, onPick, onClose }: {
       >
         {/* Category tabs. A single flat grid of ~600 glyphs is a scroll-hunt; tabs keep
             any one page to a couple of screenfuls. */}
-        <div className="flex gap-0.5 mb-1.5 overflow-x-auto pb-0.5 -mx-0.5 px-0.5">
+        <div ref={tabsRef} className="flex gap-0.5 mb-1.5 overflow-x-auto pb-0.5 -mx-0.5 px-0.5">
           {[...ICON_CATEGORIES.map(c => ({ id: c.id, label: c.label })), { id: CUSTOM, label: '커스텀' }].map(c => (
             <button key={c.id} onClick={() => { setTab(c.id); setErr(null); }}
               className={`shrink-0 px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-colors ${
@@ -265,6 +267,38 @@ function useClampToViewport(ref: RefObject<HTMLElement | null>, wantLeft: number
     setPos(p => (p.left === left && p.top === top ? p : { left, top }));
   }, [ref, wantLeft, wantTop, dep]);
   return pos;
+}
+
+// A strip that only scrolls sideways should move sideways when you turn the wheel over it.
+// Browsers don't do this on their own: a vertical wheel over a horizontally-scrolling box
+// scrolls the nearest VERTICAL ancestor instead, so the strip just sits there and you are
+// left dragging a 2px scrollbar.
+// ★ The running total lives in a ref, not in scrollLeft. The strip inherits
+// `scroll-behavior: smooth` from <html>, so scrollLeft mid-animation is where the strip IS,
+// not where it is GOING — accumulating onto it loses most of a fast flick. Same trap that
+// made the sidebar's drag-scroll die after 15px (§18-15). We keep our own target and let
+// the browser animate towards it, which is also what keeps this smooth rather than steppy.
+function useWheelToHorizontal(ref: RefObject<HTMLElement | null>) {
+  const target = useRef<{ left: number; at: number } | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      // A real sideways wheel (trackpad, tilt wheel) already does the right thing.
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      const max = el.scrollWidth - el.clientWidth;
+      if (max <= 0) return;                       // nothing to scroll — let the page have it
+      e.preventDefault();
+      const now = performance.now();
+      const cont = target.current && now - target.current.at < 200;   // same flick?
+      const base = cont ? target.current!.left : el.scrollLeft;
+      const left = Math.max(0, Math.min(max, base + e.deltaY));
+      target.current = { left, at: now };
+      el.scrollTo({ left });                      // inherits smooth
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [ref]);
 }
 
 // Right-click menu for a project row. Portaled and pinned to the cursor, with the same
