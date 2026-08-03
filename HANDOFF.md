@@ -1,255 +1,322 @@
-# Freewill Seedance 2.0 — 세션 인수인계 (2026-05-15 기준)
+# Freewill Seedance 2.0 — 인수인계
 
-이 문서는 **이전 에이전트가 한 작업 + 우리 사이에 굳어진 규칙 + 발견한 함정**을 다음 에이전트가 30분 안에 흡수할 수 있게 정리한 핸드오프 노트.
-
-핵심 기술 참조는 같은 폴더의 SKILL 파일 (`.claude/skills/freewill-seedance/freewill-seedance_SKILL.md`)이 자동 로드됨. 이 HANDOFF.md는 그 위에 얹는 **세션 컨텍스트 + 사용자 톤 + 불변 규칙**.
-
----
-
-## 0. 가장 먼저 알아야 할 것
-
-| 항목 | 값 |
-|------|------|
-| 프로젝트 위치 | `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\` |
-| GitHub | https://github.com/productionkhu-tech/freewill-seedance (Public) |
-| 현재 버전 | **v26.6.2407** (2026-06-24 배포) |
-| 사용자 | 김현우 / Studio Freewillusion TA |
-| 사용자 환경 | Windows + git-bash, PowerShell. Python 3, Node 22+ |
-| 작업 디렉토리 | 코드는 절대 경로 사용. `cd` 거의 안 함 |
+> 최종 정리: **2026-08-03** / 배포 버전 **26.8.305**
+> 이 문서 하나로 인수받을 수 있게 쓴다. 시간순 기록이 아니라 **주제별**이다.
+> 여기 적힌 숫자는 전부 실측이다. 확인 못 한 것은 "미확인"이라고 명시한다.
 
 ---
 
-## 1. 최근 변경 이력 (요약, 신순)
+## 0. 5분 요약
 
-| 버전 | 날짜 | 핵심 변경 |
-|------|------|----------|
-| **26.6.2407** | 06-24 | **비디오 썸네일 검정 프레임 방지** — `createVideoThumbnail`이 0.1s만 캡처해 녹화·페이드인 인트로가 검정으로 잡히던 문제. 여러 지점(0.1·10·25·50·75%) 캡처 후 `getImageData` 평균 luma로 검정(<16) 건너뛰고 첫 비검정 프레임 선택(전부 어두우면 가장 밝은 것). 캡처 240px로 상향(행·호버 모두 선명). 썸네일 있는 비디오 호버는 이 좋은 썸네일 사용(라이브 video는 썸네일 없는 폴백만). (2405~2407 호버확대 묶음, 미배포) |
-| **26.6.2406** | 06-24 | **호버 확대에 비디오 첫 프레임** — HoverZoom `videoSrc` 추가: 비디오는 `<video src=/api/cache/{cacheId}#t=0.1 poster={썸네일}>`로 실제 첫 프레임 표시(캐시 만료 시 poster 폴백). 썸네일 없던 비디오도 cacheId 있으면 호버로 첫 프레임 봄. preload=metadata+range라 가벼움. (2405와 함께 묶임, 미배포 단계였음) |
-| **26.6.2405** | 06-24 | **레퍼런스 썸네일 호버 확대** — `HoverZoom`(`createPortal`로 body에 fixed 렌더 → overflow 클립 회피, 썸네일 왼쪽에 256px, 뷰포트 클램프). 이미지는 `/api/cache/{cacheId}` full-res 우선(onerror→썸네일). 적용: 어셋 패널(AssetRow)·프리뷰 모달·메시지 카드 usedAssets. **프롬프트 멘션 핀은 제외**(요청). **미배포(로컬 빌드)** |
-| **26.6.2404** | 06-24 | **순서 변경을 framer Reorder 소터블로** (2403 HTML5 드래그 폐기 — 색만 바뀌던 게 별로라는 피드백). `motion/react`의 `Reorder.Group/Item` + `useDragControls`로 행 자체가 들려 따라오고 나머지가 슬라이드. 행을 `AssetRow` 모듈 컴포넌트로 분리(행마다 useDragControls 필요). 그립 `onPointerDown→controls.start`만 드래그 시작(`dragListener=false`), 나머지 클릭 안전. **포인터 드래그라 HTML5 파일-드롭(교체)과 이벤트 채널 분리 → 충돌 없음.** store `setAssetOrder(orderedIds)`(id 기준 재배열, 객체·id 보존, 카운트 검증). 멘션은 sync effect가 재번호 자동. **+ 전송 레이스 픽스**: `handleSend`가 `getPlainText` 직전에 핀 라벨을 현재 `project.assets`로 강제 재동기화 — reorder 직후 즉시 전송 시 passive effect 미flush로 stale 라벨이 content[] 새 순서와 어긋나 멘션이 엉뚱한 에셋 가리키던 레이스 차단(검증: reorder→즉시전송 시 content순서·멘션 일치 확인). (2402 화살표·2403 HTML5드래그는 폐기·미배포 단계였음) |
-| **26.6.2403** | 06-24 | (폐기·미배포) 레퍼런스 에셋 순서 변경 — 드래그 핸들(⠿) (2402의 ▲▼ 화살표 폐기, 미배포였음). 행 왼쪽 그립만 draggable, `dataTransfer`에 `REORDER_MIME`(`application/x-seedance-reorder`) 세팅 → 같은 행의 "파일 드롭=교체"와 충돌 없이 구분(onDrop에서 `getData(REORDER_MIME)` 있으면 reorder, 없고 files면 replace). store `reorderAsset(draggedId, targetId)`(splice 이동, **id·객체 보존**). 멘션은 sync effect가 재번호 자동 갱신 — 핀은 id로 에셋 추적. **미배포(로컬 빌드)** |
-| **26.6.2401** | 06-24 | **레퍼런스 에셋 개별 교체** — Reference Assets 리스트의 각 행에 ↻ 교체 버튼(클릭 파일피커) + 행 전체 드롭 타깃(파일 드롭 → 그 에셋만 교체, 드래그오버 하이라이트). 기존 `replaceAsset`(id·위치 보존) 재사용 → 멘션 안전(이름 위치기반 유지 + 썸네일 sync effect가 자동 갱신). 타입 가드(이미지↔이미지만). 멘션/전송 로직 변경 0. 9개 중 N번째만 교체 가능. + 패널 빈곳 드롭 navigate 방지, 드래그취소 하이라이트 정리, build.cjs esbuild를 JS API로(Node25 npx 실패→stale server.cjs 방지) |
-| **26.6.1502** | 06-15 | **생성 시 자동 다운로드 토글** — 사이드바 다운로드 폴더 박스에 체크박스. ON이면 영상 완료 시 지정 폴더로 자동 저장(`pollTask` succeeded 블록에서 `downloadViaProxy`). **downloadedAt 미설정** = 수동 클릭만 '다시 다운로드' 라벨. succeeded 직후 **`flushPersist()`** 즉시 호출 → 완료상태 디스크 즉시 반영 → 재시작·자동업데이트 후 재다운로드 차단(완료 태스크는 재폴링 안 됨). `autoDownload`는 전역·영속(partialize). 폴더는 기존대로 세션 한정 |
-| **26.6.1501** | 06-15 | **버전 날짜 정정 재배포** — 1209와 코드 100% 동일, 라벨만 6/15로. (1201~1208은 12xx로 남김 = 실제는 6/15 작업분) |
-| **26.6.1209** | 06-12(실제 06-15) | **이미지 비율 하드차단 제거** — 1201에서 넣은 `validateImageDimensions`의 0.4~2.5 비율 거부 삭제. 스모크 테스트로 API가 비율 초과 이미지를 받아 중앙 크롭 확인됨. px 범위(300~6000)는 하드 리밋이라 유지. 비디오 비율/총픽셀 제한은 그대로(문서 명시 하드리밋, 미검증) |
-| **26.6.1208** | 06-12 | **실사 인물/민감 콘텐츠 에러 한글화** — translateError에 `real person`·`PrivacyInformation`(실사 얼굴 레퍼런스 거부)·`SensitiveContentDetected` 케이스 추가. 실 API 스모크 테스트로 확인: 3.60:1 이미지는 API가 받아 21:9로 중앙크롭(거부 아님), 포토리얼 얼굴(앨리스)은 `InputImageSensitiveContentDetected.PrivacyInformation`로 생성시점 400. 매지코(비실사)는 통과 |
-| **26.6.1207** | 06-12 | **media-cache LRU 수명 연장 + 캐시 정리 전체화** — ① `touchCache()`: 캐시 읽기/dedup히트/재업로드마다 mtime 갱신 → 30일 청소가 "안 쓰는 것만" 제거 (자주 재사용하는 레퍼런스는 영구 보존). ② 사이드바 캐시 정리 버튼이 media-cache까지 전부 삭제 (`POST /api/cache/clear`) — 경고문에 클립보드 첨부 복구 불가 명시. `GET /api/cache/stats` 신설 (⚠ `:cacheId` 라우트보다 먼저 등록 필수) |
-| **26.6.1206** | 06-12 | **first_last 붙여넣기 사이클 first부터 보장** — pasteCycleRef를 슬롯 id와 묶어 저장({firstId,lastId,next}). 슬롯이 피커·재추가 등 다른 경로로 바뀌면 사이클 무효화하고 무조건 first부터. 1205의 전역 포인터가 stale 상태로 last부터 교체하던 버그 수정 |
-| **26.6.1205** | 06-12 | **클립보드 이미지 붙여넣기 → 에셋 첨부** — 프롬프트창에 이미지가 HTML로 박히던 참사 차단(`handlePromptPaste`). 모드별 라우팅: t2v·extend=차단 알림, first=추가→교체, first_last=빈 슬롯 채우고 이후 first/last 번갈아 교체(`pasteCycleRef`), multimodal·edit=reference_image 9장 캡(초과 시 경고+기존 유지). 텍스트 붙여넣기는 기본 동작 유지 |
-| **26.6.1204** | 06-12 | **persist 즉시 플러시** — 1.5s 디바운스 쓰기 도중 종료/자동업데이트 재시작 시 상태 유실되던 갭 차단. `flushPersist()` 신설: 다운로드 마킹 직후 + visibilitychange(hidden) + pagehide에서 강제 플러시. downloadedAt 유실 방지가 목적이지만 모든 상태에 적용되는 안전망 |
-| **26.6.1203** | 06-12 | **다운로드 완료 표시** — `ChatMessage.downloadedAt` 신설(영속). 영상 다운로드 성공 시 버튼이 "다시 다운로드"(emerald 톤, RefreshCw 아이콘)로 전환. 메시지 카드·갤러리·프리뷰 모달 3곳. previewItem은 state 스냅샷이라 downloadedAt은 store에서 live 조회 |
-| **26.6.1202** | 06-12 | **Duration Auto (-1)** — 모델이 4~15초 중 길이 자동 선택. Duration 라벨 옆 Auto 토글, 켜면 슬라이더 비활성. store 마이그레이션 클램프가 -1 보존하도록 수정. 과거 메시지 태그는 'Auto' 표시 |
-| **26.6.1201** | 06-12 | **API 규칙 검증 보강** (공식 레퍼런스 문서 대조) — ① 레퍼런스 비디오 합산 ≤15s·오디오 합산 ≤15s를 첨부/교체/전송 3시점에서 차단 (`Asset.durationSec` 신설, 스냅샷·재사용 경로에도 보존) ② multimodal 오디오 단독 전송 차단 ③ 비디오 입력 검증을 문서 기준으로 교체: 1080p 허용, 총픽셀 [640×640, 2206×946], 비율 0.4~2.5, 각 변 300~6000px ④ 이미지 비율(0.4~2.5) 사전 체크. 참고: task 기록 보존은 7일(video_url 24h는 그대로), 입력 fps 24~60은 브라우저에서 측정 불가라 미검증 |
-| **26.5.1301** | 05-13 | **originalPath fallback** — `webUtils.getPathForFile` 캐처 + `/api/reupload-from-path` 엔드포인트. media-cache 미스 시 원본 파일 디스크 재읽기. 새 GH_TOKEN으로 첫 배포 |
-| 26.5.408 | 05-04 | **media-cache → userData 이전** — auto-update 시 resources/ wipe 문제 해결 |
-| 26.5.407 | 05-04 | **handleReuse atomic** — `replaceAllAssets` 신설. clearAssets+N×addAsset 패턴이 2× 중복 유발하던 거 차단 |
-| 26.5.406 | 05-04 | **과거 메시지 스냅샷 완전 격리** — thumbAssets에서 비디오 url 보존, 사이드 썸네일은 `<img>`, fallback 제거 |
-| 26.5.405 | 05-04 | **CRITICAL: 과거 메시지 멘션을 snapshot으로** — 옛날엔 live namedAssets 참조해서 replace 시 과거 메시지 다 같이 변형됨 |
-| 26.5.404 | 05-04 | 비디오 첫 프레임 썸네일 + 글로벌 drag-drop replace |
-| 26.5.403 | 05-04 | edit_video 비디오 교체 (`replaceAsset` 신설, id 보존) |
-| 26.5.402 | 05-04 | 멀티 파일 피커 (multiple=true) |
-| 26.5.401 | 05-04 | **크레딧 트래커 통합** — 영상 성공 시 GAS POST. 팀명은 SEEDANCE_API_KEY SHA-256 해시로 자동 |
-| 26.4.2404 | 04-24 | 호버 재생 시 currentTime 보존 (rewind 안 함) |
-| 26.4.2403 | 04-24 | 호버 시 재생 + 소리 ON 기본 |
-| 26.4.2402 | 04-24 | 리사이즈 핸들 maxHeight 의미로 (default 160) |
-| 26.4.2401 | 04-24 | 긴 프롬프트 커서 자동 스크롤 (contentEditable 한계 우회) |
-| 26.4.2203 | 04-21 | **Files API 롤백** — 비디오도 tmpfiles로 복귀 |
-| 26.4.2202 | 04-21 | Files API fallback (실패) |
-| 26.4.2201 | 04-21 | Files API 시도 (실패) |
-| 26.4.2101 | 04-21 | **4 critical fixes**: pollTask hang(8s timeout), bad response caching, 5s 다운 짤림(5min), tmpfiles 무한 대기(60s) |
+BytePlus Seedance + Gemini Omni Flash 로 영상을 만드는 사내 도구.
+
+| | |
+|---|---|
+| **윈도우** | Electron 패키지 EXE. NSIS 설치, 자동 업데이트(GitHub Releases) |
+| **맥** | EXE 없음. **소스에서 로컬 웹앱**으로 실행 (`start.command` → `npm run dev` → `localhost:3000`) |
+| 저장소 | https://github.com/productionkhu-tech/freewill-seedance (**Public**) |
+| 데이터 | IndexedDB + `~/Documents/Freewill Seedance Backup/` 파일 미러 |
+
+**공개 저장소다.** 키·토큰·2.5 데모 엔드포인트 ID 를 코드나 문서에 절대 넣지 마라.
+(2026-05-18 GitHub secret scanning 에 막힌 적 있음. 그 뒤로 평문 금지가 정책.)
 
 ---
 
-## 2. 폐기된 시도 (다시 시도 금지)
+## 1. 구조
 
-### ❌ BytePlus Files API
-v26.4.2201/2202에서 비디오만 BytePlus `/api/v3/files`로 보내려 함. 실패. 2203에서 롤백.
+```
+프론트 (React 19 + Vite + Zustand + Tailwind + motion)
+    ↕ localhost:3000        ── modelProvider() 로 두 갈래 ──
+서버 (Express, server.ts)
+    ├ [시댄스] BytePlus async task+poll · Cloudflare R2(에셋) · BytePlus CDN(영상)
+    └ [옴니]   Google Interactions API(동기) · Google Files API · media-cache/
+윈도우만: Electron main(electron/main.cjs) ← preload
+```
 
-2026-05-13 재조사 결과 **근본적으로 불가능**:
-- Files API는 **Responses API**용 (영상 *이해*, 모델 `seed-1-6-...`)
-- Seedance 생성 API (`/contents/generations/tasks`, 모델 `dreamina-seedance-2-0-...`)는 **`file_id` 필드 자체를 받지 않음**
-- 공식 튜토리얼(`ModelArk_Seedance 2.0 series tutorial.md`)이 명시: `image_url.url` / `video_url.url` / `audio_url.url` — 공개 URL만
-- 공식 권장 대안: BytePlus TOS object storage (유료)
+**서버는 두 플랫폼 모두에서 돈다.** 윈도우는 Electron 메인 프로세스가 `server.cjs` 를
+`require` 하고, 맥은 `tsx server.ts` 로 직접 띄운다. 개발 모드에서는 서버가 Vite 를
+미들웨어로 물어서 **한 포트(3000)** 로 앱과 API 를 같이 서빙한다.
 
-→ tmpfiles는 처음부터 올바른 선택이었음. 502 자주 뜨면 BytePlus TOS로 이전이 정공법.
-
-### ❌ 워터마크 위조 / 실사 사람 필터 우회
-BytePlus가 Seedream T2I 결과물의 invisible watermark로 실사 사람 감지 통과시킴. 키 없이 위조 불가능(SHA-256급 암호 서명). 시도 금지 (가이드라인 외 + 법적 리스크).
-
-### ❌ 이미지 base64 inline 전환
-한 번 검토함. 9개 30MB 이미지 = 360MB base64 → 64MB BytePlus 한도 초과. + IndexedDB 비대화. tmpfiles 유지가 정답.
-
----
-
-## 3. 불변 규칙 (어기면 사용자 보고된 버그가 다시 살아남)
-
-### 데이터 무결성
-- **이미지/비디오/오디오 압축·리사이즈·재인코딩 금지**. 원본 바이트 그대로 전송
-- **썸네일은 별도 필드** (`thumbnailUrl`, base64). 원본 `url` 절대 덮어쓰지 말 것 (v26.5.406 교훈)
-
-### 과거 메시지 렌더링
-- **`msg.usedAssets` 스냅샷만** 사용. `project.assets` / `namedAssets` (live) 절대 X
-- `renderMessageContent(promptText, getAssetNames(msg.usedAssets || []))` 패턴
-- thumbAssets 빌드 시 **이미지 url만** thumbnail로 교체, 비디오 url은 보존
-- 사이드 비디오 썸네일은 `<img src={thumbnailUrl}>` (양상 `<video>` element 금지)
-
-### 멘션 시스템
-- pill에 `data-asset-id` (UUID) 박기
-- 에셋 교체는 **반드시 `replaceAsset(id, updates)`** — id 보존 → 멘션 안 끊김
-- 에셋 일괄 교체는 **`replaceAllAssets(projectId, assets)`** — atomic 단일 set() (race 차단)
-
-### 캐시 계층
-- **media-cache는 `app.getPath('userData')/media-cache`** — `MEDIA_CACHE_DIR` env로 server.ts에 주입
-- 절대로 `process.cwd()` / `process.resourcesPath` 기준 X (auto-update wipe됨)
-- 30일 자동 정리 (서버 시작 시)
-- **원본 경로(`originalPath`) fallback**: media-cache 미스 시 디스크에서 재읽기
-
-### 폴링
-- `setInterval(10s)` 만 (setTimeout 체인 금지)
-- `_pollingSet` 으로 중복 차단
-- 8초 AbortController timeout (응답 hang 방지)
-- HTTP 5xx 시 status 안 바꿈 (다음 cycle 재시도)
-- `finally` 블록에서 항상 set 비움
-
-### 버전 / 배포
-- 버전 형식: **26.M.XXYY** (M=월, XX=일, YY=패치)
-- **하이픈 금지** (semver 프리릴리스로 인식 → auto-update 깨짐)
-- **leading zero 금지** — 일자 1~9는 한자리로 (예: 5월 4일 = `26.5.4XX`, 5월 13일 = `26.5.13XX`)
-- ⚠ **1201~1208은 실제 2026-06-15 작업분인데 세션 중 6/12로 착각해 `12xx`로 스탬프됨**(기능·update 정상, 라벨만 잘못 — 재배포 안 함). **1209는 `26.6.1501`로 날짜정정 재배포**(코드 100% 동일). 이후 6/15 패치는 `26.6.15XX` 계속.
-- 모든 fix → bump + commit + push + electron-builder publish (한 번에)
-- 빌드 후 **키 노출 grep 검증** 필수
-- 버전 갱신 2곳: `package.json` + `src/App.tsx`
-
-### API 키 보안
-- `SEEDANCE_API_KEY` 환경변수 only, 코드 하드코딩 절대 X
-- 팀명은 **SHA-256 해시 매핑** (server.ts `TEAM_KEY_HASHES`) — 원본 키 EXE에 안 들어감
-- `GH_TOKEN` inline export (배포 시점에만)
+| 파일 | 역할 |
+|---|---|
+| `server.ts` | Express. BytePlus/R2 중계, 옴니 프록시, media-cache, 백업 라우트, 트래커 POST |
+| `src/store.ts` | Zustand + IndexedDB. `MODELS`/`modelProvider`, 그룹 트리, 이름 규칙, persist·백업 |
+| `src/components/ChatArea.tsx` | 메인 UI(대형). 전송 두 갈래, 프롬프트 에디터, 갤러리, 다운로드 |
+| `src/components/Sidebar.tsx` | 프로젝트/그룹 목록, 드래그, 아이콘 피커, 전체 갤러리 진입 |
+| `src/components/GlobalGallery.tsx` | 전 프로젝트 클립 그리드 + 파셋 필터 |
+| `src/components/SettingsPanel.tsx` | 모델·모드·해상도·듀레이션·에셋 |
+| `electron/main.cjs` | 윈도우 전용. 서버 기동, 다운로드, 트레이, 자동 업데이트, 백업 IPC |
+| `scripts/build.cjs` | Vite 빌드 + esbuild 로 `server.ts` → `dist-server/server.cjs` |
 
 ---
 
-## 4. 운영 절차
+## 2. 배포와 업데이트 ★ 여기가 제일 잘 깨진다
 
-### 배포 명령어 (한 번에)
+### 2-1. 절대 바꾸면 안 되는 네 가지
+
+| 값 | 어디 | 바꾸면 |
+|---|---|---|
+| `appId: com.freewill.seedance` | electron-builder.yml | NSIS 업그레이드 GUID 가 바뀐다 → **제자리 업그레이드 불가**, 프로그램 목록에 두 개 |
+| `executableName: Freewill Seedance 2.0` | electron-builder.yml | exe 이름이 바뀌면 **작업표시줄 고정이 전부 깨진다**(NSIS 가 추적 못 함, 실측 확인) |
+| `name: freewill-seedance` | package.json | `app.getName()` 이 이것이다 → userData 경로가 바뀌어 **프로젝트 전부 사라짐** |
+| `artifactName` | electron-builder.yml | GitHub 자산 이름. 공백·비ASCII 가 들어가면 업데이터 다운로드가 깨진다 |
+
+`productName`(표시 이름)은 바꿔도 된다. **위 넷과 독립**이라 그러라고 분리해 둔 것이다.
+
+### 2-2. 버전 체계 — 앞자리 0 금지
+
+```
+26.M.DDPP     예) 26.8.305 = 2026-08-03 패치05
+```
+
+- **leading zero 절대 금지.** `26.8.0301` 은 invalid semver → electron-updater 가 런타임에
+  파싱하다 **패키지 exe 가 부팅 즉시 크래시**한다. dev 에서는 안 잡힌다(업데이터는 패키지
+  앱에서만 동작). 실제로 한 번 죽였다.
+- 하이픈 금지(프리릴리스로 인식 → 업데이트 감지 실패).
+- 다음 버전은 항상 이전보다 커야 한다. 달이 넘어가면 `26.7.3126` → `26.8.201` 처럼 간다.
+- **버전은 두 곳**: `package.json` 과 `src/App.tsx` 하단 표시 텍스트.
+
+### 2-3. 배포 절차
+
 ```bash
-cd "C:/Users/user/Desktop/기획 파일/TA/앱개발/시댄스 api/26.04.15"
-# 1) package.json + src/App.tsx 버전 동시 변경
-# 2) git add 변경파일 → commit → push
-# 3) 빌드 + 키 검증 + publish
-export GH_TOKEN="<사용자가 보관하는 토큰 — 평문 기록 금지>"
-SEEDANCE_API_KEY=test node scripts/build.cjs   # ← 여기서 electron-builder 패치 자동 재적용됨(아래 참조)
-grep -c "ccc0f342\|ef3aaa5c\|3b9715e5\|1654a923\|429c43a3\|32a18b43\|f1148313\|83f240c3\|e18a3821\|6b26237c\|2de035f8\|9e081469\|9a7cd59c\|a88517f4" dist-server/server.cjs  # 0이어야 함
+# 1) 버전 2곳 수정  2) 커밋  3) push
+git push
+# 4) 빌드 → 패키징 → GitHub Release 업로드
+export GH_TOKEN="<사용자에게 받기 — 문서에 적지 말 것>"
+SEEDANCE_API_KEY=test node scripts/build.cjs
 npx electron-builder --win --publish always
 ```
 
-### ⚠ 빌드 함정 — electron-builder `spawn EPERM` (2026-06-12 발생)
-- **증상**: `npx electron-builder` 가 `⨯ spawn EPERM  failedTask=build` 로 죽음. 단계는 매번 다름(collector/packaging).
-- **원인**: 이 PC가 2026-06-12 세션 중 **사용자 폴더(%TEMP% 등)의 스크립트(.bat/.cmd) 실행을 차단**하도록 정책(SRP/AppLocker류)이 갱신됨 + Node가 v25로 올라감. electron-builder 26의 npm 의존성 수집기가 임시 `.bat`을 만들어 `cmd.exe`로 돌리는데 그게 EPERM. (`npm` 자체·`app-builder.exe`는 정상 — Program Files라 허용)
-- **해결(자동)**: `scripts/build.cjs`의 `ensureBuilderPatch()`가 매 빌드마다 `node_modules/app-builder-lib/out/node-module-collector/nodeModulesCollector.js`를 패치 — npm 수집을 임시 .bat 대신 `node npm-cli.js`로 직접 실행(node.exe는 허용, .js는 데이터로 읽힘). **idempotent·정책 없는 PC에서도 무해.** `npm install`이 원본을 덮어써도 다음 `node scripts/build.cjs`가 재적용.
-- **주의**: `npm install` 직후 build.cjs 안 거치고 `npx electron-builder` 만 단독 실행하면 다시 EPERM. 항상 `node scripts/build.cjs` → `electron-builder` 순서 유지. 근본 해결은 IT가 스크립트 정책 풀거나 electron-builder 업스트림 수정 시.
+**`npx electron-builder` 를 파이프/체이닝에 물리지 마라.** 실행이 통째로 누락된다(에러도 안
+남는다). 단독 실행하고 릴리스 존재를 API 로 검증할 것.
 
-### 키 매핑 (server.ts에 SHA-256으로 박힘)
-| 팀명 | API 키 첫 8자 |
-|------|--------------|
-| 1팀 | ccc0f342 |
-| 2팀 | ef3aaa5c |
-| 3팀 | 3b9715e5 |
-| 4팀 | 1654a923 |
-| 5팀 | 429c43a3 |
-| 6팀 | 32a18b43 |
-| 7팀 | f1148313 |
-| 8팀 | 83f240c3 |
-| 9팀 | e18a3821 |
-| 10팀 | 6b26237c |
-| AFX팀 | 2de035f8 |
-| TA팀 (구 2D팀) | 9e081469 |
-| Special팀 | 9a7cd59c |
-| AIP팀 | a88517f4 |
+### 2-4. 배포 후 검증 (이 5개는 매번)
 
-원본 매핑: `C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\api key\key.xlsx`
+```
+1. 릴리스가 draft:false 이고 자산 3개(exe / .blockmap / latest.yml) 전부 uploaded
+2. latest.yml 의 version 이 올린 버전
+3. 자산 URL 이 HTTP 200 (실제 다운로드 가능)
+4. latest.yml 의 sha512 == 로컬 exe 의 sha512
+5. semver 비교: 직전 배포본보다 큰가
+```
 
-### 외부 의존
-- 트래커 GAS: `https://script.google.com/macros/s/AKfycbyC53V4K-CHJnP86qIbBP0WmXZ4cDD9D3CFVmd8otL4ZThzpQ7RKhnCeIXgDu4y7CFrnQ/exec`
-- 대시보드 = 위와 동일 URL (GET하면 HTML)
-- tmpfiles.org (이미지/비디오/오디오 모두 여기)
-- BytePlus `ark.ap-southeast.bytepluses.com/api/v3`
+### 2-5. 남의 PC 에서 업그레이드될 때 — 확인된 것
+
+26.7.3002 → 26.8.304 를 실제 무인 설치(`/S`)로 검증:
+레지스트리 항목 **1개**(중복 설치 아님) · 구 exe 제거 · 바로가기 재타겟 · userData 무변화 ·
+프로젝트 18 / 메시지 503 / 엘리먼트 41개 그대로.
+
+구버전 상태(그룹 기능 이전, `projectGroups` 키 자체가 없음)로도 시뮬:
+프로젝트·메시지 보존, `projectGroups` 가 `[]` 로 채워짐, 그 위에서 그룹 생성·갤러리·아이콘 정상.
+
+### 2-6. ★ 맥은 이 경로를 전혀 안 탄다
+
+맥에는 패키지 앱이 없다. **자동 업데이트도 없다.** `git pull && npm install` 이 업데이트다.
+dmg 제작·서명·공증은 macOS 에서만 가능해서 윈도우 PC 에서는 만들 수 없다.
 
 ---
 
-## 5. 사용자 톤 / 소통 가이드 (중요)
+## 3. 플랫폼 차이 — 윈도우만 보고 판단하지 마라
 
-### 짧은 동의 = 진행 OK
-- "ㅇㅇ", "오케이", "ㄱㄱ", "배포해", "맞음" → 바로 작업
-- 매번 "정말 진행할까요?" 묻지 말 것
+| | 윈도우 (EXE) | 맥 (소스 웹앱) |
+|---|---|---|
+| 실행 | 설치된 exe | `./start.command` → `npm run dev` |
+| 키 | 시스템 환경변수 (팀 `.bat`) | 프로젝트 폴더 `.env` (dotenv) |
+| 업데이트 | 자동 | `git pull && npm install` |
+| 다운로드 위치 | 지정 폴더 | 브라우저 기본 다운로드 폴더 |
+| 트레이 / 폴더선택 / 캐시정리 | 있음 | 없음(버튼은 안내만) |
+| 백업 | Electron IPC | **로컬 서버 HTTP** (26.8.305~) |
 
-### 명시적 분석 요청
-- "체크해바", "테스트해바", "조사해", "분석해", "배포하지 말고" → **분석만 하고 작업 X**
-- "지금 바꾸지 말고" → 코드 수정 보류
+### 두 달간 안 드러난 사고
 
-### 우선순위
-- **새 기능보다 기존 버그 수정이 우선**
-- **사용자가 직접 보는 결과물** (영상, 다운로드, 프리뷰) 깨지는 거 1순위
-- 코드 품질 / 리팩터는 그 다음
+`package.json` 의 **`scripts` 5개와 `devDependencies` 11개가 통째로 삭제**된 채 커밋돼 있었다
+(v26.7.3102, PowerShell 이 파일을 깨뜨린 부수피해). 맥은 `npm run dev` 가 유일한 실행 경로라
+`Missing script: dev` 로 아무것도 못 했고, scripts 만 고쳐도 `devDependencies` 안의 **`tsx`**
+가 안 깔려서 여전히 실패했다.
 
-### 의심 키워드 매핑
-- "영상", "다운로드", "프리뷰" → blobCache 시스템 의심
-- "멘션", "@", "Image 1" → 멘션 pill 시스템
-- "재사용", "프롬프트 로드", "불러오기" → handleReuse + 스냅샷
-- "캐시", "정리", "삭제" → CACHE_DIR / blobCache 구분
-- "백지", "안 뜸" → 서버 시작 실패 (env var 미설정 가능성)
-- "504", "502" → 외부 서비스 (GitHub / tmpfiles) 일시 장애
+**이 PC 에서 안 보였던 이유**: `node_modules` 에 예전 설치분이 남아 있어 선언이 사라져도
+계속 동작했다.
 
-### 보고 / 답변 스타일
-- **결론 먼저, 근거 나중**
-- 표 / 카테고리 / 우선순위로 구조화
-- **정직하게 한계 인정** (모르면 모른다, 추측이면 추측이라 명시)
-- 사용자가 권장하지 않은 작업은 임의로 안 함
-- 같은 경고 반복 금지 (예: 키 노출 경고는 같은 세션에서 한 번만)
+> **규칙: 빌드/실행 관련을 건드렸으면 깨끗한 clone 에서 한 번 돌려볼 것.**
+> 로컬 `node_modules` 는 선언이 맞는지 증명해주지 않는다.
 
----
+### `window.electronAPI` 를 `if` 로 감싸고 끝내지 마라
 
-## 6. 알려진 한계 / 미해결
+```js
+if (!api?.backupSave) return;   // 브라우저에서는 이 기능이 통째로 사라진다
+```
 
-### 한계
-1. **v26.5.1301 이전 첨부분은 originalPath 없음** → 캐시 wipe 시 복구 불가, 재첨부 필요
-2. **tmpfiles 502 가끔 발생** — fire-and-forget 재시도로 견딤. 빈도 심해지면 BytePlus TOS 이전 고려
-3. **GitHub release 공개 다운로드 프록시 가끔 504** — install.bat은 API 경로로 우회하게 강화됨 (2026-05-15)
-4. **6팀 사용자 백지 보고** (2026-05-04) — 진단 미완료. DevTools 콘솔 로그 받으면 추적 가능
-
-### 의도적으로 안 한 것
-- 이미지 base64 inline (IndexedDB 비대화 우려)
-- BytePlus Files API (생성 엔드포인트 호환 안 함)
-- 1080p UI 활성화 (계정 미지원)
-- 워터마크 위조 (불가능 + 가이드라인 외)
+백업 미러가 정확히 이래서 **맥에서 한 번도 돌지 않았다**. 지금은 `getBackupApi()` 가
+IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은 방식으로 갈라라.
 
 ---
 
-## 7. 사용자가 보유한 토큰 / 키 (현재 유효)
+## 4. 데이터와 백업
 
-- **GH_TOKEN**: 사용자 로컬 환경 또는 비밀 저장소에 보관 (이 문서에는 평문 기록 금지 — 2026-05-18 GitHub secret scanning 차단 사건 이후 정책)
-  - 가장 최근 발급분 2026-05-13 (만료 없음). 사용자에게 직접 요청해서 받기
-  - 권한 과다 (admin:* 등). 보안 강화 원하면 `public_repo` 만으로 재발급 권장
-- **SEEDANCE_API_KEY**: 사용자 PC에 setx로 팀별 다르게 설정 (.bat 파일 13개)
+### 4-1. 어디에 뭐가 있나
+
+| 대상 | 위치 |
+|---|---|
+| 작업 기록(프로젝트·메시지·그룹) | IndexedDB `seedance-app-storage` |
+| 엘리먼트 라이브러리 | IndexedDB `seedance-elements-manifest` + `…-chunk-N` |
+| 재난복구 백업 | `~/Documents/Freewill Seedance Backup/` (양 플랫폼 **같은 폴더·같은 파일명**) |
+| 레퍼런스 원본 | userData/`media-cache/` |
+
+백업 미러는 **5분 디바운스**, IndexedDB 는 **1.5초 디바운스**. IDB 가 비어 있으면 다음 실행
+때 백업 파일에서 **자동 복원**된다(빈 프로필에서 실측: 18 프로젝트 / 503 메시지 /
+엘리먼트 청크 19개 전부 복귀).
+
+### 4-2. 절대 제거하면 안 되는 안전장치
+
+1. **`_elementsHydrated` 게이트** — 라이브러리 로드 전에 백업을 쓰면 라이브러리 없는 백업으로
+   좋은 백업을 덮어쓴다. 안전망이 안전망을 죽인다.
+2. **엘리먼트는 전용 IDB 키 + 청크** — 메인 blob 에 두면 저장할 때마다 수백 MB 를 재직렬화한다
+   (분리 전 403,000,000자 → 18,001,701자).
+3. **큰 `JSON.stringify` 는 전부 try/catch** — V8 은 단일 문자열 512MB 에서 `RangeError` 를
+   **동기로** 던진다. `setTimeout` 안에서 던지면 `.catch()` 로 잡을 수 없고, 저장만 조용히
+   멈춘 채 앱은 멀쩡해 보인다. 백업이 이래서 일주일간 죽어 있었다.
+4. **매니페스트를 마지막에 쓴다** — 그 전까지 절반 쓰인 상태는 "없는 것" 으로 취급된다.
+
+### 4-3. 규모 한계 (실측)
+
+저장 1회 = 메인스레드에서 전체 상태 `JSON.stringify` 1회.
+
+| 메시지 | 상태 크기 | stringify |
+|---:|---:|---:|
+| 503 (현재) | 19MB | 40ms |
+| 5,030 | 194MB | 373ms — 눈에 띄게 멈춤 |
+| **13,581** | — | **RangeError = 저장 실패** |
+
+메시지당 **39.5KB**, 그중 **프롬프트가 76%**(썸네일 아님). 현재 속도로 512MB 까지 약 7.7년.
+그 시점의 해법은 상태 청크화 또는 메시지 별도 스토어. 지금은 실패 시 토스트로 알린다.
+
+### 4-4. media-cache 는 30일 TTL 이다 (한 번 사고)
+
+서버 시작 시 mtime 30일 초과 파일을 지운다. **메시지를 보는 것으로는 media-cache 를 읽지
+않아서**(카드는 메시지에 박힌 80px 썸네일을 쓴다) "마지막 사용" 이 엉뚱한 걸 재고 있었다.
+
+실측(수정 전): 파일 199개 중 **162개가 무참조**, 기록이 참조하는 105개 중 **68개는 이미 삭제**.
+쓰레기는 붙들고 기록을 버렸다.
+→ `POST /api/cache/keep` 으로 실행마다 참조 id 전체의 시계를 리셋한다. **이미 지워진 건 못 살린다.**
 
 ---
 
-## 8. 다음 에이전트의 첫 행동
+## 5. 기능 지도
 
-사용자가 "시댄스" / "Seedance" / "BytePlus" / "영상 생성" 키워드로 말걸면:
-
-1. **SKILL 자동 로드 확인** (description 매칭으로 자동)
-2. **이 HANDOFF.md 한 번 읽기** (`Read C:\Users\user\Desktop\기획 파일\TA\앱개발\시댄스 api\26.04.15\HANDOFF.md`)
-3. 사용자 요청 분석 → 수정 / 분석 모드 판단
-4. 수정이면 위 4번 (운영 절차) 배포 매뉴얼 따름
-5. 분석이면 결과만 보고
-
-### 작업 시 항상 체크
-- TodoWrite로 진행 추적 (3단계 이상이면)
-- 빌드 검증 (`SEEDANCE_API_KEY=test node scripts/build.cjs`)
-- 키 노출 grep
-- 버전 번호 한자리 일 확인 (leading zero 금지)
-- 커밋 메시지에 "왜" 명시
+- **프로젝트 그룹 / 하위그룹** — 딱 1단계. `groupTree()` 가 **읽을 때** 판정한다:
+  "부모가 존재하고 그 부모가 스스로 최상위일 때만 하위그룹". dangling·3단·순환이 전부
+  최상위로 떨어진다. **존재하는 건 반드시 도달 가능해야 한다.**
+- **이름 중복** — 윈도우 폴더 원리. **컨테이너(한 화면에 같이 그려지는 목록) 하나에 이름 하나**,
+  폴더와 프로젝트가 한 이름공간. 다른 폴더면 같은 이름 OK, **옮겨서 만나는 순간** `(1)`.
+- **드래그** — HTML5 DnD 가 아니라 **포인터 이벤트**. 네이티브 DnD 는 OS 드래그 루프가 휠을
+  가져가서 페이지에 `wheel` 이 **0건** 온다(실측: dragover 333 / wheel 0 → 교체 후 49).
+  커서에 붙는 미리보기, 가장자리 자동 스크롤, 폴더에 떨구면 폴더가 빛남, 무의미한 드롭은 표시 안 함.
+- **전체 갤러리** — 그룹/프로젝트/모델/해상도/비율/길이/기간/채택 필터. 개수는 **파셋**
+  (자기 자신을 뺀 나머지 필터 적용). **그룹·프로젝트는 `일치 / 전체`** 두 숫자 — 장소의 크기는
+  속성 필터로 변하지 않는다.
+- **프로젝트 아이콘** — 이모지 9카테고리 + PNG 업로드(5MB / 48px 이상 / 64px 정사각 저장).
+- 사이드바 완료 배지 · 클립 생성일시 · 다운로드 폴더 열기 · 프롬프트 바로가기 · 컷 채택(★).
 
 ---
 
-**마지막 업데이트**: 2026-05-15, 이전 에이전트의 마지막 작업.
-**다음 갱신 시점**: 새 버전 배포 / 새 규칙 발견 / 폐기 결정 시.
+## 6. 불변 규칙 (어기면 사용자 보고 버그가 되살아난다)
+
+**API / 생성**
+1. `return_last_frame` 과 `generate_audio` **동시 사용 금지**.
+2. duration 은 정수 4~15 또는 -1. **프롬프트 본문에 소수 duration 명령**(`set … to 4.5 seconds`)을
+   쓰면 BytePlus 가 internal error 로 죽는다(25회 이분탐색으로 확정).
+3. 이미지 압축·리사이즈 금지. 원본 그대로.
+4. polling 은 `setInterval` 하나. `setTimeout` 체인 금지(끊기면 복구 불가).
+5. `cancelTask` 는 `res.ok` 일 때만 취소 처리. BytePlus 는 queued 만 삭제 허용 —
+   409 를 무시하면 폴링이 끊겨 **과금은 되고 시트엔 없고 영상도 버려진다**.
+6. 옴니 코드에서 시댄스 `settings.mode` 를 조건으로 쓰지 마라. `settings.omniTask` 만 본다.
+
+**UI / 렌더**
+
+7. `alert()`/`confirm()` 금지 — 윈도우 비활성화로 프롬프트 caret·한글 IME 가 깨진다.
+8. **dragstart 시점에 리스트 높이를 바꾸지 마라.** 스냅샷을 동기로 찍기 때문에 그 아래 전부가
+   어긋난다(실측 65px = 1.7행 → "드롭이 안 먹는다").
+9. **팝업 위치를 상수로 추정하지 마라.** 실측 보정(`useClampToViewport`)을 쓸 것. 측정은
+   `offsetWidth/Height` 로 — `getBoundingClientRect()` 는 등장 애니메이션의 **변형된** 박스를 준다.
+10. 전역 `scroll-behavior: smooth` 때문에 **`el.scrollTop = x` 는 애니메이션을 시작하고 옛 값을
+    돌려준다.** 프레임 단위 스크롤은 `scrollTo({behavior:'instant'})`, 끝 판정은 경계값으로.
+11. persist 를 `createJSONStorage` 로 되돌리지 마라 — 매 `set()` 마다 동기 stringify 로 프레임이 멈춘다.
+12. 슬라이더 같은 연속 입력을 스토어에 직결하지 마라. 로컬 draft + 릴리스 시 1회 커밋.
+
+**작업 방식**
+
+13. **소스 편집에 PowerShell 금지.** `Get-Content -Raw` 가 CP949 로 읽어 한글을 깨뜨리고
+    `Set-Content -Encoding utf8` 이 BOM 을 붙여 빌드를 죽인다. 이 세션에서만 3번 당했다.
+14. **입력 버그는 합성 이벤트로 재현되지 않는다.** `dispatchEvent` 는 "핸들러가 호출되면
+    동작한다" 만 증명한다. CDP `Input.dispatchMouseEvent` 나 실제 마우스를 쓸 것.
+15. **파괴적 스크립트는 격리 프로파일(`--user-data-dir`)에만.** 실제 프로필을 건드리기 전에
+    백업을 딴 폴더로 복사할 것 — 백업 미러는 5분 디바운스라 "아직 안 덮였겠지" 가 안 통한다.
+    (2026-08-03 실제 사고. 안전 사본 하나로 겨우 복구.)
+
+---
+
+## 7. 폐기된 시도 (다시 하지 말 것)
+
+- `Readable.fromWeb(body).pipe(res)` 다운로드 프록시 → **71KB/s 병목**.
+- `arrayBuffer()` 전체 버퍼링 → 속도는 나오지만 첫 바이트가 늦어 **진행 게이지가 안 뜨고 큰
+  영상이 실패**한다. 현재는 web-stream 리더 수동 펌핑.
+- CDN 호스트 `ark-content-generation-…` pre-warm → 호스트가 틀렸다. 실제는 `ark-acg-…`.
+- 드래그 `dragleave` 로 표시 지우기 → Chromium 에서 `relatedTarget` 이 대부분 null 이라
+  자식 넘을 때마다 지워진다. 스냅샷 + 컨테이너 단일 핸들러가 정답.
+- 갤러리 오버레이 exit 애니메이션 제거 → **오진이었다.** 검증에 쓴 Browser pane 이
+  `document.hidden` 이라 rAF 가 0프레임이었을 뿐. 애니메이션 검증은 **보이는 창 + CDP** 로.
+
+---
+
+## 8. 알려진 한계 / 미해결
+
+| | |
+|---|---|
+| **맥 패키지 앱(dmg)** | 없음. 만들려면 macOS 필요(서명·공증 포함). 지금은 소스 실행이 유일 |
+| **맥 전체화면** | `<video controls>` 의 브라우저 기본 버튼이라 앱 코드가 없다. 안 된다는 보고가 있으나 **브라우저 미특정**. Safari 라면 blob URL 비디오 재생 의심 — `VideoPlayer` 는 fetch 실패만 폴백하고 **재생 실패 폴백이 없다** |
+| 상태 512MB 한계 | 7.7년 뒤. 그때는 청크화 필요 |
+| 지워진 media-cache 68개 | 복구 불가. 원본 경로가 살아 있는 17개만 복사 시 자동 재캐싱 |
+| 타입 에러 160개 | 기준선. 대부분 `ChatArea.tsx` 의 `React` 네임스페이스 / `File` 타입. 기능 무관하지만 **새 작업 후 160을 넘기지 말 것** |
+| `os.homedir()` vs `app.getPath('documents')` | Documents 가 OneDrive 로 리디렉션된 PC 에서 갈릴 수 있다. 현재 윈도우는 HTTP 백업 라우트를 안 부르므로 무영향 |
+
+---
+
+## 9. 작업 절차
+
+### 검증 도구
+
+- **격리 실행**: `앱.exe --user-data-dir=<임시> --remote-debugging-port=9222 --disable-backgrounding-occluded-windows`
+- **CDP 평가**: WebSocket 으로 `Runtime.evaluate` (실제 보이는 창에서 측정)
+- **실제 입력**: `Input.dispatchMouseEvent` (clickCount 지정 — 더블클릭·드래그 임계값이 진짜와 같다)
+- **불변식 시뮬레이션**: 시나리오를 순서대로 실행하며 매 단계 뒤 persist 디바운스를 기다렸다
+  IDB 를 다시 읽고 검사 — 3단 중첩 없음 / 그룹 렌더 위치 유일 / `currentProjectId` 유효 /
+  컨테이너별 이름 유일 / 프로젝트 유실 없음 / **현재 프로젝트가 실제로 보임**
+
+### 체크리스트
+
+```
+[ ] 타입 에러 160 유지 (npx tsc --noEmit)
+[ ] node scripts/build.cjs 통과
+[ ] 번들에 키 없음 (grep 으로 확인)
+[ ] 버전 2곳(package.json / src/App.tsx) 일치, leading zero 없음
+[ ] 실제 데이터로 설치 후 기동 — 프로젝트 수 / 메시지 수 확인
+[ ] 배포했으면 §2-4 다섯 가지
+[ ] 빌드·실행 관련을 건드렸으면 깨끗한 clone 에서 npm install && npm run dev
+```
+
+### 사용자와 일하는 법
+
+- 한국어로. 짧고 사실 위주로. **측정한 것과 추측한 것을 반드시 구분**해서 말한다.
+- 틀렸으면 곧바로 인정하고 무엇을 잘못 쟀는지 말한다. 이 사용자는 그걸 신뢰의 근거로 본다.
+- "체크해봐" / "배포하지 마" 라고 하면 분석만. "ㅇㅇ" / "ㄱㄱ" 는 진행 동의.
+- 새 기능보다 **기존 버그 수정이 우선**.
+
+---
+
+## 10. 더 깊은 기록
+
+이 저장소에 없는 상세 기록이 개발 PC 로컬에 있다(`.claude/` 는 gitignore — 키가 들어갈 수
+있어서다). 사고 경위·이분탐색 로그·실측 표 원본이 필요하면 그쪽을 봐야 한다.
+
+- `.claude/HANDOFF.md` — 시간순 상세본 (§1~§19)
+- `.claude/skills/freewill-seedance/SKILL.md` — 에이전트 자동로드 요약본
