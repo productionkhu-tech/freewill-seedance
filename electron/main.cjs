@@ -282,6 +282,44 @@ function writeAtomic(target, content) {
   fs.renameSync(tmp, target);   // atomic: a power cut can't leave a half-written backup
 }
 
+// ★ Shrink guard. This file has TWO writers — the packaged app over IPC (here) and a
+// browser at localhost:3000 over HTTP (server.ts) — and they share one path. A browser
+// profile carries its OWN IndexedDB, so an empty one is a perfectly valid writer that
+// replaces the whole work history with a fresh-install state. Measured 2026-08-03:
+// 19.54MB of 18 projects / 503 messages became a 440-byte single test project. The
+// restore-on-empty path does not save you, because it only runs when IDB is empty —
+// a profile holding a tiny stale state skips it and then overwrites.
+// Archive rather than refuse: legitimate shrinkage exists (deleting old projects is
+// exactly what the size-limit toast tells users to do), so refusing would block the
+// one recovery action we recommend. Keep the old copy, take the new one.
+// Deliberately state-only. The library has its own gate (_elementsHydrated) and a
+// manifest-last protocol, and its chunks shrink legitimately all the time.
+const SHRINK_FLOOR = 1 * 1024 * 1024;   // under 1MB there is nothing worth preserving
+const SHRINK_RATIO = 0.5;               // losing half in one write is not a normal edit
+const AUTOPREV_KEEP = 3;                // rolling; each copy is ~19MB
+function guardShrink(target, content) {
+  try {
+    if (!fs.existsSync(target)) return;
+    const oldSize = fs.statSync(target).size;
+    if (oldSize < SHRINK_FLOOR) return;
+    if (content.length >= oldSize * SHRINK_RATIO) return;
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    // Distinct prefix so the prune below can only ever delete copies this guard made,
+    // never a backup a human parked in the folder by hand.
+    fs.copyFileSync(target, target.replace(/\.json$/, `.AUTOPREV-${stamp}.json`));
+    console.warn(`[Backup] shrink guard: ${(oldSize / 1048576).toFixed(2)}MB → ${(content.length / 1048576).toFixed(2)}MB — previous copy kept`);
+    const base = path.basename(target).replace(/\.json$/, '');
+    const olds = fs.readdirSync(BACKUP_DIR)
+      .filter((f) => f.startsWith(`${base}.AUTOPREV-`) && f.endsWith('.json'))
+      .sort();
+    for (const f of olds.slice(0, Math.max(0, olds.length - AUTOPREV_KEEP))) {
+      try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch {}
+    }
+  } catch {}
+}
+
 ipcMain.handle('backup-save', async (_e, content, kind) => {
   try {
     if (typeof content !== 'string' || content.length === 0) return { ok: false, error: 'empty content' };
@@ -291,6 +329,8 @@ ipcMain.handle('backup-save', async (_e, content, kind) => {
       // and may be the only copy of the library — move it aside instead of over it.
       try { fs.renameSync(BACKUP_PATH, LEGACY_COMBINED_PATH); } catch {}
     }
+    // After the legacy rename: if that fired, BACKUP_PATH is gone and this is a no-op.
+    if (kind !== 'elements') guardShrink(target, content);
     writeAtomic(target, content);
     return { ok: true, path: target, bytes: content.length };
   } catch (err) {

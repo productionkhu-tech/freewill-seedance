@@ -464,6 +464,40 @@ async function startServer() {
     fs.renameSync(tmp, target);   // atomic: a power cut can't leave a half-written backup
   }
 
+  // ★ Shrink guard — the browser half of it. Mirrored in electron/main.cjs, which writes
+  // the SAME file over IPC and never goes through this server; a guard in one place only
+  // protects one of the two writers. Keep the two copies in step.
+  // Why it exists: this route is what gave a browser the ability to write this file at all
+  // (26.8.305). A browser profile has its own IndexedDB, so an empty one legitimately
+  // reaches here and replaces the entire work history with a fresh-install state.
+  // Measured 2026-08-03: 19.54MB / 18 projects / 503 messages → 440 bytes.
+  // Archive rather than refuse — deleting old projects is legitimate shrinkage and is
+  // exactly what the state-too-large toast asks the user to do.
+  const SHRINK_FLOOR = 1 * 1024 * 1024;
+  const SHRINK_RATIO = 0.5;
+  const AUTOPREV_KEEP = 3;
+  function guardShrink(target: string, content: string) {
+    try {
+      if (!fs.existsSync(target)) return;
+      const oldSize = fs.statSync(target).size;
+      if (oldSize < SHRINK_FLOOR) return;
+      if (content.length >= oldSize * SHRINK_RATIO) return;
+      const d = new Date();
+      const p2 = (n: number) => String(n).padStart(2, '0');
+      const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+      // Distinct prefix so the prune can only delete copies this guard made.
+      fs.copyFileSync(target, target.replace(/\.json$/, `.AUTOPREV-${stamp}.json`));
+      console.warn(`[Backup] shrink guard: ${(oldSize / 1048576).toFixed(2)}MB → ${(content.length / 1048576).toFixed(2)}MB — previous copy kept`);
+      const base = path.basename(target).replace(/\.json$/, '');
+      const olds = fs.readdirSync(BACKUP_DIR)
+        .filter((f) => f.startsWith(`${base}.AUTOPREV-`) && f.endsWith('.json'))
+        .sort();
+      for (const f of olds.slice(0, Math.max(0, olds.length - AUTOPREV_KEEP))) {
+        try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch {}
+      }
+    } catch { /* a guard must never be the thing that breaks the save */ }
+  }
+
   // Raw, not express.json(): this is a 20MB+ JSON string and re-parsing it here only to
   // stringify it back out would double the memory for nothing.
   app.post('/api/backup/state', express.raw({ type: '*/*', limit: '400mb' }), (req, res) => {
@@ -475,6 +509,8 @@ async function startServer() {
         // may be the only copy of the library — move it aside rather than over it.
         try { fs.renameSync(BACKUP_PATH, LEGACY_COMBINED_PATH); } catch {}
       }
+      // After the legacy rename: if that fired, BACKUP_PATH is gone and this is a no-op.
+      guardShrink(BACKUP_PATH, content);
       writeAtomic(BACKUP_PATH, content);
       res.json({ ok: true, path: BACKUP_PATH, bytes: content.length });
     } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
