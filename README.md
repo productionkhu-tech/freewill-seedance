@@ -1,20 +1,42 @@
 <div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+
+# Freewill Seedance 2.0
+
+BytePlus Seedance + Gemini Omni Flash 기반 영상 생성 데스크탑 앱
+
 </div>
 
-# Run and deploy your AI Studio app
+---
 
-This contains everything you need to run your app locally.
+## 문서는 하나다 — **[HANDOFF.md](./HANDOFF.md)**
 
-View your app in AI Studio: https://ai.studio/apps/6d574f0a-751e-4140-b09f-85cc86b88e7c
+구조 · 배포 · 업데이트 · API 규칙 · 데이터/백업 · 불변 규칙 · 알려진 한계까지
+**인수인계에 필요한 전부**가 그 파일 하나에 있다. 여기부터 읽으면 된다.
 
-## Run Locally
+| 궁금한 것 | 어디 |
+|---|---|
+| 뭘 건드리면 업데이트가 깨지나 | HANDOFF §2 |
+| 맥에서 어떻게 돌리나 | HANDOFF §12 · [맥_실행_가이드.md](./맥_실행_가이드.md) |
+| 생성 요청 규칙 (모드·에셋 한도·4K·2.5) | HANDOFF §5 |
+| 프로젝트가 어디 저장되나 | HANDOFF §4 |
+| 외부 서비스·시트·GAS 연결 | HANDOFF §11 |
 
-**Prerequisites:**  Node.js
+---
 
+## 실행
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+**윈도우** — 설치본(exe)을 쓴다. 자동 업데이트된다.
+
+**맥 / 개발** — 소스에서 실행한다:
+
+```bash
+npm install
+# .env 작성 (HANDOFF §12 — 필수 5줄)
+npm run dev        # → http://localhost:3000
+```
+
+빌드·배포는 HANDOFF §2-3.
+
+---
+
+<sub>Public 저장소다. 키·토큰·데모 엔드포인트 ID 를 코드나 문서에 넣지 말 것.</sub>

@@ -201,7 +201,136 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 ---
 
-## 5. 기능 지도
+## 5. API 규칙 — 생성 요청을 만들 때
+
+### 5-1. BytePlus (시댄스)
+
+- 호스트 `https://ark.ap-southeast.bytepluses.com/api/v3`
+  (`ap-southeast` = `ap-southeast-1`. 같은 싱가포르 서버)
+- 생성 `POST /contents/generations/tasks` · 조회 `GET …/{id}` · 취소 `DELETE …/{id}`
+- **CDN(생성된 영상)은 `ark-acg-…`** — 예전에 `ark-content-generation-…` 으로 착각해
+  pre-warm 하다 효과 0 이었다.
+
+**모드별 payload**
+
+| 모드 | role 필드 | 필수 에셋 |
+|---|---|---|
+| `text_to_video` | 없음 | 없음 |
+| `image_to_video_first` | **없음** (PDF 스펙) | 시작 프레임 1 |
+| `image_to_video_first_last` | `first_frame` / `last_frame` | 시작+끝 |
+| `multimodal_reference` | `reference_image/video/audio` | 이미지 0-9 · 비디오 0-3 · 오디오 0-3 |
+| `edit_video` | `reference_image/video/audio` | 비디오 1 필수 |
+| `extend_video` | `reference_video` | 비디오 1-3 |
+
+**에셋 제한** (2026-06-12 공식 문서 대조 완료)
+
+| 타입 | 개당 | 길이 | 해상도/비율 |
+|---|---|---|---|
+| 이미지 | 30MB | — | 각 변 300~6000px, 비율 0.4~2.5 |
+| 비디오 | 50MB | 개당 2~15초, **합산 ≤15.2초** | 480/720/1080p, fps 24~60 |
+| 오디오 | 15MB | 개당 2~15초, **합산 ≤15초** | — |
+
+- 전부 R2 presigned URL 로 전달한다(base64 아님).
+- **오디오 단독 불가** — 이미지나 비디오가 최소 1개 있어야 한다.
+- HEIC/HEIF 는 API 는 받지만 앱이 거부한다(Chromium 이 디코드 못 해 썸네일·검증이 깨진다).
+
+**출력**: 해상도 480p/720p/1080p/**4k** · 비율 adaptive~9:16 · duration **4~15 또는 -1(Auto)** ·
+개수 1~3. **URL 은 24시간**, task 기록은 7일.
+
+> ### ★ 프롬프트 본문의 소수 duration 명령 = internal error
+> `Set the actual generation duration to 4.5 seconds.` 같은 **소수 duration 지시**가 본문에
+> 있으면 BytePlus 해석기가 터진다. task 는 접수되고(cgt-…) 생성 중 failed.
+> 25회 이분탐색으로 확정 — **그 한 문장만 빼면 15,000자 프롬프트도 통과**한다.
+> duration 은 앱 설정으로. 본문에 쓸 거면 **정수만**.
+
+### 5-2. 4K (2.0 플래그십 전용 + 프로젝트별 권한)
+
+리터럴은 소문자 **`4k`**. 결과물 3840×2160 HEVC 10-bit + AAC. **토큰 196,000/초**
+(5초 ≈ 98만 = 1080p 의 3.97배). duration·모드 제약 없음.
+
+**해상도 매트릭스는 실측이다. PDF 를 믿지 마라.**
+
+| 모델 | 480p | 720p | 1080p | 4k |
+|---|:-:|:-:|:-:|:-:|
+| 2.0 플래그십 | ✅ | ✅ | ✅ | **✅** |
+| 2.0 fast | ✅ | ✅ | ✅(앱은 차단) | ❌ |
+| 2.0 mini | ✅ | ✅ | ❌ | ✅(정책상 차단) |
+
+권한 흐름: 시트 `Project_Status` **F열** → GAS `allow4k` → 앱 60초 폴링 → 드롭다운 노출 + 전송 클램프.
+
+**4대 금기**
+1. 하이드레이션 클램프는 `modelResolutions`(구조적)로. `allowedResolutions`(정책)로 바꾸면
+   `billingProject` 가 세션 전용이라 **재시작마다 4k 설정이 날아간다**.
+2. `App.tsx` 목록 비교자에 **`allow4k` 포함** — 빼면 권한만 바뀐 변경이 "무변경" 으로 판정돼
+   기능이 영영 반영 안 된다.
+3. 권한 감시자는 `updateProjectSettings` 를 호출하지 않는다(작성 중 방해 금지). 하향은
+   **전송 시점에만**.
+4. HEVC 감지는 **Main10** 으로: `canPlayType('video/mp4; codecs="hvc1.2.4.L150.B0"')`.
+   8-bit 로 재면 못 트는 PC 도 "지원" 으로 나온다.
+
+> **★ 무과금 API 프로브** — BytePlus 는 task 생성 **전에** 파라미터를 `resolution → duration
+> → ratio` 순으로 검증한다. 일부러 틀린 `ratio:"99:1"` 을 안전핀으로 끼우면 task 가 절대
+> 생성되지 않아 **과금 0**. 해상도 매트릭스 전체를 1원도 안 쓰고 확정했다.
+> (주의: 모르는 파라미터는 조용히 무시되므로 "존재 여부" 판단에는 못 쓴다.)
+
+### 5-3. Seedance 2.5 Demo — 정식 모델이 아니다
+
+BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 금지 / production·batch 금지 /
+언제든 회수 가능**을 명시. 할당 2 concurrent / 8 RPM. **공식 문서에 2.5 는 존재하지 않는다** —
+아래가 유일한 기록이고 전부 실측이다.
+
+| | 2.0 | 2.5 Demo |
+|---|---|---|
+| 해상도 | 480/720/1080/4k | **480p/720p만** |
+| Duration | 4~15초 | **4~30초** |
+| 이미지/비디오/오디오 | 9/3/3 | **30/10/10** |
+| 레퍼런스 비디오 개별·합산 | 15.2초 | **둘 다 30.2초** |
+
+- **"네이티브 4K" 는 거짓**(1080p·2k·4k 전부 거부). **"50 에셋" 은 사실.**
+- 비디오 10개는 사실상 도달 불가 — 합산 30.2초가 먼저 걸린다.
+- `first_frame` 계열은 **`ratio=adaptive` 필수**.
+- **프롬프트로 태스크를 재분류한다**(2.0 엔 없다). "원본 영상 그대로 사용" 류면 mode 와
+  무관하게 편집 작업으로 판정돼 `ratio=adaptive` + `duration=-1` 을 강제한다. 앱이 예측
+  불가(서버의 의미 해석)라 한글 안내로만 대응한다.
+
+**★ 절대 금지 5가지**
+1. 기존 모델에 능력 필드를 채우지 마라 — 폴백이 무의미해지고 오염이 시작된다.
+2. `MODELS` 에서 2.5 를 빼지 마라 — 하이드레이션이 저장된 2.5 프로젝트를 2.0 으로 되돌린다.
+   **노출만** 필터링할 것.
+3. **엔드포인트 ID 를 클라이언트에 두지 마라** — 약관 위반 + 이 저장소는 Public.
+   서버가 논리 id `seedance-2-5-demo` 를 치환한다.
+4. 조회/취소 키를 서버 Map 으로 기억하지 마라 — 재시작 시 틀린 키로 영영 폴링.
+5. 에셋 한도를 숫자 grep 으로 찾지 마라 — 한도는 **모델 × 모드** 두 축이다.
+
+데모는 트래커 POST 를 스킵한다(별도 계약). 사용량은 데모 키로 BytePlus task 목록을 조회하면
+그대로 감사된다.
+
+### 5-4. Gemini Omni Flash (제2 provider)
+
+`modelProvider(model)` 이 **유일한 갈림길**이다. `MODELS` 에 `provider:'gemini'` 가 붙은
+항목만 옴니, 나머지는 byteplus.
+
+- 엔드포인트 `POST https://generativelanguage.googleapis.com/v1beta/interactions`,
+  헤더 `x-goog-api-key`. 서버 프록시 `/api/gemini/generate`.
+- **동기 호출** — 한 번의 fetch 가 40~90초를 잡고 완성 URL 을 반환한다(시댄스는 비동기 폴링).
+- 출력 **720p 고정**, duration 3~10초.
+- 태스크 4종: `text_to_video` / `image_to_video` / `reference_to_video` / `edit`.
+- 서버가 강제하는 플래그: `background=false`, `stream=false`, `store=true`(`delivery:"uri"` 의
+  필수 조건). `edit` 은 duration/aspect 를 **스트립**한다(API 가 거부).
+- 파일은 R2 가 아니라 **Google Files API** 로 간다(`_uploadCacheId` → 서버가 업로드 후 uri 치환).
+
+**철칙: 옴니 코드는 시댄스 `settings.mode` 를 절대 조건으로 보지 않는다. `settings.omniTask` 만 본다.**
+(mode 누수가 옴니 초기 버그의 주범이었다.)
+
+문법이 안 섞이는 원리: 멘션은 **중립 pill**(`data-asset-id` 만)로 저장하고, **전송 순간에만**
+`getPlainText()` 가 시댄스 `[Image 1]`(1-based) / 옴니 `<IMAGE_REF_0>`(0-based)로 변환한다.
+저장 단계에 문법이 없으니 오염 자체가 불가능하다.
+**옴니 참조영상은 위치 태그가 없다** — 프롬프트에서 "the reference video clip" 이라고
+**말로** 지칭해야 반영된다(실측).
+
+---
+
+## 6. 기능 지도
 
 - **프로젝트 그룹 / 하위그룹** — 딱 1단계. `groupTree()` 가 **읽을 때** 판정한다:
   "부모가 존재하고 그 부모가 스스로 최상위일 때만 하위그룹". dangling·3단·순환이 전부
@@ -219,7 +348,7 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 ---
 
-## 6. 불변 규칙 (어기면 사용자 보고 버그가 되살아난다)
+## 7. 불변 규칙 (어기면 사용자 보고 버그가 되살아난다)
 
 **API / 생성**
 1. `return_last_frame` 과 `generate_audio` **동시 사용 금지**.
@@ -243,19 +372,28 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 11. persist 를 `createJSONStorage` 로 되돌리지 마라 — 매 `set()` 마다 동기 stringify 로 프레임이 멈춘다.
 12. 슬라이더 같은 연속 입력을 스토어에 직결하지 마라. 로컬 draft + 릴리스 시 1회 커밋.
 
+**R2 / 에셋** (마이그레이션 때 피 본 것들)
+
+13. **R2 key 는 업로드마다 유일**해야 한다. 재사용하면 동시 task 가 서로의 객체를 지운다.
+14. task→R2키 매핑은 반드시 `string[]` — `extend_video` 는 비디오를 3개까지 싣는다.
+15. R2 URL 식별은 **strict hostname 매칭**으로. 문자열 포함 검사는 오탐한다.
+16. `output_count ≥ 2` 는 **같은 R2 URL 을 N개 task 가 공유**한다. 참조 카운트가 0 이 될 때만
+    삭제할 것 — 먼저 끝난 task 가 지우면 나머지가 fetch 에 실패한다.
+17. **비디오는 제출 시점마다 재업로드**한다(presigned 24h 만료). 이미지와 다르다.
+
 **작업 방식**
 
-13. **소스 편집에 PowerShell 금지.** `Get-Content -Raw` 가 CP949 로 읽어 한글을 깨뜨리고
+18. **소스 편집에 PowerShell 금지.** `Get-Content -Raw` 가 CP949 로 읽어 한글을 깨뜨리고
     `Set-Content -Encoding utf8` 이 BOM 을 붙여 빌드를 죽인다. 이 세션에서만 3번 당했다.
-14. **입력 버그는 합성 이벤트로 재현되지 않는다.** `dispatchEvent` 는 "핸들러가 호출되면
+19. **입력 버그는 합성 이벤트로 재현되지 않는다.** `dispatchEvent` 는 "핸들러가 호출되면
     동작한다" 만 증명한다. CDP `Input.dispatchMouseEvent` 나 실제 마우스를 쓸 것.
-15. **파괴적 스크립트는 격리 프로파일(`--user-data-dir`)에만.** 실제 프로필을 건드리기 전에
+20. **파괴적 스크립트는 격리 프로파일(`--user-data-dir`)에만.** 실제 프로필을 건드리기 전에
     백업을 딴 폴더로 복사할 것 — 백업 미러는 5분 디바운스라 "아직 안 덮였겠지" 가 안 통한다.
     (2026-08-03 실제 사고. 안전 사본 하나로 겨우 복구.)
 
 ---
 
-## 7. 폐기된 시도 (다시 하지 말 것)
+## 8. 폐기된 시도 (다시 하지 말 것)
 
 - `Readable.fromWeb(body).pipe(res)` 다운로드 프록시 → **71KB/s 병목**.
 - `arrayBuffer()` 전체 버퍼링 → 속도는 나오지만 첫 바이트가 늦어 **진행 게이지가 안 뜨고 큰
@@ -268,7 +406,7 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 ---
 
-## 8. 알려진 한계 / 미해결
+## 9. 알려진 한계 / 미해결
 
 | | |
 |---|---|
@@ -281,7 +419,7 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 ---
 
-## 9. 작업 절차
+## 10. 작업 절차
 
 ### 검증 도구
 
@@ -313,12 +451,12 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 ---
 
-## 10. ★ 저장소 밖 — 시스템 전체 지도
+## 11. ★ 저장소 밖 — 시스템 전체 지도
 
 **이 저장소는 시스템의 일부다.** 앱 코드만 읽고 인수받았다고 생각하면 안 된다. 아래가
 끊기면 앱은 멀쩡해 보이면서 기능만 죽는다.
 
-### 10-1. 외부 서비스 6곳
+### 11-1. 외부 서비스 6곳
 
 | 서비스 | 무엇에 | 끊기면 | 자격증명 |
 |---|---|---|---|
@@ -332,7 +470,7 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 그 외 `fonts.googleapis.com` — `src/index.css` 가 Inter 를 외부에서 받는다. 오프라인이면
 글꼴만 대체된다(기능 무관).
 
-### 10-2. 저장소 **밖**에 있는 소스
+### 11-2. 저장소 **밖**에 있는 소스
 
 ```
 ..\26.05.04 시댄스 크레딧 관리\
@@ -354,7 +492,7 @@ F:\시댄스\                                ← 키 배포 (윈도우 전용, s
 저장소 **안**에도 GAS 가 하나 있다: `scripts/r2_hourly_cleanup.gs` (317줄) — R2 에서 1시간
 지난 객체를 지우는 시간 트리거. S3 V4 서명을 인라인 구현해서 라이브러리 설치가 필요 없다.
 
-### 10-3. 구글 시트 — 열 순서가 코드다
+### 11-3. 구글 시트 — 열 순서가 코드다
 
 `Project_Status` 탭: `A연도 B프로젝트명 C현황 D영상수 E토큰 F:4K허용`
 
@@ -366,7 +504,7 @@ F:\시댄스\                                ← 키 배포 (윈도우 전용, s
 
 `usage_log` 탭은 2만 행이 넘고 30분마다 전량 재집계되므로 얇게 유지한다(해상도 등 미기록).
 
-### 10-4. GAS 재배포 — 여기서 제일 잘 깨진다
+### 11-4. GAS 재배포 — 여기서 제일 잘 깨진다
 
 **저장만으로는 `/exec` 에 반영되지 않는다.**
 → 배포 관리 → **기존 배포 편집 → 새 버전**.
@@ -374,7 +512,7 @@ F:\시댄스\                                ← 키 배포 (윈도우 전용, s
 ⚠️ **"새 배포"를 누르면 URL 이 바뀐다.** 그러면 앱의 `TRACKER_URL`, 대시보드 링크, PM 프로그램이
 전부 한꺼번에 깨진다. 반드시 **기존 배포 편집**.
 
-### 10-5. 팀 식별 방식
+### 11-5. 팀 식별 방식
 
 앱은 `SEEDANCE_API_KEY` 를 SHA-256 해싱해서 `server.ts` 에 박힌 13개 팀 해시맵과 대조해
 팀 이름을 정한다. **키 원문이 아니라 해시를 박는 이유**: EXE 한 대가 다른 팀 키를 전부
@@ -382,7 +520,7 @@ F:\시댄스\                                ← 키 배포 (윈도우 전용, s
 
 부팅 로그에 `[Tracker] Resolved team: ○○팀` 이 찍힌다. **`UNKNOWN` 이면 키가 팀 키가 아니다.**
 
-### 10-6. 데이터가 도는 경로
+### 11-6. 데이터가 도는 경로
 
 ```
 프롬프트 → (에셋 있으면) R2 업로드 → presigned URL
@@ -398,10 +536,48 @@ F:\시댄스\                                ← 키 배포 (윈도우 전용, s
 
 ---
 
-## 11. 더 깊은 기록
+## 12. 부록 — 맥에서 처음 돌리기
 
-이 저장소에 없는 상세 기록이 개발 PC 로컬에 있다(`.claude/` 는 gitignore — 키가 들어갈 수
-있어서다). 사고 경위·이분탐색 로그·실측 표 원본이 필요하면 그쪽을 봐야 한다.
+사용자용 상세본은 `맥_실행_가이드.md`. 요약하면:
 
-- `.claude/HANDOFF.md` — 시간순 상세본 (§1~§19)
-- `.claude/skills/freewill-seedance/SKILL.md` — 에이전트 자동로드 요약본
+```bash
+git clone https://github.com/productionkhu-tech/freewill-seedance.git
+cd freewill-seedance
+nano .env          # 아래 5줄(필수) + 3줄(선택)
+npm install
+./start.command    # 또는 npm run dev
+```
+
+`.env` **필수 5** — 없으면 서버가 부팅을 거부한다:
+`SEEDANCE_API_KEY` · `R2_ENDPOINT` · `R2_ACCESS_KEY_ID` · `R2_SECRET_ACCESS_KEY` · `R2_BUCKET`
+
+`.env` **선택 3** — 없으면 해당 기능만 막힌다:
+`NANOBANANA_STUDIO_KEY`(옴니) · `SEEDANCE_25_DEMO_KEY` · `SEEDANCE_25_DEMO_ENDPOINT`
+
+값은 윈도우 PC PowerShell 에서 뽑는다:
+
+```powershell
+foreach ($n in 'SEEDANCE_API_KEY','R2_ENDPOINT','R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','R2_BUCKET','NANOBANANA_STUDIO_KEY','SEEDANCE_25_DEMO_KEY','SEEDANCE_25_DEMO_ENDPOINT') { "$n=$([Environment]::GetEnvironmentVariable($n,'User'))" }
+```
+
+부팅 로그에 `[Tracker] Resolved team: ○○팀` 과 `http://localhost:3000` 이 뜨면 정상.
+`.env` 를 고치면 **서버를 껐다 켜야 한다**(시작 시 1회만 읽는다).
+404 가 나면 3000 포트를 다른 프로그램이 쓰는 것(`lsof -i :3000`).
+
+---
+
+## 13. 문서 정책
+
+**이 파일 하나가 전부다.** 앱을 인수받는 사람은 여기만 읽으면 된다.
+
+| 파일 | 성격 |
+|---|---|
+| **`HANDOFF.md`** (이 파일) | 유일한 인수인계 문서. 바뀐 게 있으면 **여기를 고친다** |
+| `맥_실행_가이드.md` | 맥 **사용자**용 실행 안내(개발자용 아님) |
+| `.claude/skills/freewill-seedance/SKILL.md` | 에이전트 자동로드용 **포인터** — 이 파일을 읽으라고만 한다 |
+
+문서를 늘리지 마라. 별도 브리핑·마이그레이션 노트를 만들면 6주 뒤 서로 어긋난 채 남는다
+(실제로 그랬다 — 2026-08-03 에 md 7개를 이 한 개로 합쳤다).
+
+로컬에만 있던 시간순 상세본(`.claude/HANDOFF.md`, 1,894줄)은 **이 문서로 대체됐다.**
+사고 경위 원본이 필요할 때만 참고하고, 새 내용은 거기 쓰지 마라.
