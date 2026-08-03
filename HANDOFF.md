@@ -313,7 +313,92 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 ---
 
-## 10. 더 깊은 기록
+## 10. ★ 저장소 밖 — 시스템 전체 지도
+
+**이 저장소는 시스템의 일부다.** 앱 코드만 읽고 인수받았다고 생각하면 안 된다. 아래가
+끊기면 앱은 멀쩡해 보이면서 기능만 죽는다.
+
+### 10-1. 외부 서비스 6곳
+
+| 서비스 | 무엇에 | 끊기면 | 자격증명 |
+|---|---|---|---|
+| **BytePlus ModelArk** | 시댄스 영상 생성 | 생성 전부 불가 | `SEEDANCE_API_KEY` (팀별 13개) |
+| **Cloudflare R2** | 레퍼런스 에셋 호스팅 (presigned URL 로 BytePlus 에 전달) | **서버가 부팅을 거부** | `R2_*` 4개 |
+| **Google Apps Script** | 크레딧 트래커 (사용량 기록 + 프로젝트 목록 + 4K 권한) | 프로젝트 목록이 빈다 → 생성 게이트에 막힘 | 없음(웹앱 공개 `/exec`) |
+| **Google AI Studio** | Gemini Omni Flash | 옴니만 불가 (시댄스 정상) | `NANOBANANA_STUDIO_KEY` |
+| **GitHub Releases** | 윈도우 자동 업데이트 | 업데이트만 불가 | 배포 시 `GH_TOKEN` |
+| **BytePlus 2.5 데모** | Seedance 2.5 (별도 계약) | 모델 목록에서 사라짐 | `SEEDANCE_25_DEMO_*` 2개 |
+
+그 외 `fonts.googleapis.com` — `src/index.css` 가 Inter 를 외부에서 받는다. 오프라인이면
+글꼴만 대체된다(기능 무관).
+
+### 10-2. 저장소 **밖**에 있는 소스
+
+```
+..\26.05.04 시댄스 크레딧 관리\
+  ├── dashboard_Code.gs        1,178줄   ← 트래커 본체 (시트 집계 · /exec 웹앱)
+  ├── dashboard_byteplus.gs      456줄   ← BytePlus 잔액/사용량 조회
+  └── dashboard_Code_TEST.gs     152줄   ← 테스트용
+
+F:\시댄스\                                ← 키 배포 (윈도우 전용, setx)
+  ├── 1T.bat … 10T.bat, AFX/AIP/TA/Special.bat   팀별 SEEDANCE_API_KEY 13개
+  ├── R2.bat                               R2 자격증명 4개
+  ├── 2.5 demo.bat                         2.5 데모 키 2개
+  ├── install.bat                          사내 배포용 설치 스크립트
+  └── FreewillSeedanceSetup.exe            배포본 사본
+```
+
+**GAS 1,786줄이 저장소 밖에 있다.** 앱 코드와 같이 버전 관리되지 않으므로, 트래커를 고칠 때
+앱과 GAS 의 계약(`/api/projects` 응답 형태, POST 필드)이 조용히 어긋날 수 있다.
+
+저장소 **안**에도 GAS 가 하나 있다: `scripts/r2_hourly_cleanup.gs` (317줄) — R2 에서 1시간
+지난 객체를 지우는 시간 트리거. S3 V4 서명을 인라인 구현해서 라이브러리 설치가 필요 없다.
+
+### 10-3. 구글 시트 — 열 순서가 코드다
+
+`Project_Status` 탭: `A연도 B프로젝트명 C현황 D영상수 E토큰 F:4K허용`
+
+- **모든 조회가 B열(프로젝트명) 기준**이다 → 행 정렬·이동·중간 삽입은 안전.
+- **열은 고정 인덱스**(`getRange(2,1,lr-1,6)` → `rows[i][5]` = F). **4K 열을 옮기거나 A~F
+  사이에 열을 끼우면 조용히 오작동**한다(4K 는 fail-closed 라 전부 꺼진다).
+- 뭔가 덧붙이려면 **G열부터**.
+- **프로젝트명 변경 금지** — 식별 키라서 누적 토큰이 두 줄로 쪼개진다.
+
+`usage_log` 탭은 2만 행이 넘고 30분마다 전량 재집계되므로 얇게 유지한다(해상도 등 미기록).
+
+### 10-4. GAS 재배포 — 여기서 제일 잘 깨진다
+
+**저장만으로는 `/exec` 에 반영되지 않는다.**
+→ 배포 관리 → **기존 배포 편집 → 새 버전**.
+
+⚠️ **"새 배포"를 누르면 URL 이 바뀐다.** 그러면 앱의 `TRACKER_URL`, 대시보드 링크, PM 프로그램이
+전부 한꺼번에 깨진다. 반드시 **기존 배포 편집**.
+
+### 10-5. 팀 식별 방식
+
+앱은 `SEEDANCE_API_KEY` 를 SHA-256 해싱해서 `server.ts` 에 박힌 13개 팀 해시맵과 대조해
+팀 이름을 정한다. **키 원문이 아니라 해시를 박는 이유**: EXE 한 대가 다른 팀 키를 전부
+노출시키지 않기 위해서다. 팀이 늘면 해시를 추가해야 하고, 그때까지는 `UNKNOWN` 으로 기록된다.
+
+부팅 로그에 `[Tracker] Resolved team: ○○팀` 이 찍힌다. **`UNKNOWN` 이면 키가 팀 키가 아니다.**
+
+### 10-6. 데이터가 도는 경로
+
+```
+프롬프트 → (에셋 있으면) R2 업로드 → presigned URL
+        → BytePlus task 생성 → 10초 폴링
+        → succeeded: 영상 URL(24h) + 토큰 사용량
+             ├→ blobCache 사전 페치 (다운로드 가속)
+             └→ GAS 트래커 POST → 시트 usage_log
+        → 성공/실패 확정 시 R2 객체 삭제 (+ 1시간 lifecycle 백스톱)
+```
+
+**24시간짜리 URL 두 개**를 기억할 것: BytePlus 영상 URL 과 R2 presigned URL. 지난 영상을
+다시 쓰려면 `media-cache` 나 `originalPath` 에서 재업로드해야 한다(§4-4).
+
+---
+
+## 11. 더 깊은 기록
 
 이 저장소에 없는 상세 기록이 개발 PC 로컬에 있다(`.claude/` 는 gitignore — 키가 들어갈 수
 있어서다). 사고 경위·이분탐색 로그·실측 표 원본이 필요하면 그쪽을 봐야 한다.
