@@ -87,17 +87,23 @@ const taskToR2Keys = new Map<string, string[]>();
 // the actual DeleteObject only fires when the count hits 0.
 const r2KeyRefCount = new Map<string, number>();
 
+// Where a user is told to go when a key is missing depends entirely on which platform
+// they are on: Windows machines get their keys from the team's .bat files, Mac runs from
+// source and reads a .env. Telling a Mac user to run "F:\api key\R2.bat" is worse than
+// saying nothing — it sends them looking for a drive that does not exist.
+const KEY_HELP = process.platform === 'win32'
+  ? '  F:\\api key\\R2.bat 을 실행한 뒤 앱을 다시 켜세요.'
+  : '  프로젝트 폴더의 .env 파일에 값을 채우세요. (맥_실행_가이드.md 참고)';
+
 async function startServer() {
   if (!API_KEY) {
-    console.error('\n  [ERROR] 환경변수 SEEDANCE_API_KEY가 설정되지 않았습니다.');
-    console.error('  시스템 환경변수에 다음을 추가하세요:');
-    console.error('    변수 이름: SEEDANCE_API_KEY');
-    console.error('    변수 값:   (발급받은 API 키)\n');
+    console.error('\n  [ERROR] SEEDANCE_API_KEY 가 설정되지 않았습니다.');
+    console.error(KEY_HELP + '\n');
     process.exit(1);
   }
   if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET) {
     console.error('\n  [ERROR] R2_* 환경변수가 설정되지 않았습니다.');
-    console.error('  F:\\api key\\R2.bat 을 한 번 실행하세요.');
+    console.error(KEY_HELP);
     console.error('  필요한 변수: R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET\n');
     process.exit(1);
   }
@@ -727,7 +733,9 @@ async function startServer() {
     const isDemo = byteplusBody.model === DEMO_MODEL_ID;
     if (isDemo) {
       if (!DEMO25_AVAILABLE) {
-        return res.status(403).json({ error: { message: 'Seedance 2.5 Demo 키가 설정되지 않았습니다. F:\\시댄스\\2.5 demo.bat 을 실행한 뒤 앱을 재시작해주세요.' } });
+        return res.status(403).json({ error: { message: 'Seedance 2.5 Demo 키가 설정되지 않았습니다. ' + (process.platform === 'win32'
+              ? 'F:\\시댄스\\2.5 demo.bat 을 실행한 뒤 앱을 재시작해주세요.'
+              : '.env 에 SEEDANCE_25_DEMO_KEY / SEEDANCE_25_DEMO_ENDPOINT 를 추가한 뒤 다시 실행해주세요.') } });
       }
       byteplusBody.model = DEMO25_ENDPOINT;   // logical id → real endpoint (server-only)
     }

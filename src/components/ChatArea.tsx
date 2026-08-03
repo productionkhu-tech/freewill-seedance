@@ -23,7 +23,10 @@ async function resolveElementImageUrl(img: ElementImage): Promise<string> {
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
   if (!error) return '알 수 없는 오류가 발생했습니다.';
-  if (error.includes('API Key is required')) return 'API 키 오류: 서버를 재시작해주세요. (start.bat)';
+  // Windows runs the packaged exe (start.bat); Mac runs from source (start.command).
+  // Naming the wrong one is a dead end for whoever reads it.
+  if (error.includes('API Key is required'))
+    return `API 키 오류: 서버를 재시작해주세요. (${navigator.platform.startsWith('Mac') ? 'start.command' : 'start.bat'})`;
   if (error.includes('Payload Too Large')) return '파일 크기 초과: 이미지 개당 30MB, 전체 요청 64MB 이하여야 합니다.';
   if (error.includes('resource download failed')) return '리소스 다운로드 실패: 이미지에 접근할 수 없습니다. 파일을 다시 업로드해주세요.';
   if (error.includes('real person') || error.includes('PrivacyInformation')) return '실사 인물 감지: Seedance 2.0은 실제 사람 얼굴이 담긴 레퍼런스 이미지·영상을 받지 않습니다. Seedance로 생성한 결과물이나 비실사(스타일라이즈) 캐릭터 이미지를 사용해주세요.';
