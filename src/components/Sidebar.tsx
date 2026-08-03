@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type RefObject, type DragEvent } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type RefObject, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -462,9 +462,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     }
   };
 
-  const beginDrag = (kind: 'project' | 'group', id: string, e: DragEvent<HTMLElement>) => {
-    e.dataTransfer.setData('text/plain', id);
-    e.dataTransfer.effectAllowed = 'move';
+  const beginDrag = (kind: 'project' | 'group', id: string) => {
     setDragKind(kind); setDragId(id);
     dragRef.current = { kind, id };
     // ★ This snapshot is taken BEFORE React has re-rendered — setDragId above is async.
@@ -474,7 +472,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     // two empty folders moved every row below them up by 65px (measured) — about 1.7 rows.
     // You aim at one row, the app aims at another, and dropping "does nothing".
     // Fixed at the source (the hint no longer unmounts), and again here: the first
-    // dragover re-measures, by which time the render has committed. Belt and braces,
+    // pointermove re-measures, by which time the render has committed. Belt and braces,
     // because the next person to add a drag-conditional element won't know about this.
     snapFresh.current = false;
     captureSlots();
@@ -577,39 +575,112 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     setDragKind(null); setDragId(null); setPlan(null); setGroupPlan(null);
     snapRef.current = null; dragRef.current = null; snapFresh.current = false;
   };
-  // A drag can end outside the window (Esc, or releasing over another app), and then no
-  // dragend reaches our rows — the scroll loop would keep running with nothing to drop.
+
+  // ── Why this is a POINTER drag and not HTML5 drag-and-drop ──────────────────
+  // Native DnD hands the mouse to the operating system's drag loop for the duration, and
+  // that loop keeps the wheel. Measured on a real drag: 333 dragover events reached the
+  // page and 0 wheel events did — no listener can fix that, because nothing is dispatched.
+  // (An earlier attempt "verified" a wheel handler by calling dispatchEvent on it, which
+  // only proved the handler runs when called. It never ran in real use.)
+  // Pointer events keep the whole gesture inside the page, so the wheel, Escape and
+  // everything else behave normally. The OS drag image goes away with it, so we draw our
+  // own (see the ghost below) — which is better anyway: it can show the real icon and name.
+  // All the planning below is untouched — it was always driven by a clientY and an id.
+  const pendingDrag = useRef<{ kind: 'project' | 'group'; id: string; x: number; y: number } | null>(null);
+  const justDragged = useRef(false);
+  const lastPt = useRef<{ x: number; y: number } | null>(null);
+
+  // The thing under the cursor while you drag. Moved by writing `transform` straight onto
+  // the node — putting the pointer position in state would re-render the whole sidebar
+  // sixty times a second to move one small box.
+  const ghostRef = useRef<HTMLDivElement | null>(null);
+  const placeGhost = (x: number, y: number) => {
+    const g = ghostRef.current;
+    if (g) g.style.transform = `translate3d(${x + 14}px, ${y + 10}px, 0)`;
+  };
+  // Callback ref, not useEffect: this runs before paint, so the ghost never flashes at the
+  // top-left corner on the frame it mounts.
+  const attachGhost = (el: HTMLDivElement | null) => {
+    ghostRef.current = el;
+    if (el && lastPt.current) placeGhost(lastPt.current.x, lastPt.current.y);
+  };
+
+  // Press: only ARM. A drag starts on the first few pixels of movement, so an ordinary
+  // click still selects a project and a folder still folds.
+  const armDrag = (kind: 'project' | 'group', id: string, e: ReactPointerEvent<HTMLElement>) => {
+    if (e.button !== 0) return;
+    // Buttons inside the row (icon, rename, delete, add-subfolder) are their own gestures.
+    if ((e.target as HTMLElement).closest('button')) return;
+    if (kind === 'project' && (editingId === id || searchQuery.trim())) return;
+    if (kind === 'group' && editingGroupId === id) return;
+    pendingDrag.current = { kind, id, x: e.clientX, y: e.clientY };
+    lastPt.current = { x: e.clientX, y: e.clientY };
+  };
+
+  // The live handlers, refreshed every render so the window listeners below can stay bound
+  // once and still see current state. Re-binding them on every render would mean adding and
+  // removing listeners ~60 times a second mid-drag.
+  const dragHandlers = useRef({ move: (_e: PointerEvent) => {}, up: () => {}, key: (_e: KeyboardEvent) => {} });
+  dragHandlers.current = {
+    move: (e: PointerEvent) => {
+      const p = pendingDrag.current;
+      if (p && !dragRef.current) {
+        // 5px of slop: hands are not perfectly still on a click.
+        if (Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y) < 5) return;
+        beginDrag(p.kind, p.id);
+      }
+      lastPt.current = { x: e.clientX, y: e.clientY };
+      if (!dragRef.current) return;
+      e.preventDefault();                       // no text selection while dragging
+      placeGhost(e.clientX, e.clientY);
+      if (!snapFresh.current) { snapFresh.current = true; captureSlots(); }
+      updateAutoScroll(e.clientY);
+      planFor(e.clientY);
+    },
+    up: () => {
+      const wasDragging = !!dragRef.current;
+      pendingDrag.current = null;
+      if (!wasDragging) return;
+      // Swallow the click that follows, or letting go on top of a row would also select it.
+      justDragged.current = true;
+      setTimeout(() => { justDragged.current = false; }, 0);
+      applyDrop();
+    },
+    key: (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      pendingDrag.current = null;
+      if (dragRef.current) { e.preventDefault(); endDrag(); }   // drop nothing, put it back
+    },
+  };
   useEffect(() => {
-    const off = () => endDrag();
-    window.addEventListener('dragend', off);
-    window.addEventListener('drop', off);
-    return () => { window.removeEventListener('dragend', off); window.removeEventListener('drop', off); };
+    const m = (e: PointerEvent) => dragHandlers.current.move(e);
+    const u = () => dragHandlers.current.up();
+    const k = (e: KeyboardEvent) => dragHandlers.current.key(e);
+    window.addEventListener('pointermove', m);
+    window.addEventListener('pointerup', u);
+    window.addEventListener('pointercancel', u);
+    window.addEventListener('keydown', k);
+    return () => {
+      window.removeEventListener('pointermove', m);
+      window.removeEventListener('pointerup', u);
+      window.removeEventListener('pointercancel', u);
+      window.removeEventListener('keydown', k);
+    };
   }, []);
 
-  // The wheel, while dragging. Edge auto-scroll alone means the only way to cross a long
-  // list is to park at the edge and wait — fine for one screen, tedious for ten.
-  // Three things make it not jump:
-  //   · A NATIVE non-passive listener. React registers onWheel as passive, so a React
-  //     handler cannot preventDefault and the browser's own scroll would run as well —
-  //     two scrolls per notch.
-  //   · behavior:'instant'. `scroll-behavior: smooth` is inherited from <html>, and a
-  //     smooth animation fighting per-notch jumps is exactly the stutter to avoid.
-  //   · planFor right after, so the gap follows the content instead of catching up on the
-  //     next dragover ~350ms later.
-  // Bound only for the duration of a drag: closures stay fresh and normal scrolling is
-  // completely untouched.
+  // Keep the gap in step with the list while it scrolls under a stationary cursor.
+  // ★ We deliberately do NOT touch the wheel any more. The first version preventDefault'ed
+  // it and jumped the list by deltaY per notch, which is exactly what "픽셀 단위로 움직인다"
+  // describes — Chromium animates a wheel scroll, and replacing that with a hard jump throws
+  // the animation away. Letting the browser scroll natively gives back the same smoothness
+  // as everywhere else in the app; all this has to do is re-aim afterwards.
+  // Covers the auto-scroll loop too, since that also produces scroll events.
   useEffect(() => {
     const list = listRef.current;
     if (!list || !dragId) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      stopAutoScroll();                       // a deliberate wheel outranks the edge loop
-      const max = list.scrollHeight - list.clientHeight;
-      list.scrollTo({ top: Math.max(0, Math.min(max, list.scrollTop + e.deltaY)), behavior: 'instant' });
-      planFor(e.clientY);
-    };
-    list.addEventListener('wheel', onWheel, { passive: false });
-    return () => list.removeEventListener('wheel', onWheel);
+    const onScroll = () => { if (lastPt.current) planFor(lastPt.current.y); };
+    list.addEventListener('scroll', onScroll, { passive: true });
+    return () => list.removeEventListener('scroll', onScroll);
   }, [dragId, dragKind]);
   // Which project's icon picker is open, plus where to anchor it.
   const [iconPicker, setIconPicker] = useState<{ id: string; rect: DOMRect } | null>(null);
@@ -890,15 +961,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               // aren't drawn — so a drop would silently re-file the project into a group
               // the user can't even see. Moving things is a decision about a place; don't
               // allow it while the places are hidden.
-              draggable={editingId !== project.id && !searchQuery.trim()}
-              onDragStart={(e) => beginDrag('project', project.id, e)}
-              onDragEnd={endDrag}
+              onPointerDown={(e) => armDrag('project', project.id, e)}
               className={cn(
                 "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
                 dragId === project.id && "opacity-40",
                 currentProjectId === project.id ? "bg-[#2a2a2d] text-white" : "text-white/70 hover:bg-[#2a2a2d]/50 hover:text-white"
               )}
-              onClick={() => { if (editingId !== project.id) setCurrentProjectId(project.id); }}
+              onClick={() => { if (justDragged.current) return; if (editingId !== project.id) setCurrentProjectId(project.id); }}
               onDoubleClick={() => { setEditingId(project.id); setEditName(project.name); }}
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ id: project.id, x: e.clientX, y: e.clientY }); }}
             >
@@ -1038,13 +1107,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               dropInto
                 ? 'bg-[#0071e3]/25 ring-1 ring-[#0071e3] text-white'
                 : 'text-white/50 hover:text-white/80 hover:bg-[#2a2a2d]/40')}
-            draggable={editingGroupId !== g.id}
-            onDragStart={(e) => { e.stopPropagation(); beginDrag('group', g.id, e); }}
-            onDragEnd={endDrag}
+            onPointerDown={(e) => armDrag('group', g.id, e)}
             // Chevron / icon / count / padding: fold instantly. Aiming at the chevron is
             // the deliberate "open this" gesture and it should never wait on anything.
             // detail > 1 skips the second click of a double-click so it can't fold twice.
-            onClick={(e) => { if (e.detail > 1) return; toggleProjectGroup(g.id); }}>
+            onClick={(e) => { if (justDragged.current || e.detail > 1) return; toggleProjectGroup(g.id); }}>
             <ChevronRight size={13} className={cn('shrink-0 transition-transform', !g.collapsed && 'rotate-90')} />
             {/* Open the folder while something hovers over it — the same "it will go in
                 here" cue Explorer gives. */}
@@ -1068,7 +1135,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               <span
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (e.detail > 1) return;
+                  if (justDragged.current || e.detail > 1) return;
                   if (pendingToggle.current) clearTimeout(pendingToggle.current);
                   pendingToggle.current = window.setTimeout(() => {
                     pendingToggle.current = null;
@@ -1232,19 +1299,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         </button>
       </div>
       {/* One dragover handler for the entire list. Children deliberately have none. */}
-      <div ref={listRef} className="relative flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar"
-        onDragOver={(e) => {
-          if (!dragId) return;
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
-          // Re-measure once, now that the drag-start render has committed. No gap can
-          // have opened yet (a gap needs a plan, a plan needs this handler), so this is
-          // the true resting layout of the list mid-drag. See beginDrag.
-          if (!snapFresh.current) { snapFresh.current = true; captureSlots(); }
-          updateAutoScroll(e.clientY);
-          planFor(e.clientY);
-        }}
-        onDrop={(e) => { e.preventDefault(); applyDrop(); }}
+      <div ref={listRef}
+        className={cn('relative flex-1 overflow-y-auto p-2 space-y-1 dark-scrollbar', dragId && 'select-none')}
       >
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
             callers below. */}
@@ -1311,6 +1367,31 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       </div>
       </>
     )}
+
+    {/* Held by the cursor. Portalled to <body> so the sidebar's overflow-hidden and its
+        width animation can't clip it, and pointer-events:none so it never becomes the
+        drop target itself. */}
+    {createPortal(
+      dragId ? (
+        <div ref={attachGhost}
+          className="fixed left-0 top-0 z-[200] pointer-events-none select-none
+                     flex items-center gap-2 max-w-[220px] px-3 py-1.5 rounded-[8px]
+                     bg-[#2a2a2d]/95 border border-[#0071e3]/60 shadow-2xl shadow-black/50
+                     text-white text-[13px] font-medium backdrop-blur-sm">
+          {dragKind === 'group' ? (
+            <>
+              <Folder size={13} className="shrink-0 text-[#4da3ff]" />
+              <span className="truncate">{projectGroups.find(g => g.id === dragId)?.name}</span>
+            </>
+          ) : (
+            <>
+              <ProjectIcon icon={projects.find(p => p.id === dragId)?.icon} size={14} />
+              <span className="truncate">{projects.find(p => p.id === dragId)?.name}</span>
+            </>
+          )}
+        </div>
+      ) : null,
+      document.body)}
 
     {menu && (() => {
       const p = projects.find(x => x.id === menu.id);
