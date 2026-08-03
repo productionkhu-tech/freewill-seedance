@@ -73,7 +73,14 @@ const todayISO = () => {
 
 // `value` is what gets compared; `label` is what gets shown, when the two differ (group
 // options carry an id as their value and the folder's name as their label).
-type Opt = { value: string; count: number; label?: string };
+//
+// `total` exists because the two kinds of filter are not the same kind of thing.
+// 그룹 and 프로젝트 are PLACES; 모델·해상도·비율·길이 are properties of the clips inside them.
+// Filter to 1080p and a place that holds 27 clips would read "1" — which is a true answer
+// to "how many match" and a false statement about the place. So a place shows both:
+// "1 / 27", the same 보이는 것 / 전체 idiom the gallery header already uses.
+// Properties get one number; they are not places and have no size of their own.
+type Opt = { value: string; count: number; label?: string; total?: number };
 
 // Compact filter dropdown.
 // A native <select> was wrong here for two reasons: its popup grows with the option
@@ -131,7 +138,15 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8, hint }
                     className={`w-full flex items-center gap-2 text-left px-2.5 py-1.5 text-[12px] transition-colors
                       ${value === o.value ? 'bg-indigo-50 text-indigo-700 font-medium' : o.count === 0 ? 'text-gray-300 hover:bg-gray-50' : 'text-gray-700 hover:bg-gray-50'}`}>
                     <span className="truncate flex-1">{text(o)}</span>
-                    <span className="shrink-0 tabular-nums text-[11px] opacity-60">{o.count}</span>
+                    {/* "1 / 27" — matching, then how big the place actually is. The second
+                        number only appears when it differs, so an unfiltered list stays
+                        as quiet as it was. */}
+                    <span className="shrink-0 tabular-nums text-[11px] opacity-60">
+                      {o.count}
+                      {o.total != null && o.total !== o.count && (
+                        <span className="opacity-50"> / {o.total}</span>
+                      )}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -276,27 +291,39 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     // Groups in sidebar order — parent, then its subfolders — with '그룹 없음' last, so the
     // filter reads the way the sidebar looks. A PARENT counts its whole subtree: asking for
     // "광고" and being shown only what sits directly in it would be a filter that lies.
+    // A place carries TWO numbers: how many match right now, and how many it holds in
+    // total. `all*` is the second one — counted over the whole library, untouched by any
+    // filter — because how big a folder is does not change when you tick 1080p.
     const gArr = subset('group');
     const byGroup = new Map<string, number>();
-    let ungrouped = 0;
+    const allByGroup = new Map<string, number>();
+    let ungrouped = 0, allUngrouped = 0;
     for (const r of gArr) {
       if (r.groupId) byGroup.set(r.groupId, (byGroup.get(r.groupId) || 0) + 1);
       else ungrouped++;
     }
-    const anyUngrouped = allRows.some(r => !r.groupId);
+    for (const r of allRows) {
+      if (r.groupId) allByGroup.set(r.groupId, (allByGroup.get(r.groupId) || 0) + 1);
+      else allUngrouped++;
+    }
     const t = groupTree(projectGroups);
-    const groups: Opt[] = [{ value: ALL, count: gArr.length }];
+    const sub = (m: Map<string, number>, root: string, kids: { id: string }[]) =>
+      (m.get(root) || 0) + kids.reduce((n, k) => n + (m.get(k.id) || 0), 0);
+    const groups: Opt[] = [{ value: ALL, count: gArr.length, total: allRows.length }];
     for (const root of t.roots) {
       const kids = t.childrenOf(root.id);
       groups.push({
         value: root.id, label: root.name,
-        count: (byGroup.get(root.id) || 0) + kids.reduce((n, k) => n + (byGroup.get(k.id) || 0), 0),
+        count: sub(byGroup, root.id, kids), total: sub(allByGroup, root.id, kids),
       });
       // "부모 › 자식" rather than an indent: the label also has to work as the chip on the
       // closed dropdown, where a bare "1차" says nothing about which folder's 1차 it is.
-      for (const k of kids) groups.push({ value: k.id, label: `${root.name} › ${k.name}`, count: byGroup.get(k.id) || 0 });
+      for (const k of kids) groups.push({
+        value: k.id, label: `${root.name} › ${k.name}`,
+        count: byGroup.get(k.id) || 0, total: allByGroup.get(k.id) || 0,
+      });
     }
-    if (anyUngrouped) groups.push({ value: NO_GROUP, count: ungrouped });
+    if (allUngrouped) groups.push({ value: NO_GROUP, count: ungrouped, total: allUngrouped });
 
     // Projects by id, for the same reason groups are: a name is neither stable nor
     // guaranteed unique. New names can't collide (the store appends "(1)"), but data
@@ -305,12 +332,16 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
     // clips. By id they stay separate whatever they are called.
     const pArr = subset('project');
     const pCount = tally(pArr, r => r.projectId);
+    const pTotal = tally(allRows, r => r.projectId);
     const seenP = new Set<string>();
-    const projects: Opt[] = [{ value: ALL, count: pArr.length }];
+    const projects: Opt[] = [{ value: ALL, count: pArr.length, total: allRows.length }];
     for (const r of allRows) {
       if (seenP.has(r.projectId)) continue;
       seenP.add(r.projectId);
-      projects.push({ value: r.projectId, label: r.projectName, count: pCount.get(r.projectId) || 0 });
+      projects.push({
+        value: r.projectId, label: r.projectName,
+        count: pCount.get(r.projectId) || 0, total: pTotal.get(r.projectId) || 0,
+      });
     }
 
     return {
