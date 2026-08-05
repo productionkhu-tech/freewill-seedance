@@ -102,11 +102,48 @@ export default function App() {
   // blip / offline never wipes a valid in-session selection.
   useEffect(() => {
     if (!_hasHydrated) return;
+    // ★ Three things this loop has to survive, all measured against the real tracker
+    // on 2026-08-05: a cold Apps Script /exec takes 127s and answers 404; warm it is 2s.
+    //   1) inFlight — the 60s interval used to fire regardless of whether the previous
+    //      request was still open, so a 127s call meant overlapping requests piling onto
+    //      the very service that was already struggling.
+    //   2) AbortController — neither this fetch nor the server's had any timeout, so one
+    //      cold call blocked the list for over two minutes. The BytePlus poll has had an
+    //      8s hard timeout for exactly this reason; this path was simply missed.
+    //   3) backoff — on failure, retry in 3s → 8s → 20s instead of waiting the full 60s.
+    //      Once a fetch lands we settle back to the plain 60s cadence.
+    let inFlight = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+    const RETRY_BACKOFF_MS = [3000, 8000, 20000, 40000];
+    let cancelled = false;
+
+    const scheduleRetry = () => {
+      if (cancelled || retryTimer) return;
+      const wait = RETRY_BACKOFF_MS[Math.min(failures - 1, RETRY_BACKOFF_MS.length - 1)];
+      retryTimer = setTimeout(() => { retryTimer = null; void loadProjects(); }, wait);
+    };
+
     const loadProjects = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 30000);
       try {
-        const r = await fetch('/api/projects');
+        const r = await fetch('/api/projects', { signal: ac.signal });
         const j = await r.json();
-        if (!j || j.ok !== true || !Array.isArray(j.projects)) return; // couldn't fetch → keep state untouched
+        if (!j || j.ok !== true || !Array.isArray(j.projects)) {
+          // couldn't fetch → keep list + selection untouched, but SAY so. The persisted
+          // list from the last good run is still on screen, so this is informational.
+          useAppStore.getState().setTrackerReachable(false);
+          failures++;
+          scheduleRetry();
+          return;
+        }
+        // Landed — drop back to the plain 60s cadence and cancel any backoff still armed.
+        failures = 0;
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        useAppStore.getState().setTrackerReachable(true);
         const active = j.projects
           .filter((p: any) => p && p.status === '진행')
           // allow4k comes from Project_Status column F ("4K 허용") — an axis independent
@@ -129,9 +166,17 @@ export default function App() {
           useAppStore.getState().setBillingProject('');
           setProjectEndedNote(`선택했던 프로젝트 "${sel}"가 종료되어 해제되었습니다. 새 프로젝트를 선택해주세요.`);
         }
-      } catch { /* network/parse fail → keep current selection + list */ }
+      } catch {
+        // network / abort / parse fail → keep current selection + list, retry sooner
+        useAppStore.getState().setTrackerReachable(false);
+        failures++;
+        scheduleRetry();
+      } finally {
+        clearTimeout(t);
+        inFlight = false;
+      }
     };
-    loadProjects();
+    void loadProjects();
     const id = setInterval(loadProjects, 60000); // 60s — near real-time 종료 detection
     // Event-driven top-ups so a 4K grant/revoke feels immediate without shortening the
     // interval. Tightening the poll would triple GAS traffic AND triple the cost of the
@@ -142,6 +187,8 @@ export default function App() {
     window.addEventListener('focus', onFocus);
     window.addEventListener('seedance:refresh-projects', onFocus);
     return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
       clearInterval(id);
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('seedance:refresh-projects', onFocus);
@@ -171,7 +218,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.8.306
+        v26.8.501
       </div>
     </div>
   );

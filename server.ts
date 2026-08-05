@@ -707,15 +707,26 @@ async function startServer() {
   // POST already goes through the server). Returns { ok, projects:[{project,status,…}] }.
   // On any failure returns 200 + { ok:false, projects:[] } so the client can tell
   // "couldn't fetch" (keep current selection) from "fetched, list is empty".
+  // ★ 25s cap. There was no timeout here at all, and Apps Script does not fail fast:
+  // measured 2026-08-05, a cold /exec sat for 127 SECONDS and then answered 404 with an
+  // HTML error page (warm, the same call is 2s). Without a cap this handler held the
+  // renderer's fetch open for that whole time. Giving up early costs nothing — the cold
+  // call warms the container even when it errors, so the client's retry lands fast.
   app.get('/api/projects', async (_req, res) => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 25000);
     try {
-      const r = await fetch(`${TRACKER_URL}?action=projects`, { redirect: 'follow' });
+      const r = await fetch(`${TRACKER_URL}?action=projects`, { redirect: 'follow', signal: ac.signal });
       const text = await r.text();
       let data: any;
-      try { data = JSON.parse(text); } catch { data = { ok: false, projects: [] }; }
+      // A non-JSON body is the tracker failing, not an empty roster — keep them distinct.
+      try { data = JSON.parse(text); } catch { data = { ok: false, projects: [], error: `tracker returned ${r.status} (non-JSON)` }; }
       res.json(data);
     } catch (error: any) {
-      res.json({ ok: false, projects: [], error: error?.message || 'fetch failed' });
+      const aborted = error?.name === 'AbortError';
+      res.json({ ok: false, projects: [], error: aborted ? 'tracker timeout (25s)' : (error?.message || 'fetch failed') });
+    } finally {
+      clearTimeout(timer);
     }
   });
 

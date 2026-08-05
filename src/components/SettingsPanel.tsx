@@ -202,7 +202,7 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProject, billingProjects, setBillingProject } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProject, billingProjects, setBillingProject, trackerReachable } = useAppStore();
   const needsBillingSelection = !billingProject; // strict: no project → block generation
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
@@ -576,8 +576,18 @@ export function SettingsPanel() {
             진행→종료되면 자동 해제 후 재선택 요구. */}
         <div className={`bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection ? 'ring-2 ring-amber-400' : ''}`}>
           <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">프로젝트</label>
+          {/* ★ Empty list is not one state, it is three. Conflating them told users to go
+              ask their PM about a roster that was sitting in the sheet the whole time —
+              the tracker just hadn't answered yet. trackerReachable carries the server's
+              own ok:false all the way to the screen. */}
           {billingProjects.length === 0 ? (
-            <p className="text-[12px] text-amber-600">등록된 프로젝트가 없습니다. PM에게 문의하세요.<br />(프로젝트를 선택하기 전까지 생성할 수 없습니다)</p>
+            trackerReachable === false ? (
+              <p className="text-[12px] text-amber-600">크레딧 트래커에 연결하지 못했습니다. 자동으로 다시 시도하는 중입니다.<br />(계속되면 PM에게 알려주세요)</p>
+            ) : trackerReachable === null ? (
+              <p className="text-[12px] text-gray-500">프로젝트 목록을 불러오는 중…</p>
+            ) : (
+              <p className="text-[12px] text-amber-600">등록된 프로젝트가 없습니다. PM에게 문의하세요.<br />(프로젝트를 선택하기 전까지 생성할 수 없습니다)</p>
+            )
           ) : (
             <>
               <CustomSelect

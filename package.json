@@ -1,7 +1,7 @@
 {
   "name": "freewill-seedance",
   "private": true,
-  "version": "26.8.306",
+  "version": "26.8.501",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {

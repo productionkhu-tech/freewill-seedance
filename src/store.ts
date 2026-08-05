@@ -678,9 +678,25 @@ interface AppState {
   // allow4k mirrors the tracker sheet's Project_Status F column ("4K 허용"), refreshed
   // by the same 60s poll that carries status. Kept on this list rather than in its own
   // store field so a permission flip costs zero extra writes/renders.
+  // ★ The LIST is persisted; the SELECTION above is not. That split is the whole point.
+  // This list changes maybe once a week, but it used to be thrown away on every restart,
+  // so a cold launch had exactly one way to fill it: a live GAS call. Measured 2026-08-05:
+  // a cold Apps Script /exec takes 127s and then returns 404 (warm: 2s). For those minutes
+  // the app showed "등록된 프로젝트가 없습니다. PM에게 문의하세요" and no work was possible.
+  // Persisting the last known-good list makes a slow tracker invisible — the dropdown is
+  // there instantly and the 60s poll corrects it in the background.
+  // Persisting the SELECTION would be a different matter and is still forbidden: see the
+  // hydration-clamp rule (isFourKAllowed returns false whenever billingProject is empty,
+  // which is exactly what keeps a stored '4k' setting from being wiped at boot).
   billingProjects: { project: string; status: string; allow4k?: boolean }[];
+  // Did the last tracker fetch actually land? null = 아직 모름 (boot). The server already
+  // distinguishes "couldn't fetch" (ok:false) from "fetched, list is empty" (ok:true, []),
+  // and App.tsx already acts on it — but the UI had no way to see it, so a dead tracker
+  // was reported to the user as "your PM never registered you". Transient, never persisted.
+  trackerReachable: boolean | null;
   setBillingProject: (p: string) => void;
   setBillingProjects: (list: { project: string; status: string; allow4k?: boolean }[]) => void;
+  setTrackerReachable: (v: boolean) => void;
   // Transient (NOT persisted): # of images from elements currently @mentioned in
   // the active prompt. ChatArea writes it; SettingsPanel reads it to show the
   // shared "panel + element" image budget in the Reference Assets hint.
@@ -885,8 +901,10 @@ export const useAppStore = create<AppState>()(
       setAutoDownload: (v) => set({ autoDownload: v }),
       billingProject: '',
       billingProjects: [],
+      trackerReachable: null,
       setBillingProject: (p) => set({ billingProject: p }),
       setBillingProjects: (list) => set({ billingProjects: list }),
+      setTrackerReachable: (v) => set((s) => (s.trackerReachable === v ? s : { trackerReachable: v })),
       mentionedElementImages: 0,
       setMentionedElementImages: (n) => set({ mentionedElementImages: n }),
       // ─── Element library state + actions ───
@@ -1533,6 +1551,10 @@ export const useAppStore = create<AppState>()(
         assetCollections: state.assetCollections,
         projectGroups: state.projectGroups,
         projectCollectionId: state.projectCollectionId,
+        // Last known-good tracker list. Tiny (17 rows) next to `projects`, and it is what
+        // lets a launch survive a cold/slow/dead Apps Script. NOT billingProject — the
+        // selection stays session-only on purpose (see the field's comment).
+        billingProjects: state.billingProjects,
       }),
       onRehydrateStorage: () => {
         return () => {
