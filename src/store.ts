@@ -566,6 +566,26 @@ function canNest(groups: ProjectGroup[], id: string, parentId: string | undefine
 // An existing " (N)" is stripped before searching, or renaming 광고(1) next to a 광고 would
 // grow "광고 (1) (1)" and then "광고 (1) (1) (1)". A deliberate "시즌 (2)" that happens to
 // be free is returned untouched — the strip only happens on an actual collision.
+// ── Auto-numbering: the number comes from what is FREE, never from how many exist ──
+// "Project N" / "그룹 N" used to be built from `list.length + 1`, which is a COUNT, and a
+// count answers the wrong question. Three ways that broke, all reproduced 2026-08-06:
+//   · rename "Project 21" → the number 21 is free again, but the count is still 21, so the
+//     next new project came out "Project 22" and 21 was never reused.
+//   · delete "Project 5" → count drops to 20, so the next one aimed at "Project 21" — which
+//     still exists — and uniqueName papered over the collision as "Project 21 (1)".
+//   · 20 of 21 projects inside folders → the top level shows ONE item and offered
+//     "Project 22", because the count is global while uniqueness is per-container.
+// Windows Explorer fills the gap: rename "새 폴더 (2)" and the next one is "새 폴더 (2)"
+// again. §6 already claims that rule for name collisions; this makes the numbering obey it
+// too, and it reads from the SAME container list the collision check uses, so the two can
+// no longer disagree.
+function nextNumberedName(base: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  let n = 1;
+  while (used.has(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+
 function uniqueName(desired: string, taken: Iterable<string>): string {
   const used = new Set(taken);
   if (!used.has(desired)) return desired;
@@ -960,9 +980,8 @@ export const useAppStore = create<AppState>()(
         const existing = namesInContainer(get().projectGroups, get().projects, undefined);
         const newProject: Project = {
           id: uuidv4(),
-          // The counter is a position, not an identity: delete one project and the next
-          // "Project N" collides with one that is still sitting in the list.
-          name: uniqueName(`Project ${get().projects.length + 1}`, existing),
+          // Lowest free number in THIS container — see nextNumberedName.
+          name: nextNumberedName('Project', existing),
           messages: [],
           settings: { ...defaultSettings },
           assets: [],
@@ -1028,10 +1047,14 @@ export const useAppStore = create<AppState>()(
         // failing: the user asked for a folder and gets one.
         const parent = parentId ? get().projectGroups.find(g => g.id === parentId) : undefined;
         const under = parent && !parent.parentId ? parent.id : undefined;
-        const wanted = name || `그룹 ${get().projectGroups.length + 1}`;
+        // Siblings of the folder we are about to create — the one list it must be
+        // distinguishable in, and the same list its number is drawn from.
+        const siblings = namesInContainer(get().projectGroups, get().projects, under);
         const g: ProjectGroup = {
           id: uuidv4(),
-          name: uniqueName(wanted, namesInContainer(get().projectGroups, get().projects, under)),
+          // A caller-supplied name still goes through uniqueName (it can collide with
+          // anything); only the auto-generated "그룹 N" picks the lowest free number.
+          name: name ? uniqueName(name, siblings) : nextNumberedName('그룹', siblings),
           parentId: under,
         };
         set((state) => ({
