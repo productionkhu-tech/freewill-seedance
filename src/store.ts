@@ -806,6 +806,15 @@ export const MODELS: {
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini' },
+  // Seedance 2.5 정식 (2026-08-07 출시). 일반 레인: 팀 키 그대로, 트래커 보고됨, 전원 표시.
+  // 활성화는 무과금 프로브로 확인 (model 통과 후 content MissingParameter 응답).
+  // 캡은 데모 레인에서 실측한 값을 그대로 — 같은 모델이다. 480p/720p만인 것은 데모 실측과
+  // 공식 단가표(해상도 티어 없음, video-in $0.0064 / non $0.0107) 양쪽이 일치.
+  // 1080p 청구항목이 나중에 생기면 그때 res 를 넓힌다.
+  { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5',
+    res: ['480p', '720p'], dur: [4, 30],
+    imgMax: 30, vidMax: 10, audMax: 10,
+    refVideoSec: 30.2, refAudioSec: 30.2 },
   { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini' },
   // Seedance 2.5 (BytePlus demo endpoint — separate key, see server.ts). Every number
   // here was measured against the live API 2026-07-29, not taken from the datasheet:
