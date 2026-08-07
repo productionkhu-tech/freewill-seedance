@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, isDemoModel } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, isDemoModel } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -252,6 +252,10 @@ export function SettingsPanel() {
   const vidMax = modelVideoMax(settings.model);                  // 2.0: 3 (unchanged)
   const audMax = modelAudioMax(settings.model);                  // 2.0: 3 (unchanged)
   const refVidSec = modelRefVideoSec(settings.model);            // 2.0: 15.2 (unchanged)
+  const refAudSec = modelRefAudioSec(settings.model);            // 2.0: 15.2 · 2.5: 30.2
+  // The cap to enforce for a given asset type — video and audio have separate per-model
+  // limits, so passing one for both (what totalDurationError used to get) is wrong.
+  const refSecFor = (t: string) => (t === 'audio_url' ? refAudSec : refVidSec);
   // 2.5 makes editing/extension inherit framing from the source clip, so `adaptive` is the
   // only value it accepts — anything else comes back as "identified your task as …".
   // 2.0 doesn't re-classify and happily takes a fixed ratio, so this is 2.5-only.
@@ -440,7 +444,7 @@ export function SettingsPanel() {
               const okFmt = /\.(mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv)$/i.test(file.name) || /^video\//i.test(file.type);
               vErr = sizeMB > 50 ? `비디오 크기 초과: ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)` : !okFmt ? '지원하지 않는 형식 (mp4·mov·webm·mpeg·wmv·3gpp·flv)' : null;
             } else {
-              vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file);
+              vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file, refAudSec);
             }
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
             // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s
@@ -449,7 +453,7 @@ export function SettingsPanel() {
             const durationSec = await getMediaDurationSec(file, type === 'video_url' ? 'video' : 'audio');
             if (!isOmni) {
               const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
-              const totErr = totalDurationError(freshAssets, type, durationSec, refVidSec);
+              const totErr = totalDurationError(freshAssets, type, durationSec, refSecFor(type));
               if (totErr) { rejected.push(`${file.name}: ${totErr}`); continue; }
             }
             const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
@@ -493,12 +497,12 @@ export function SettingsPanel() {
         updates.url = '';
         updates.cacheId = await cacheFile(file);
       } else {
-        const vErr = existing.type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file);
+        const vErr = existing.type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file, refAudSec);
         if (vErr) { alert(vErr); return; }
         // Combined 15s cap — the asset being swapped out doesn't count
         const durationSec = await getMediaDurationSec(file, existing.type === 'video_url' ? 'video' : 'audio');
         const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
-        const totErr = totalDurationError(freshAssets.filter(a => a.id !== existing.id), existing.type, durationSec, refVidSec);
+        const totErr = totalDurationError(freshAssets.filter(a => a.id !== existing.id), existing.type, durationSec, refSecFor(existing.type));
         if (totErr) { alert(totErr); return; }
         updates.durationSec = durationSec ?? undefined;
         if (existing.type === 'video_url') {
@@ -851,7 +855,10 @@ export function SettingsPanel() {
                           </>
                         );
                       })()}
-                      {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/png,image/jpeg,image/webp,image/heic,image/heif', true, (assets.filter(a => a.type === 'image_url').length + mentionedElementImages) >= 10)}
+                      {/* imgMax, not a literal: the send-time cap is modelImageMax (2.0 → 9,
+                          2.5 → 30). Hardcoding 10 both let 2.0 build a 10th image the send
+                          then refused, and locked 2.5 out of 20 of its allowed 30. */}
+                      {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/png,image/jpeg,image/webp,image/heic,image/heif', true, (assets.filter(a => a.type === 'image_url').length + mentionedElementImages) >= imgMax)}
                       {(() => {
                         const existingVideo = assets.find(a => a.type === 'video_url');
                         return existingVideo
@@ -901,12 +908,14 @@ export function SettingsPanel() {
                     <div className="flex items-baseline gap-2">
                       <span className="w-10 shrink-0 font-semibold text-gray-600">오디오</span>
                       <span className={`w-8 shrink-0 tabular-nums ${assets.filter(a => a.type === 'audio_url').length > audMax ? 'text-red-500' : 'text-gray-700'}`}>{assets.filter(a => a.type === 'audio_url').length}/{audMax}</span>
-                      <span className="text-gray-400 whitespace-nowrap">개당 15MB · 2~15초</span>
+                      <span className="text-gray-400 whitespace-nowrap">개당 15MB · 2~{Math.floor(refAudSec)}초</span>
                     </div>
                   </div>
+                  {/* Counts are per-model (2.5 allows 10 videos / 10 audio, 2.0 allows 3).
+                      These were hardcoded 3, which locked 2.5 out of its own allowance. */}
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= imgMax)}
-                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= 3)}
-                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', true, assets.filter(a => a.type === 'audio_url').length >= 3)}
+                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= vidMax)}
+                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', true, assets.filter(a => a.type === 'audio_url').length >= audMax)}
                 </div>
               )}
 
@@ -919,7 +928,7 @@ export function SettingsPanel() {
                       ? renderReplaceButton('비디오 교체', existingVideo, 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm')
                       : renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', false, false);
                   })()}
-                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= 3)}
+                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= audMax)}
                 </div>
               )}
 
@@ -967,7 +976,7 @@ export function SettingsPanel() {
                     <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">{`비디오: MP4/MOV, 480p~4k, 2~${Math.floor(refVidSec)}초, 200MB 이하, 24~60fps`}</p>
                   )}
                   {assetIdType === 'audio_url' && (
-                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">오디오: WAV/MP3, 2~15초, 15MB 이하</p>
+                    <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">{`오디오: WAV/MP3, 2~${Math.floor(refAudSec)}초, 15MB 이하`}</p>
                   )}
                   <button onClick={handleAddAssetId} disabled={!assetIdInput.trim()} className="w-full py-1.5 bg-[#0071e3] text-white text-[12px] font-medium rounded-[8px] disabled:opacity-50 transition-colors hover:bg-[#0077ed] active:scale-95">
                     추가

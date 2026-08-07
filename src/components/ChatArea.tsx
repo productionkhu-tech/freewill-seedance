@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, MODELS, modelProvider } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, MODELS, modelProvider } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -1131,11 +1131,12 @@ export function ChatArea() {
           const audCount = assets.filter(a => a.type === 'audio_url').length;
           const maxAud = modelAudioMax(project.settings.model);
           if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
-          const audErr = await validateAudioFile(file);
+          const audErr = await validateAudioFile(file, modelRefAudioSec(project.settings.model));
           if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
           const audDuration = await getMediaDurationSec(file, 'audio');
-          // Combined cap: all reference audio in one request ≤ 15s total
-          const audTotErr = totalDurationError(assets, 'audio_url', audDuration);
+          // Combined cap: all reference audio in one request ≤ the model's limit
+          // (2.0 15.2s / 2.5 30.2s). Was defaulting to 15 for every model.
+          const audTotErr = totalDurationError(assets, 'audio_url', audDuration, modelRefAudioSec(project.settings.model));
           if (audTotErr) { rejected.push(`${file.name}: ${audTotErr}`); continue; }
           try {
             const originalPath = getFilePath(file);
@@ -1751,7 +1752,13 @@ export function ChatArea() {
     // Re-check combined reference durations at send time — assets can arrive
     // via reuse/restore without passing through the attach-time check.
     for (const refType of ['video_url', 'audio_url'] as const) {
-      const totErr = totalDurationError(project.assets, refType, null, modelRefVideoSec(project.settings.model));
+      // Each type has its OWN per-model cap. Passing the video one for both meant a 2.5
+      // project summed its audio against the video limit — same number by luck on 2.5,
+      // but wrong on 2.0 the moment the two ever differ.
+      const cap = refType === 'audio_url'
+        ? modelRefAudioSec(project.settings.model)
+        : modelRefVideoSec(project.settings.model);
+      const totErr = totalDurationError(project.assets, refType, null, cap);
       if (totErr) { warn(totErr); return; }
     }
 

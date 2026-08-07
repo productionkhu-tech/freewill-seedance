@@ -141,7 +141,17 @@ export const API_LIMITS = {
     // which wrongly rejected valid 1080p+/4k reference videos. Size cap 200MB (was 50).
     minTotalPx: 409600, maxTotalPx: 8295044,
   },
-  audio: { maxSizeMB: 15, minDuration: 2, maxDuration: 15, maxTotalDuration: 15 },
+  // ★ Audio behaves EXACTLY like video: the real cap is 15.2s, not 15, both per-clip and
+  // summed — and it is per-model. Measured 2026-08-07 by submitting an over-length clip,
+  // which BytePlus rejects at task-create time (HTTP 400, no task, no charge) and states
+  // the number verbatim:
+  //   2.0: "audio duration (seconds) ... must be less than or equal to 15.2"
+  //        "audio total duration (seconds) ... must be less than or equal to 15.2"
+  //   2.5: the same two messages, with 30.2.
+  // We had 15 hardcoded here and NOT model-aware, so 2.5 lost half its allowance and 2.0
+  // lost the same 0.2s margin the video path already reclaimed. Per-model cap now comes
+  // from modelRefAudioSec(); this stays the default for models that don't override.
+  audio: { maxSizeMB: 15, minDuration: 2, maxDuration: 15.2, maxTotalDuration: 15.2, displayMaxDuration: 15 },
   totalRequestMB: 64,
 };
 
@@ -237,7 +247,9 @@ export function validateVideoFile(file: File, maxSec?: number): Promise<string |
 }
 
 // Validate audio file (size + duration)
-export function validateAudioFile(file: File): Promise<string | null> {
+// maxSec: per-model reference-audio cap. Omitted → the API_LIMITS default (15.2), so
+// callers that don't pass it behave exactly as before.
+export function validateAudioFile(file: File, maxSec?: number): Promise<string | null> {
   return new Promise((resolve) => {
     const sizeMB = file.size / (1024 * 1024);
     if (sizeMB > API_LIMITS.audio.maxSizeMB) { resolve(`오디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${API_LIMITS.audio.maxSizeMB}MB)`); return; }
@@ -251,8 +263,11 @@ export function validateAudioFile(file: File): Promise<string | null> {
     audio.onloadedmetadata = () => {
       URL.revokeObjectURL(audio.src);
       const d = audio.duration;
+      const aMax = maxSec ?? API_LIMITS.audio.maxDuration;
       if (d < API_LIMITS.audio.minDuration) resolve(`오디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.audio.minDuration}초)`);
-      else if (d > API_LIMITS.audio.maxDuration) resolve(`오디오 너무 김: ${d.toFixed(1)}초 (최대 ${API_LIMITS.audio.maxDuration}초)`);
+      // Quote the round number, enforce the real one (15.2 → "15", 30.2 → "30") — same
+      // silent-tolerance rule as video, so the UI never has to explain the 0.2.
+      else if (d > aMax) resolve(`오디오 너무 김: ${d.toFixed(1)}초 (최대 ${Math.floor(aMax)}초)`);
       else resolve(null);
     };
     audio.onerror = () => { URL.revokeObjectURL(audio.src); resolve(null); };
@@ -284,12 +299,15 @@ export function totalDurationError(
   existing: { type: string; durationSec?: number }[],
   type: 'video_url' | 'audio_url',
   addingSec: number | null,
-  maxSec?: number,   // per-model video cap; omitted → original API_LIMITS behaviour
+  maxSec?: number,   // per-model cap for THIS type; omitted → original API_LIMITS behaviour
 ): string | null {
   const isVideo = type === 'video_url';
-  const limit = isVideo ? (maxSec ?? API_LIMITS.video.maxTotalDuration) : API_LIMITS.audio.maxTotalDuration;
-  // Enforce the real cap, quote the round one (video: 15.2 enforced / 15 shown).
-  const shown = isVideo ? Math.floor(limit) : API_LIMITS.audio.maxTotalDuration;
+  // ★ maxSec applies to audio too. It used to be video-only, so a 2.5 project — which the
+  // API allows 30.2s of audio — was still summed against 15. Callers must pass the cap
+  // for the type they are checking (modelRefVideoSec / modelRefAudioSec), not one for both.
+  const limit = maxSec ?? (isVideo ? API_LIMITS.video.maxTotalDuration : API_LIMITS.audio.maxTotalDuration);
+  // Enforce the real cap, quote the round one (15.2 enforced / 15 shown; 30.2 / 30).
+  const shown = Math.floor(limit);
   const total = existing
     .filter(a => a.type === type && typeof a.durationSec === 'number')
     .reduce((sum, a) => sum + (a.durationSec as number), 0) + (addingSec ?? 0);

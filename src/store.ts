@@ -796,11 +796,12 @@ export const defaultSettings: GenerationSettings = {
 //   vidMax      reference-video cap            (default: 3)
 //   audMax      reference-audio cap            (default: 3)
 //   refVideoSec max single reference-video sec (default: 15.2)
+//   refAudioSec max single reference-audio sec (default: 15.2)
 //   demo        routed to a separate key/endpoint server-side, never billed to the sheet
 export const MODELS: {
   id: string; name: string; provider?: 'byteplus' | 'gemini';
   res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
-  refVideoSec?: number; demo?: boolean;
+  refVideoSec?: number; refAudioSec?: number; demo?: boolean;
 }[] = [
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
@@ -818,7 +819,9 @@ export const MODELS: {
   { id: 'seedance-2-5-demo', name: 'Seedance 2.5 Demo',
     res: ['480p', '720p'], dur: [4, 30],
     imgMax: 30, vidMax: 10, audMax: 10,   // measured: 30/10/10 = the advertised "50 assets"
-    refVideoSec: 30.2, demo: true },
+    // Both 30.2, per-clip AND summed — stated verbatim by the API (measured 2026-08-07).
+    // Audio was capped at 15 app-wide before that, so 2.5 was losing half its allowance.
+    refVideoSec: 30.2, refAudioSec: 30.2, demo: true },
 ];
 
 // Capability lookups. Each returns the model's override when present, otherwise the
@@ -839,6 +842,9 @@ export function modelAudioMax(model: string): number {
 }
 export function modelRefVideoSec(model: string): number {
   return MODELS.find(m => m.id === model)?.refVideoSec ?? API_LIMITS.video.maxDuration;
+}
+export function modelRefAudioSec(model: string): number {
+  return MODELS.find(m => m.id === model)?.refAudioSec ?? API_LIMITS.audio.maxDuration;
 }
 // Demo models are billed against a separate BytePlus key and are deliberately NOT
 // reported to the credit tracker; the server decides both, this just tells the UI.
