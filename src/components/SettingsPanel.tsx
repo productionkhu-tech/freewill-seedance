@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, isDemoModel } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, isDemoModel } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -256,23 +256,56 @@ export function SettingsPanel() {
   // The cap to enforce for a given asset type — video and audio have separate per-model
   // limits, so passing one for both (what totalDurationError used to get) is wrong.
   const refSecFor = (t: string) => (t === 'audio_url' ? refAudSec : refVidSec);
-  // 2.5 makes editing/extension inherit framing from the source clip, so `adaptive` is the
-  // only value it accepts — anything else comes back as "identified your task as …".
-  // 2.0 doesn't re-classify and happily takes a fixed ratio, so this is 2.5-only.
+  // 2.5 makes editing / extension / frame-driven generation inherit framing from the source,
+  // so `adaptive` is the only ratio it accepts — and editing additionally pins duration to
+  // -1 (output matches the source clip). Which modes those are is declared on the model,
+  // not spelled out here, so the panel and the send path can never disagree.
   // (multimodal_reference can ALSO get re-classified by prompt wording, but that we can't
   // predict from the mode — translateError handles that case instead.)
-  const ratioLockedToSource = isDemoModel(settings.model) &&
-    (settings.mode === 'edit_video' || settings.mode === 'extend_video');
-  useEffect(() => {
-    if (ratioLockedToSource && settings.ratio !== 'adaptive') {
-      updateProjectSettings(project.id, { ratio: 'adaptive' });
-    }
-  }, [ratioLockedToSource, settings.ratio, project.id]);
+  const ratioLockedToSource = ratioLockedFor(settings.model, settings.mode);
+  const durationLockedToSource = durationLockedFor(settings.model, settings.mode);
+  // ★ These are DISPLAY flags. They must never write to the project.
+  // A constraint is a function of (model, mode) — it is not a property of the project, so
+  // burning it into stored settings is destructive: pick Edit Video (duration pinned to -1),
+  // switch to Extend Video (which pins only the ratio), and the -1 is still sitting there
+  // with nothing to put the user's own duration back. It reads as "Extend forces Auto",
+  // and it is really "Edit overwrote your setting and nobody restored it". The same trap
+  // was already learned for the 4k clamp — §5-2's rule that the permission watcher never
+  // calls updateProjectSettings and the downgrade happens at send time only.
+  // So: the panel shows the effective value, the stored value is left alone, and
+  // handleSend applies applyTaskConstraints() to the PAYLOAD. Leave the mode, get your
+  // ratio and duration back exactly as you set them.
   // Two very different situations, and calling both "권한 해제" would be wrong. On a fresh
   // launch billingProject is always empty (session-only), so a saved 4k setting lands here
   // every single restart — telling the user their access was revoked would be alarming and
   // false. Picking their project restores 4k immediately.
   const fourKBlockedReason = !billingProject ? 'no-project' : 'no-permission';
+  // Model-level grant (2.5). Derived every render like allow4k, so a sheet flip lands as
+  // soon as the 60s poll updates billingProjects — no second copy of the truth to sync.
+  const modelAllowed = isModelAllowed(settings.model, { billingProject, billingProjects });
+  const modelLabel = MODELS.find(m => m.id === settings.model)?.name || '이 모델';
+  // Models you can actually pick. A model this project isn't granted is FILTERED OUT, the
+  // same treatment 4k gets in allowedResolutions() — a tier you don't have shouldn't be
+  // selectable and then refused. Derived every render, so a sheet flip lands with the 60s poll.
+  // ★ "No project picked yet" is NOT the same answer as "denied", and the list must not
+  // conflate them. billingProject is session-only, so it is empty on EVERY fresh launch —
+  // filtering on it would mean the app opens claiming 2.5 doesn't exist, before it has any
+  // idea whether you have it. Nothing can be sent without a project anyway (handleSend
+  // stops there first), so showing the full list while the answer is unknown gives nothing
+  // away and costs nothing. Pick a project and the real answer applies immediately.
+  // The stored settings.model is deliberately never rewritten to match either — that would
+  // knock every saved 2.5 project down to 2.0 on restart. The placeholder below covers the
+  // gap instead; the send gate (client + server) is what actually enforces this.
+  const selectableModels = MODELS.filter(m =>
+    (!m.demo || demo25) &&
+    (!billingProject || isModelAllowed(m.id, { billingProject, billingProjects })));
+  // Shown when the stored model isn't in the list above, so the control reads as "not
+  // available to you" instead of silently displaying the first option as if it were picked.
+  const modelPlaceholder = selectableModels.some(m => m.id === settings.model)
+    ? undefined
+    : MODELS.find(m => m.id === settings.model)?.demo && !demo25
+      ? 'Seedance 2.5 Demo (키 없음)'
+      : `${modelLabel} (권한 없음)`;
   // Single store write on slider release (no-op if nothing is in flight).
   const commitDuration = () => { if (draftDuration != null) { updateProjectSettings(project.id, { duration: draftDuration }); setDraftDuration(null); } };
   const commitOutput = () => { if (draftOutput != null) { updateProjectSettings(project.id, { output_count: draftOutput }); setDraftOutput(null); } };
@@ -321,13 +354,21 @@ export function SettingsPanel() {
   }, [availableTypes, assetIdType]);
 
   const handleModeChange = (newMode: GenerationMode) => {
-    updateProjectSettings(project.id, { mode: newMode });
+    if (newMode === settings.mode) return;
+    // Each mode starts from THIS model's defaults, not from whatever the previous mode
+    // left behind. Modes differ in what they even accept (2.5 editing pins ratio+duration,
+    // extension pins only ratio), so carrying values across is how a setting from one mode
+    // shows up looking like a bug in another. Assets go too — the modes take different
+    // reference kinds, and a leftover clip either blocks the new upload or gets sent as
+    // the wrong role.
+    updateProjectSettings(project.id, {
+      mode: newMode,
+      ...settingsDefaultsFor(settings.model, newMode),
+      // Disable return_last_frame if not applicable for the new mode
+      ...(RETURN_LAST_FRAME_MODES.includes(newMode) ? {} : { return_last_frame: false }),
+    });
     assets.forEach(a => removeAsset(project.id, a.id));
     setAssetIdType('image_url');
-    // Disable return_last_frame if not applicable for the new mode
-    if (!RETURN_LAST_FRAME_MODES.includes(newMode)) {
-      updateProjectSettings(project.id, { return_last_frame: false });
-    }
   };
 
   // Omni task switch — mirror handleModeChange: each task expects different assets
@@ -649,12 +690,44 @@ export function SettingsPanel() {
                   assets.forEach(a => removeAsset(project.id, a.id));
                   setAssetIdType('image_url');
                 }
+                // Stepping DOWN in reference capacity is the quiet one. Element mentions live
+                // in the prompt, not the panel, so nothing here can see or clear them — a 2.5
+                // prompt with 14 mentioned images stays intact when you pick 2.0 (cap 9) and
+                // only fails when the user finally hits send. Say it now, and say the number.
+                // Warn only — never delete: those references are the user's work, and which
+                // ones to drop is their call.
+                {
+                  const imgs = assets.filter(a => a.type === 'image_url').length + mentionedElementImages;
+                  const vids = assets.filter(a => a.type === 'video_url').length;
+                  const auds = assets.filter(a => a.type === 'audio_url').length;
+                  const over: string[] = [];
+                  if (imgs > modelImageMax(val)) over.push(`이미지 ${imgs}장 (최대 ${modelImageMax(val)})`);
+                  if (vids > modelVideoMax(val)) over.push(`비디오 ${vids}개 (최대 ${modelVideoMax(val)})`);
+                  if (auds > modelAudioMax(val)) over.push(`오디오 ${auds}개 (최대 ${modelAudioMax(val)})`);
+                  if (over.length) {
+                    window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { ok: false,
+                      msg: `${MODELS.find(m => m.id === val)?.name} 한도를 넘습니다 — ${over.join(' · ')}. 줄여야 전송됩니다.` } }));
+                  }
+                }
                 updateProjectSettings(project.id, patch);
               }}
-              options={MODELS.filter(m => !m.demo || demo25)}
-              placeholder={MODELS.find(m => m.id === settings.model)?.demo && !demo25 ? 'Seedance 2.5 Demo (키 없음)' : undefined}
+              options={selectableModels}
+              placeholder={modelPlaceholder}
             />
           </div>
+
+          {/* Model permission (tracker sheet column G → allow25). Mirrors the 4k chip:
+              never rewrites the stored model, distinguishes "no project picked yet" from
+              "this project isn't granted", and refreshes the grant when the user reaches
+              for the control. On a fresh launch billingProject is always empty, so without
+              that distinction every restart would read as "your access was revoked". */}
+          {!modelAllowed && (
+            <p className="text-[11px] text-amber-600 leading-snug -mt-1">
+              {!billingProject
+                ? `프로젝트를 선택하면 ${modelLabel} 사용 가능 여부가 확인됩니다.`
+                : `이 프로젝트는 ${modelLabel} 권한이 없습니다`}
+            </p>
+          )}
 
           <div className="space-y-2">
             <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">{isOmni ? 'Video task' : 'Generation Mode'}</label>
@@ -699,7 +772,15 @@ export function SettingsPanel() {
             </p>
           )}
 
-          {isOmni ? (
+          {durationLockedToSource ? (
+            /* Seedance 2.5 editing: duration must be -1, the output matches the source clip.
+               Display only — the project's own duration is untouched and comes back the
+               moment the mode changes. */
+            <div className="space-y-2">
+              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
+              <div className="text-[12px] text-gray-400 px-1">원본 영상 길이 그대로 (편집은 길이 지정 불가)</div>
+            </div>
+          ) : isOmni ? (
             settings.omniTask === 'edit' ? (
               <div className="space-y-2">
                 <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
@@ -844,7 +925,7 @@ export function SettingsPanel() {
                           <>
                             <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">
                               <span className="w-10 shrink-0 font-semibold text-gray-600">이미지</span>
-                              <span className={`w-12 shrink-0 tabular-nums ${imgCount > 10 ? 'text-red-500' : imgCount === 10 ? 'text-amber-600' : 'text-gray-700'}`}>{imgCount}/10</span>
+                              <span className={`w-12 shrink-0 tabular-nums ${imgCount > imgMax ? 'text-red-500' : imgCount === imgMax ? 'text-amber-600' : 'text-gray-700'}`}>{imgCount}/{imgMax}</span>
                               <span className="text-gray-400 min-w-0 break-keep">png·jpeg·webp·heic·heif · 멘션 합산</span>
                             </div>
                             <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">

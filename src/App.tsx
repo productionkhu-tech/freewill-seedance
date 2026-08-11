@@ -146,20 +146,23 @@ export default function App() {
         useAppStore.getState().setTrackerReachable(true);
         const active = j.projects
           .filter((p: any) => p && p.status === '진행')
-          // allow4k comes from Project_Status column F ("4K 허용") — an axis independent
-          // of 진행/종료, so a project can be active without 4k. Strict === true keeps it
-          // fail-closed for older trackers that don't send the field at all.
-          .map((p: any) => ({ project: String(p.project), status: String(p.status), allow4k: p.allow4k === true }));
+          // allow4k comes from Project_Status column F ("4K 허용"), allow25 from column G
+          // ("2.5 허용") — both axes independent of 진행/종료, so a project can be active
+          // with neither. Strict === true keeps them fail-closed for older trackers that
+          // don't send the fields at all.
+          .map((p: any) => ({ project: String(p.project), status: String(p.status), allow4k: p.allow4k === true, allow25: p.allow25 === true }));
         // Skip the store write (re-renders subscribers + re-serializes the persisted
         // blob) when the active list is unchanged — this runs every 60s.
-        // ★ allow4k MUST be in this comparison. Without it a pure permission flip leaves
-        // the list "unchanged", the write is skipped, and the grant/revoke never reaches
-        // the UI — the feature would silently never work.
+        // ★ EVERY permission flag MUST be in this comparison. Without it a pure permission
+        // flip leaves the list "unchanged", the write is skipped, and the grant/revoke never
+        // reaches the UI — the feature would silently never work. That is the whole bug this
+        // guard exists for, so any new flag added to the map above belongs here too.
         const prev = useAppStore.getState().billingProjects;
         const changed = prev.length !== active.length ||
           active.some((p: any, i: number) => p.project !== prev[i]?.project
             || p.status !== prev[i]?.status
-            || p.allow4k !== prev[i]?.allow4k);
+            || p.allow4k !== prev[i]?.allow4k
+            || p.allow25 !== prev[i]?.allow25);
         if (changed) useAppStore.getState().setBillingProjects(active);
         const sel = useAppStore.getState().billingProject;
         if (sel && !active.some((p: any) => p.project === sel)) {
@@ -218,7 +221,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.8.701
+        v26.8.1101
       </div>
     </div>
   );

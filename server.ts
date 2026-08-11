@@ -12,6 +12,9 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+// Shared with the client store — see src/lib/model-access.ts for why these two facts
+// live outside both files.
+import { DEMO_MODEL_ID, MODEL_GRANTS } from './src/lib/model-access';
 
 dotenv.config();
 
@@ -29,7 +32,8 @@ const API_KEY = process.env.SEEDANCE_API_KEY;
 const DEMO25_KEY = process.env.SEEDANCE_25_DEMO_KEY;
 const DEMO25_ENDPOINT = process.env.SEEDANCE_25_DEMO_ENDPOINT;
 const DEMO25_AVAILABLE = !!(DEMO25_KEY && DEMO25_ENDPOINT);
-const DEMO_MODEL_ID = 'seedance-2-5-demo';   // must match MODELS[] in src/store.ts
+// DEMO_MODEL_ID / MODEL_GRANTS are imported above — they were hand-synced with a comment
+// until 26.8.1101, which is fine for a label and not fine for a permission.
 console.log(`[2.5 Demo] ${DEMO25_AVAILABLE ? 'enabled' : 'disabled (env not set)'}`);
 const R2_ENDPOINT = process.env.R2_ENDPOINT;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
@@ -712,6 +716,36 @@ async function startServer() {
   // HTML error page (warm, the same call is 2s). Without a cap this handler held the
   // renderer's fetch open for that whole time. Giving up early costs nothing — the cold
   // call warms the container even when it errors, so the client's retry lands fast.
+  // ── Model grant, server side ────────────────────────────────────────────────
+  // The client already blocks an ungranted model before it sends, and that block is what
+  // the user actually sees. This is the copy that decides, because everything the client
+  // bases its answer on survives on disk and can be edited there: the roster is persisted
+  // in IndexedDB and settings.model is stored per project. A permission enforced only in
+  // the UI is a convention, and this one decides who spends 2.5 credit.
+  // The roster is shared with the 60s /api/projects poll rather than fetched per send —
+  // a GAS round-trip on the send path would put the tracker's cold-start latency (measured
+  // at 127s) in front of every generation.
+  let rosterAt = 0;
+  let rosterRows: any[] | null = null;
+  const ROSTER_TTL_MS = 30000;   // the client polls every 60s, so this adds no visible lag
+  const rememberRoster = (rows: any[]) => { rosterRows = rows; rosterAt = Date.now(); };
+
+  async function getRoster(): Promise<any[] | null> {
+    if (rosterRows && Date.now() - rosterAt < ROSTER_TTL_MS) return rosterRows;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15000);
+    try {
+      const r = await fetch(`${TRACKER_URL}?action=projects`, { redirect: 'follow', signal: ac.signal });
+      const data: any = JSON.parse(await r.text());
+      if (data?.ok === true && Array.isArray(data.projects)) rememberRoster(data.projects);
+    } catch { /* fall through to whatever we already hold */ } finally { clearTimeout(timer); }
+    // A tracker hiccup keeps honouring the last good roster — locking everyone out of a
+    // model they were granted because Apps Script blinked would be worse than a stale
+    // answer that self-corrects within 30s. Only a cold start with no roster at all is
+    // fail-closed, and that is a 503 the user can retry, not a denial.
+    return rosterRows;
+  }
+
   app.get('/api/projects', async (_req, res) => {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 25000);
@@ -721,6 +755,7 @@ async function startServer() {
       let data: any;
       // A non-JSON body is the tracker failing, not an empty roster — keep them distinct.
       try { data = JSON.parse(text); } catch { data = { ok: false, projects: [], error: `tracker returned ${r.status} (non-JSON)` }; }
+      if (data?.ok === true && Array.isArray(data.projects)) rememberRoster(data.projects);
       res.json(data);
     } catch (error: any) {
       const aborted = error?.name === 'AbortError';
@@ -891,6 +926,23 @@ async function startServer() {
               : '.env 에 SEEDANCE_25_DEMO_KEY / SEEDANCE_25_DEMO_ENDPOINT 를 추가한 뒤 다시 실행해주세요.') } });
       }
       byteplusBody.model = DEMO25_ENDPOINT;   // logical id → real endpoint (server-only)
+    }
+
+    // Gated models (2.5) must be granted to the SELECTED billing project. Checked here,
+    // against the tracker, so no amount of switching app projects / models / stored state
+    // gets a request through. Demo is exempt by construction: its own key, its own
+    // endpoint, never billed to a project.
+    const grant = MODEL_GRANTS[byteplusBody.model as string];
+    if (grant && !isDemo) {
+      const roster = await getRoster();
+      if (!roster) {
+        return res.status(503).json({ error: { message: '크레딧 시트를 확인할 수 없어 이 모델을 사용할 수 없습니다. 잠시 후 다시 시도해주세요.' } });
+      }
+      const row = roster.find((p: any) => String(p?.project) === String(billingProject));
+      if (row?.[grant] !== true) {
+        console.warn(`[Grant] blocked ${byteplusBody.model} for project "${billingProject}" (${grant}=${row?.[grant]})`);
+        return res.status(403).json({ error: { message: `"${billingProject || '선택 없음'}" 프로젝트는 이 모델 권한이 없습니다.` } });
+      }
     }
 
     try {

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, MODELS, modelProvider } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, modelOutputFormat, refTaskTypeFor, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -406,10 +406,13 @@ export async function downloadClip(msgId: string, videoUrl: string, taskId: stri
     if (!owner) return;
     // Omni's taskId is a huge Gemini interaction id (v1_Ch…) and "dreamina" is the wrong
     // brand for it — name Omni downloads "omni-<date>-<short cache id>" from the served URL.
-    const isOmniMsg = modelProvider(owner.messages.find(m => m.id === msgId)?.usedSettings?.model || '') === 'gemini';
+    const msgModel = owner.messages.find(m => m.id === msgId)?.usedSettings?.model || '';
+    const isOmniMsg = modelProvider(msgModel) === 'gemini';
+    // Extension comes off the URL this clip actually has (2.5 → .mov), with the model that
+    // made it as fallback — not the project's CURRENT model, which may have changed since.
     const filename = isOmniMsg
       ? buildDownloadFilename((videoUrl.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId), '.mp4', 'omni')
-      : buildDownloadFilename(taskId);
+      : buildDownloadFilename(taskId, videoExtFor(videoUrl, msgModel));
     // Remember which message this filename belongs to. The Electron download path only
     // learns the save path once 'download-done' fires, long after this call returns.
     pendingReveal.set(filename, msgId);
@@ -1702,6 +1705,20 @@ export function ChatArea() {
       warn('프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)');
       return;
     }
+    // ★ Model grant (tracker sheet column G → allow25). Blocks rather than downgrading:
+    // clamping 4k→1080p is a graceful loss of a knob, but silently swapping 2.5 for 2.0
+    // would hand back a different model's output under the user's own settings. And the
+    // stored settings.model is left ALONE — permission is false on every fresh launch
+    // (billingProject is session-only), so rewriting it here would knock every saved 2.5
+    // project back to 2.0 on restart. Same rule as the 4k hydration clamp in §5-2.
+    {
+      const st = useAppStore.getState();
+      if (!isModelAllowed(project.settings.model, { billingProject: st.billingProject, billingProjects: st.billingProjects })) {
+        const label = MODELS.find(m => m.id === project.settings.model)?.name || '이 모델';
+        warn(`"${billingProject}" 프로젝트는 ${label} 권한이 없습니다.\n(다른 모델로 바꾸면 바로 생성할 수 있습니다.)`);
+        return;
+      }
+    }
 
     // Gemini Omni = separate provider → its own send path (no BytePlus payload).
     // (Success reporting to the sheet is Seedance-only; Omni still requires the gate above.)
@@ -1743,11 +1760,14 @@ export function ChatArea() {
     if ((mode === 'edit_video' || mode === 'extend_video') && !project.assets.some(a => a.type === 'video_url')) {
       warn('비디오를 첨부해주세요.'); return;
     }
-    // API rule: audio can never be the only reference — at least one image or
+    // API rule: on 2.0 audio can never be the only reference — at least one image or
     // video must accompany it. Only multimodal can reach this state (other
     // modes either reject audio or already require an image/video above).
-    if (mode === 'multimodal_reference' && project.assets.length > 0 && project.assets.every(a => a.type === 'audio_url')) {
-      warn('오디오만으로는 생성할 수 없습니다.\n이미지 또는 비디오를 최소 1개 함께 첨부해주세요.'); return;
+    // 2.5 lifted this ("newly supports generating videos with pure audio references"),
+    // so it is a per-model capability now, not a blanket rule.
+    if (mode === 'multimodal_reference' && !modelAllowsAudioOnly(project.settings.model)
+        && project.assets.length > 0 && project.assets.every(a => a.type === 'audio_url')) {
+      warn('이 모델은 오디오만으로 생성할 수 없습니다.\n이미지 또는 비디오를 최소 1개 함께 첨부하거나, Seedance 2.5 로 바꿔주세요.'); return;
     }
     // Re-check combined reference durations at send time — assets can arrive
     // via reuse/restore without passing through the attach-time check.
@@ -1809,7 +1829,19 @@ export function ChatArea() {
       if (aCount > aCap) { warn(`오디오 ${aCount}개 — 최대 ${aCap}개까지만 보낼 수 있습니다.\n오디오를 줄이거나 모델을 바꿔주세요.`); return; }
     }
 
-    const currentSettings = { ...project.settings };
+    // ★ Task-type constraints BEFORE anything reads these settings, so the payload, the
+    // stored usedSettings and the card tag all show what was actually sent. Getting this
+    // wrong is expensive in a way a 400 is not: the API accepts the request, queues it,
+    // classifies it, and only then fails with InvalidParameter.TaskTypeConstraint — the
+    // wait and the slot are already spent. Applied here rather than in the panel because a
+    // project restored by 재사용 never passes through the panel at all.
+    // ★ Deliberately NOT written back to the project. The constraint belongs to (model,
+    // mode), not to the project: writing it would leave Edit Video's forced -1 sitting in
+    // the settings after the user moves to a mode that allows a duration, with nothing to
+    // restore their own value. Same rule the 4k clamp follows in reverse — that one writes
+    // back because the permission really did change; this one must not, because nothing
+    // about the user's choice changed. usedSettings below still records what was SENT.
+    const currentSettings = applyTaskConstraints(project.settings.model, project.settings.mode, { ...project.settings });
     // Clamp resolution up-front so the payload, the stored usedSettings, the card tag,
     // and 재사용 all agree on the value actually sent. Two things are enforced here:
     //   · model capability (Fast/Mini have no 1080p; 4k is flagship-only)
@@ -1958,6 +1990,20 @@ export function ChatArea() {
         resolution: currentSettings.resolution, watermark: false,
         project: billingProject, // app-only field; server.ts strips it before BytePlus + maps it to the task for credit reporting
       };
+      // Only models that declare one send output_format at all — omitting it keeps every
+      // 2.0 request byte-for-byte what it has always been.
+      const outFmt = modelOutputFormat(currentSettings.model);
+      if (outFmt) payload.output_format = outFmt;
+      // The mode the user picked, stated outright. reference / edit / extend all travel as
+      // the same reference_* role, so without this the API had to read the intent out of the
+      // prompt's wording — meaning the mode dropdown never actually reached the server, and a
+      // plainly-worded prompt in Edit Video quietly generated a brand-new clip instead.
+      // Read from `content` (already fully built above, elements included) and from
+      // `currentSettings` — the same constrained copy the rest of the payload uses — so the
+      // declared task can't disagree with either the attachments or the ratio/duration
+      // going with it. Nothing to assert → omitted, and the API infers as it always did.
+      const refTask = refTaskTypeFor(currentSettings.model, currentSettings.mode, content);
+      if (refTask) payload.omni_reference_task_type = refTask;
       if (currentSettings.return_last_frame) payload.return_last_frame = true;
 
       // Settings + assets are preserved after send so user can iterate quickly with same setup

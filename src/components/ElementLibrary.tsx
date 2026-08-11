@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { useAppStore, AssetCategory, ElementAsset, ElementImage } from '../store';
+import { useAppStore, AssetCategory, ElementAsset, ElementImage, MODELS, modelImageMax } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Search, Trash2, Image as ImageIcon, Upload, Check, Link2, Pencil, Layers, User, MapPin, Package, AlertTriangle, Share2, Copy, Loader2 } from 'lucide-react';
 import { validateImageFile, validateImageDimensions, createThumbnail, readFileAsDataUrl, cacheFile, createElementPackLink, fetchElementPackByLink } from '../lib/utils';
@@ -15,7 +15,13 @@ export const CATEGORY_META: Record<AssetCategory, { name: string; bg: string; bo
 const CATEGORY_ICON: Record<AssetCategory, any> = { character: User, location: MapPin, prop: Package };
 const CATEGORIES = Object.keys(CATEGORY_META) as AssetCategory[];
 
-const MAX_ELEMENT_IMAGES = 9; // one element's images become reference images at send (shared 9-image cap)
+// How many images ONE element may store. This is storage, not the send limit — the library
+// is global and an element outlives whichever project is open, so it cannot be capped by
+// the model that happens to be selected right now. It is therefore the largest any model
+// allows (2.5 → 30); what actually gates a request is modelImageMax at send time, which
+// still blocks a 20-image element on 2.0. Was 9, copied from 2.0's cap, which quietly made
+// 2.5's 30-image allowance unreachable through the library.
+const MAX_ELEMENT_IMAGES = 30;
 
 // ─── Sharable asset bundles (share link / file import) ───
 const BUNDLE_FORMAT = 'freewill-seedance-elements';
@@ -70,13 +76,17 @@ async function fileToElementImage(file: File): Promise<ElementImage> {
 }
 
 /* ─── Asset create/edit form (local draft → committed on save) ─── */
-function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose }: {
+function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sendCap, modelName }: {
   initial: ElementAsset | null;
   onSave: (data: { name: string; description: string; category: AssetCategory; images: ElementImage[] }) => void;
   onDelete: (() => void) | null;
   onShare?: (() => void) | null;
   sharing?: boolean;
   onClose: () => void;
+  // The CURRENT project's model decides how many images a request may carry (2.0 → 9,
+  // 2.5 → 30). Passed in rather than read here so this editor stays a dumb form.
+  sendCap: number;
+  modelName: string;
 }) {
   const [name, setName] = useState(initial?.name ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
@@ -195,7 +205,14 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose }: {
             </div>
             <p className="flex items-start gap-1.5 text-[10px] text-amber-700 bg-amber-50 rounded-md px-2 py-1.5 leading-relaxed">
               <AlertTriangle size={12} className="shrink-0 mt-px" />
-              <span>전송 시 이 이미지들은 <b>래퍼런스 이미지</b>로 합쳐집니다 — 래퍼런스 패널 이미지와 <b>합산 최대 9장</b>(초과 시 전송 차단). 어셋당 최대 {MAX_ELEMENT_IMAGES}장 · 개당 30MB · 300~6000px · 원본 화질 그대로 전송.</span>
+              <span>
+                전송 시 이 이미지들은 <b>래퍼런스 이미지</b>로 합쳐집니다 — 래퍼런스 패널 이미지와 <b>합산 최대 {sendCap}장</b>, 초과 시 전송 차단.
+                {' '}합산 한도는 모델마다 다릅니다 (<b>Seedance 2.5 → 30장</b> · 2.0 계열 → 9장 · Omni → 10장). 지금 프로젝트는 <b>{modelName}</b>.
+                {' '}어셋당 {MAX_ELEMENT_IMAGES}장까지 저장 · 개당 30MB · 300~6000px · 원본 화질 그대로 전송.
+                {images.length > sendCap && (
+                  <><br /><b className="text-amber-600">이 어셋만으로 {images.length}장이라 {modelName}({sendCap}장)에서는 전송이 막힙니다 — 이미지를 줄이거나 Seedance 2.5 로 바꿔주세요.</b></>
+                )}
+              </span>
             </p>
           </div>
 
@@ -317,10 +334,16 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
 /* ─── Element library modal ─── */
 export function ElementLibrary({ open, onClose, projectId }: { open: boolean; onClose: () => void; projectId: string }) {
   const {
-    assetCollections, elementAssets, projectCollectionId,
+    projects, assetCollections, elementAssets, projectCollectionId,
     createCollection, renameCollection, deleteCollection,
     addElementAsset, updateElementAsset, deleteElementAsset, setProjectCollection,
   } = useAppStore();
+
+  // The library is global, but the request it feeds is not: how many images may actually
+  // go out is decided by the model of the project this modal was opened from.
+  const hostModel = projects.find(p => p.id === projectId)?.settings.model || '';
+  const sendCap = modelImageMax(hostModel);
+  const modelName = MODELS.find(m => m.id === hostModel)?.name || '현재 모델';
 
   // Per-collection asset counts in one O(n) pass, instead of elementAssets.filter().length
   // per collection row per render (O(collections × elementAssets) on every re-render).
@@ -646,6 +669,8 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
               onShare={editing !== 'new' ? () => shareAsset(editing) : null}
               sharing={editing !== 'new' && shareBusy === 'asset-' + editing.id}
               onClose={() => setEditing(null)}
+              sendCap={sendCap}
+              modelName={modelName}
             />
           )}
         </AnimatePresence>

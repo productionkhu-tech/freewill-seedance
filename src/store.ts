@@ -3,6 +3,7 @@ import { persist, type PersistStorage, type StorageValue } from 'zustand/middlew
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS } from './lib/utils';
+import { MODEL_GRANTS } from './lib/model-access';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -708,14 +709,14 @@ interface AppState {
   // Persisting the SELECTION would be a different matter and is still forbidden: see the
   // hydration-clamp rule (isFourKAllowed returns false whenever billingProject is empty,
   // which is exactly what keeps a stored '4k' setting from being wiped at boot).
-  billingProjects: { project: string; status: string; allow4k?: boolean }[];
+  billingProjects: { project: string; status: string; allow4k?: boolean; allow25?: boolean }[];
   // Did the last tracker fetch actually land? null = 아직 모름 (boot). The server already
   // distinguishes "couldn't fetch" (ok:false) from "fetched, list is empty" (ok:true, []),
   // and App.tsx already acts on it — but the UI had no way to see it, so a dead tracker
   // was reported to the user as "your PM never registered you". Transient, never persisted.
   trackerReachable: boolean | null;
   setBillingProject: (p: string) => void;
-  setBillingProjects: (list: { project: string; status: string; allow4k?: boolean }[]) => void;
+  setBillingProjects: (list: { project: string; status: string; allow4k?: boolean; allow25?: boolean }[]) => void;
   setTrackerReachable: (v: boolean) => void;
   // Transient (NOT persisted): # of images from elements currently @mentioned in
   // the active prompt. ChatArea writes it; SettingsPanel reads it to show the
@@ -797,31 +798,107 @@ export const defaultSettings: GenerationSettings = {
 //   audMax      reference-audio cap            (default: 3)
 //   refVideoSec max single reference-video sec (default: 15.2)
 //   refAudioSec max single reference-audio sec (default: 15.2)
+//   outputFormat  API `output_format` (default: omitted → mp4)
+//   audioOnly     reference audio may stand alone (default: false — 2.0 needs an image/video)
+//   adaptiveOnly  modes where the API accepts ONLY ratio:'adaptive'
+//   autoDurationOnly modes where the API accepts ONLY duration:-1
+//   refTaskTypes  mode → API `omni_reference_task_type` (default: omitted → API infers)
 //   demo        routed to a separate key/endpoint server-side, never billed to the sheet
+//   defaults    the model's OWN documented defaults, used when a mode is picked
+//               (default: the app-wide defaultSettings — what 2.0 has always used)
+
+// Seedance 2.5's capability set, shared by the official row and the demo row (same model
+// underneath — verified: identical output and identical token count on both keys).
+// Numbers are the official datasheet AND re-measured against the live API 2026-08-07:
+//   · 480p/720p only. The doc states 1080p/4k are unsupported; the API happens to ACCEPT
+//     those values at validation, which is a validation gap, not a capability — do not be
+//     fooled by a probe that only reaches the ratio check.
+//   · 4–30s output (or -1), 30 images / 10 videos / 10 audio (= the advertised 50 assets)
+//   · reference video AND audio ≤30.2s, per-clip and summed (API states both verbatim)
+const SEEDANCE_25 = {
+  res: ['480p', '720p'],
+  dur: [4, 30] as [number, number],
+  imgMax: 30, vidMax: 10, audMax: 10,
+  refVideoSec: 30.2, refAudioSec: 30.2,
+  // 2.5 can take reference audio with no image/video alongside it. 2.0 cannot.
+  audioOnly: true,
+  // mov = H.264 High 4:4:4 + PCM. Chromium plays it — MEASURED, not assumed: readyState 4,
+  // 57 decoded frames, 0 dropped, full canvas readback. Note canPlayType('video/quicktime')
+  // returns '' for it, so never gate playback on canPlayType (same trap as HEVC in §5-2).
+  outputFormat: 'mov',
+  // ★ Task-type constraints from the official doc. Violating these does NOT fail fast — the
+  // task is created, queues, gets classified, and only THEN returns
+  // InvalidParameter.TaskTypeConstraint. That is time and a slot already spent, so the app
+  // has to enforce them before sending.
+  adaptiveOnly: ['edit_video', 'extend_video', 'image_to_video_first', 'image_to_video_first_last'] as GenerationMode[],
+  autoDurationOnly: ['edit_video'] as GenerationMode[],
+  // ★ omni_reference_task_type (added by BytePlus 2026-08-11). reference / edit / extend all
+  // arrive with the SAME role (reference_*), so until this existed the model had to guess the
+  // task from the prompt wording — and our mode picker never reached the server at all.
+  // Measured 2026-08-11:
+  //   · an edit-worded prompt + 'reference' came back as reference-to-video → the parameter
+  //     outranks the prompt, so picking a mode in the app now actually means something.
+  //   · a neutral prompt + 'edit' was rejected SYNCHRONOUSLY at create time (HTTP 400, no
+  //     task) instead of queueing and failing asynchronously — the wait and the slot are
+  //     saved. That is the whole point of the parameter.
+  // Only the three reference-family modes get a value; frame modes are decided by the
+  // first_frame/last_frame roles and text-to-video has no references at all.
+  refTaskTypes: { multimodal_reference: 'reference', edit_video: 'edit', extend_video: 'extend' } as Partial<Record<GenerationMode, string>>,
+  // Defaults a mode starts at. Only `resolution` is the datasheet's own "Default value" —
+  // ratio and duration deliberately are not, and for the same reason: the API's defaults
+  // both hand the decision to the model, and a default should be predictable.
+  //   · duration: the API defaults to -1 (Auto), which on 2.5 picks anywhere in 4–30s. The
+  //     model choosing 30 over 5 costs ~6x, and unlike 2.0 (4–15) nobody asked for that
+  //     range. Cost is something you opt into, not something a default hands you.
+  //   · ratio: the API defaults to `adaptive`, which lets the model pick the aspect ratio
+  //     from the prompt — so the same prompt can come back framed differently. 16:9 is what
+  //     2.0 has always started at and what most deliveries want.
+  // Both stay one click away, and both are overridden automatically where the API forces a
+  // value: adaptiveOnly / autoDurationOnly are applied AFTER these, so Edit / Extend /
+  // first-frame modes still get adaptive (and Edit still gets -1) with no exception listed
+  // here. That ordering is the whole point — exceptions live in one place, not two.
+  defaults: { resolution: '720p', ratio: '16:9', duration: 5 },
+};
+
 export const MODELS: {
   id: string; name: string; provider?: 'byteplus' | 'gemini';
   res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
   refVideoSec?: number; refAudioSec?: number; demo?: boolean;
+  outputFormat?: string; audioOnly?: boolean;
+  adaptiveOnly?: GenerationMode[]; autoDurationOnly?: GenerationMode[];
+  refTaskTypes?: Partial<Record<GenerationMode, string>>;
+  defaults?: { resolution?: string; ratio?: string; duration?: number };
 }[] = [
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini' },
-  { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini' },
-  // Seedance 2.5 (BytePlus demo endpoint — separate key, see server.ts). Every number
-  // here was measured against the live API 2026-07-29, not taken from the datasheet:
-  // 480p/720p only (1080p/2k/4k all rejected in both t2v and r2v), 4–30s output,
-  // reference video ≤30.2s, and 30 images / 10 videos / 10 audio (= the "50 assets").
-  // `[Image N]` markers, roles and ratios all behave exactly like 2.0 — verified by
-  // generating a clip whose three markers bound to the correct reference images.
-  // ★ The real endpoint id is NOT here on purpose: the demo terms forbid sharing it and
-  // this file ships to every team AND to a public repo. The server swaps this logical id
-  // for SEEDANCE_25_DEMO_ENDPOINT at request time.
-  { id: 'seedance-2-5-demo', name: 'Seedance 2.5 Demo',
-    res: ['480p', '720p'], dur: [4, 30],
-    imgMax: 30, vidMax: 10, audMax: 10,   // measured: 30/10/10 = the advertised "50 assets"
-    // Both 30.2, per-clip AND summed — stated verbatim by the API (measured 2026-08-07).
-    // Audio was capped at 15 app-wide before that, so 2.5 was losing half its allowance.
-    refVideoSec: 30.2, refAudioSec: 30.2, demo: true },
+  // Omni's reference-image cap is 10, not the Seedance default of 9. It used to live as a
+  // literal `>= 10` in the panel; declaring it here is what lets the counter and the upload
+  // button read the same number (they briefly disagreed — 9 vs 10 — when the literal was
+  // swapped for modelImageMax without giving Omni its own value).
+  { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10 },
+  // ── Seedance 2.5 — official (2026-08-07) and the demo endpoint, SAME model ───────────
+  // Both rows below point at `dreamina-seedance-2-5`; the API's own error messages name
+  // that model for either key, and a probe on each returned identical output (38,830
+  // tokens for 480p/4s, mov both times). So the capabilities live in ONE object and both
+  // rows spread it — two hand-maintained copies of the same numbers is how they drift.
+  //
+  // The two rows differ only in WHO PAYS:
+  //   official → team key, team credit, reported to the tracker sheet like any model
+  //   demo     → separate key + endpoint (server.ts swaps the logical id), separate
+  //              contract, deliberately NOT reported. Only visible where the demo key is
+  //              installed (`demo` flag → /api/capabilities gate in SettingsPanel).
+  // Keep BOTH: removing either one sends every project saved on it back to 2.0 flagship
+  // at hydration (§5-3). And migrating demo projects onto the official id would silently
+  // move someone's work onto team billing — not ours to decide.
+  // Only the official row carries `grant` — it spends TEAM credit, so who may use it is a
+  // per-project decision made in the tracker sheet. The demo row is already gated by simply
+  // possessing the demo key, and it bills to a separate contract, so a second gate on top
+  // would only lock out the people who were given that key on purpose.
+  // Permission lives in MODEL_GRANTS (src/lib/model-access.ts), not here — server.ts has
+  // to read the same fact and must not import the store.
+  { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5', ...SEEDANCE_25 },
+  { id: 'seedance-2-5-demo', name: 'Seedance 2.5 Demo', ...SEEDANCE_25, demo: true },
 ];
 
 // Capability lookups. Each returns the model's override when present, otherwise the
@@ -845,6 +922,98 @@ export function modelRefVideoSec(model: string): number {
 }
 export function modelRefAudioSec(model: string): number {
   return MODELS.find(m => m.id === model)?.refAudioSec ?? API_LIMITS.audio.maxDuration;
+}
+// Payload `output_format`. Omitted → the API default (mp4), which is what every 2.0 model
+// has always sent, so their requests are byte-for-byte unchanged.
+export function modelOutputFormat(model: string): string | undefined {
+  return MODELS.find(m => m.id === model)?.outputFormat;
+}
+// Extension for a finished video. Reads it off the URL the API actually returned, and only
+// falls back to the model's declared format when the URL says nothing. Deriving beats
+// declaring here: a .mov saved as .mp4 opens in the wrong app, and the declaration can go
+// stale the moment BytePlus changes a default — the URL cannot.
+export function videoExtFor(url: string | undefined, model: string): string {
+  const m = (url || '').split('?')[0].match(/\.(mp4|mov|m4v|webm)$/i);
+  if (m) return '.' + m[1].toLowerCase();
+  return modelOutputFormat(model) === 'mov' ? '.mov' : '.mp4';
+}
+export function modelAllowsAudioOnly(model: string): boolean {
+  return MODELS.find(m => m.id === model)?.audioOnly === true;
+}
+// Payload `omni_reference_task_type` — tells the API which task the user picked instead of
+// making it infer one from the prompt's wording. Undefined for every model that doesn't
+// declare the map and for modes outside the reference family, so those requests are
+// unchanged. See the refTaskTypes note on SEEDANCE_25 for what was measured.
+export function modelRefTaskType(model: string, mode: GenerationMode): string | undefined {
+  return MODELS.find(m => m.id === model)?.refTaskTypes?.[mode];
+}
+// The value to actually assert for THIS request — read off the content array that is about
+// to be sent, not off the mode alone.
+// The mode and the attachments can legitimately disagree for a moment: switching modes
+// clears assets, mention-based element images arrive from the library rather than the
+// panel, and a restored/regenerated card can land with a reference the app couldn't
+// re-upload. Declaring `edit` when no video actually made it into the payload converts
+// something the API used to muddle through (infer from the prompt) into a hard rejection.
+// So: assert only what the request can back up, and otherwise stay silent and let the API
+// infer exactly as it did before this parameter existed. Silence is never worse.
+export function refTaskTypeFor(
+  model: string, mode: GenerationMode, content: { role?: string }[],
+): string | undefined {
+  const t = modelRefTaskType(model, mode);
+  if (!t) return undefined;
+  const roles = content.map(c => c.role).filter(Boolean) as string[];
+  // edit / extend act ON a video; reference just needs something to reference.
+  const backed = t === 'reference'
+    ? roles.some(r => r.startsWith('reference_'))
+    : roles.includes('reference_video');
+  return backed ? t : undefined;
+}
+
+// ── Task-type constraints ────────────────────────────────────────────────────────────
+// Some modes only accept one ratio / one duration. Returns what must be forced, or null.
+// Declared per model as DATA (MODELS.adaptiveOnly / autoDurationOnly) rather than an
+// `if (model === …)` scattered across the UI and the send path — those two drifting apart
+// is exactly how a constraint gets enforced in the panel but not in the payload.
+export function ratioLockedFor(model: string, mode: GenerationMode): boolean {
+  return (MODELS.find(m => m.id === model)?.adaptiveOnly ?? []).includes(mode);
+}
+export function durationLockedFor(model: string, mode: GenerationMode): boolean {
+  return (MODELS.find(m => m.id === model)?.autoDurationOnly ?? []).includes(mode);
+}
+// One place that answers "what must this request actually carry", used by both the
+// settings panel (to lock the controls) and handleSend (to fix the payload).
+export function applyTaskConstraints<T extends { ratio: string; duration: number }>(
+  model: string, mode: GenerationMode, settings: T,
+): T {
+  const out = { ...settings };
+  if (ratioLockedFor(model, mode)) out.ratio = 'adaptive';
+  if (durationLockedFor(model, mode)) out.duration = -1;
+  return out;
+}
+
+// ── What a mode should START at, for THIS model ──────────────────────────────────────
+// Picking a generation mode used to inherit whatever the previous mode left behind, so a
+// 2.5 edit's forced `adaptive`/-1 followed you into Extend, and 2.0's 16:9/5s followed you
+// into 2.5 where the documented default is adaptive/-1. Different models genuinely have
+// different defaults, and each mode may pin some of them — so the answer is composed, not
+// looked up: model defaults → mode constraints → validity for that model.
+// Only called from an explicit user action (mode switch). Never from a watcher: that is
+// what turned "lock" into "silently overwrote your setting" the first time round.
+export function settingsDefaultsFor(model: string, mode: GenerationMode): { resolution: string; ratio: string; duration: number } {
+  const d = MODELS.find(m => m.id === model)?.defaults;
+  const base = {
+    resolution: d?.resolution ?? defaultSettings.resolution,
+    ratio: d?.ratio ?? defaultSettings.ratio,
+    duration: d?.duration ?? defaultSettings.duration,
+  };
+  const withMode = applyTaskConstraints(model, mode, base);
+  // Structural validity last — a default is worthless if the model can't accept it.
+  if (!modelResolutions(model).includes(withMode.resolution)) withMode.resolution = '720p';
+  if (withMode.duration !== -1) {
+    const [lo, hi] = modelDurationRange(model);
+    withMode.duration = Math.max(lo, Math.min(hi, withMode.duration));
+  }
+  return withMode;
 }
 // Demo models are billed against a separate BytePlus key and are deliberately NOT
 // reported to the credit tracker; the server decides both, this just tells the UI.
@@ -914,6 +1083,27 @@ export function isFourKAllowed(state: {
 }): boolean {
   if (!state.billingProject) return false;
   return state.billingProjects.find(p => p.project === state.billingProject)?.allow4k === true;
+}
+
+// Is this model permitted for the selected billing project? Models without a grant are
+// always allowed, so every 2.0/Omni path answers true without consulting anything.
+// Fail-closed on purpose: no project selected, project missing from the list, or the
+// tracker not carrying the field (older GAS) → false. Being wrongly blocked is a message;
+// being wrongly allowed is someone else's credit.
+// This is the UI's copy of the answer. server.ts asks the tracker the same question again
+// before it forwards anything, because both inputs here are editable at rest: the roster
+// is persisted in IndexedDB and settings.model is stored per project.
+export function isModelAllowed(model: string, state: {
+  billingProject: string;
+  billingProjects: { project: string; allow25?: boolean }[];
+}): boolean {
+  const grant = MODEL_GRANTS[model];
+  if (!grant) return true;
+  if (!state.billingProject) return false;
+  return state.billingProjects.find(p => p.project === state.billingProject)?.[grant] === true;
+}
+export function modelGrant(model: string): 'allow25' | undefined {
+  return MODEL_GRANTS[model];
 }
 
 export const useAppStore = create<AppState>()(
@@ -1452,7 +1642,8 @@ export const useAppStore = create<AppState>()(
             // running/queued), so no per-message guard is needed. Does NOT set
             // downloadedAt — that marker is manual-click only ("다시 다운로드").
             if (get().autoDownload && contentData?.video_url) {
-              downloadViaProxy(contentData.video_url, buildDownloadFilename(taskId))
+              // Extension comes off the returned URL (2.5 → .mov), model only as fallback.
+              downloadViaProxy(contentData.video_url, buildDownloadFilename(taskId, videoExtFor(contentData.video_url, message.usedSettings?.model || '')))
                 .catch(err => console.warn('[AutoDownload] failed:', err?.message || err));
             }
             // Full pre-fetch into memory cache → subsequent download saves from RAM (zero CDN round-trip).
@@ -1592,6 +1783,10 @@ export const useAppStore = create<AppState>()(
           const state = useAppStore.getState();
           const patched = state.projects.map(p => {
             const s = { ...defaultSettings, ...p.settings };
+            // ★ Deliberately NOT migrating `seedance-2-5-demo` → the official 2.5 id. Both
+            // rows still exist in MODELS, so nothing falls back to 2.0, and rewriting the
+            // model would silently move a demo project (separate contract, unbilled) onto
+            // team credit. Which one to pay from is the user's call, not a migration's.
             // Clamp duration to the provider's range: Omni 3–10, Seedance 4–15.
             // -1 = Auto (Seedance only; model picks the length — valid, don't clamp).
             // Range is per-model now; for 2.0/Omni modelDurationRange returns exactly the
