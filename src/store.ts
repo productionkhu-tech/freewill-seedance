@@ -940,6 +940,93 @@ export function videoExtFor(url: string | undefined, model: string): string {
 export function modelAllowsAudioOnly(model: string): boolean {
   return MODELS.find(m => m.id === model)?.audioOnly === true;
 }
+
+// The key an @mention actually resolves on. Paste-to-mention matches a typed name against
+// element names case-insensitively and ignoring spaces, so "Don Moretti", "don moretti"
+// and "donmoretti" are ONE name as far as the prompt is concerned.
+// Two elements sharing this key inside one collection are indistinguishable to that
+// resolver — it would pick whichever the sort happened to put first, and quietly send the
+// wrong images. That is why this is exported rather than kept local: the place that
+// CREATES elements has to reject collisions by exactly the rule the resolver uses, or the
+// check is decorative. Only the bound collection feeds mentions, so equal names in
+// different collections are fine and always have been.
+export function mentionKey(name: string): string {
+  return name.toLowerCase().replace(/\s+/g, '');
+}
+
+// "don_moretti.png" → "don_moretti". The name is already on the file; drag-and-drop intake
+// reads it instead of making the user retype it.
+export function fileBaseName(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, '').trim() || '이름 없음';
+}
+
+// "don_moretti_02" → "don_moretti". Strips ONE trailing index — the separator is optional
+// so "hero2" counts, and "(3)" / "[3]" wrappers are handled too. Used to spot the files that
+// are obviously frames of one asset rather than separate assets.
+// Deliberately conservative: a name that is nothing but digits keeps its digits, or
+// "1.png, 2.png, 3.png" would all collapse into one nameless group.
+export function stripTrailingIndex(base: string): string {
+  const m = /^(.*?)[\s._\-#]*(?:\(|\[)?\d{1,3}(?:\)|\])?$/.exec(base);
+  const head = m?.[1]?.replace(/[\s._\-#]+$/, '') ?? '';
+  return head || base;
+}
+
+// Natural order, so _2 lands before _10 instead of after it. Images inside one asset are
+// positional ([Image N] markers at send time), so their order is not cosmetic.
+function naturalCompare(a: string, b: string): number {
+  const ax = a.match(/\d+|\D+/g) || [], bx = b.match(/\d+|\D+/g) || [];
+  for (let i = 0; i < Math.max(ax.length, bx.length); i++) {
+    const x = ax[i], y = bx[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const nx = /^\d/.test(x), ny = /^\d/.test(y);
+    if (nx && ny) { const d = parseInt(x, 10) - parseInt(y, 10); if (d) return d; }
+    else if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * How a set of dropped filenames becomes assets.
+ *   'each'   — one asset per file (what the filename literally says)
+ *   'single' — all of it is one asset
+ *   'auto'   — files whose names differ only by a trailing index are ONE asset
+ *
+ * Returns groups of indices INTO the input array, in first-seen order, with each group's
+ * files in natural order. Pure and index-based so the caller keeps its own File objects and
+ * this stays testable without a DOM.
+ */
+export function groupElementFiles(fileNames: string[], mode: 'auto' | 'each' | 'single'): { name: string; files: number[] }[] {
+  const bases = fileNames.map(fileBaseName);
+  if (mode === 'each') return bases.map((name, i) => ({ name, files: [i] }));
+  if (mode === 'single') return fileNames.length ? [{ name: stripTrailingIndex(bases[0]) || bases[0], files: bases.map((_, i) => i) }] : [];
+
+  const order: string[] = [];
+  const byKey = new Map<string, number[]>();
+  bases.forEach((b, i) => {
+    const key = mentionKey(stripTrailingIndex(b));
+    if (!byKey.has(key)) { byKey.set(key, []); order.push(key); }
+    byKey.get(key)!.push(i);
+  });
+  return order.map(key => {
+    const idx = byKey.get(key)!.sort((a, b) => naturalCompare(bases[a], bases[b]));
+    // A group of one was never an index series — keep the filename exactly as it is.
+    return { name: idx.length > 1 ? stripTrailingIndex(bases[idx[0]]) : bases[idx[0]], files: idx };
+  });
+}
+
+// A name that cannot collide with anything in `takenKeys`, comparing on mentionKey rather
+// than on the raw string — "Don Moretti" and "donmoretti" are the same name to the mention
+// resolver, so treating them as different here would hand it back the ambiguity this is
+// meant to prevent. Starts at 2 because the existing one is the first.
+export function uniqueElementName(base: string, takenKeys: Set<string>): string {
+  if (!takenKeys.has(mentionKey(base))) return base;
+  for (let n = 2; n < 1000; n++) {
+    const cand = `${base} ${n}`;
+    if (!takenKeys.has(mentionKey(cand))) return cand;
+  }
+  return `${base} ${uuidv4().slice(0, 4)}`;
+}
 // Payload `omni_reference_task_type` — tells the API which task the user picked instead of
 // making it infer one from the prompt's wording. Undefined for every model that doesn't
 // declare the map and for modes outside the reference family, so those requests are

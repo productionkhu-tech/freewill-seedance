@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, modelOutputFormat, refTaskTypeFor, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, modelOutputFormat, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -1263,7 +1263,7 @@ export function ChatArea() {
   // stays "@image2"). Element conversions respect the shared 9-image budget. Never
   // throws on weird input — stray '@'/'[' just pass through.
   const resolveMentionTokens = (text: string): Array<{ type: 'text'; text: string } | { type: 'pill'; item: any }> => {
-    const norm = (s: string) => s.toLowerCase().replace(/\s+/g, '');
+    const norm = mentionKey;   // 엘리먼트 생성 쪽(ElementLibrary)과 같은 규칙을 써야 한다
     const panelCands = getAssetNames(project.assets)
       .filter(a => a.role !== 'first_frame' && a.role !== 'last_frame')
       .map(a => ({ kind: 'asset' as const, norm: norm(a.name), imgs: 0, item: { kind: 'asset', ...a } }));
@@ -2775,8 +2775,18 @@ export function ChatArea() {
               />
             </div>
 
+            {/* ★ Anchored to the PROMPT BOX, not to this bar.
+                The bar is full width; the prompt box inside it is max-w-4xl mx-auto, i.e.
+                centred. `left-4` on an absolute child therefore measured from the bar's
+                edge, so the menu stayed pinned to the far left while the box it belongs to
+                drifted to the middle — visible on any window wider than ~896px + sidebar,
+                and not related to reopening the pane or clearing the prompt.
+                Re-using the same max-w-4xl mx-auto wrapper keeps the two aligned by
+                construction, so changing the prompt width can't desync them again. */}
             {mentionState.active && filteredMentionAssets.length > 0 && (
-              <div className="absolute bottom-full mb-2 left-4 bg-white border border-gray-200 rounded-xl shadow-xl overflow-hidden z-50 min-w-[250px] animate-slide-up">
+            <div className="absolute bottom-full inset-x-0 px-4 mb-2 z-50 pointer-events-none">
+              <div className="max-w-4xl mx-auto flex">
+              <div className="pointer-events-auto bg-white border border-gray-200 rounded-xl shadow-xl overflow-hidden min-w-[250px] animate-slide-up">
                 {(() => {
                   const panelImgs = project.assets.filter(a => a.type === 'image_url').length;
                   const elemImgs = elementMentionEnabled ? mentionedElementStats().count : 0;
@@ -2809,6 +2819,8 @@ export function ChatArea() {
                   ))}
                 </div>
               </div>
+              </div>
+            </div>
             )}
 
             <div className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white transition-all duration-200">

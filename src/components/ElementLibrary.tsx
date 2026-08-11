@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { useAppStore, AssetCategory, ElementAsset, ElementImage, MODELS, modelImageMax } from '../store';
+import { useAppStore, AssetCategory, ElementAsset, ElementImage, MODELS, modelImageMax, mentionKey, uniqueElementName, groupElementFiles } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Search, Trash2, Image as ImageIcon, Upload, Check, Link2, Pencil, Layers, User, MapPin, Package, AlertTriangle, Share2, Copy, Loader2 } from 'lucide-react';
 import { validateImageFile, validateImageDimensions, createThumbnail, readFileAsDataUrl, cacheFile, createElementPackLink, fetchElementPackByLink } from '../lib/utils';
@@ -69,10 +69,247 @@ async function fileToElementImage(file: File): Promise<ElementImage> {
   if (sizeErr) throw new Error(sizeErr);
   const dimErr = await validateImageDimensions(file);
   if (dimErr) throw new Error(dimErr);
-  const [thumbnailUrl, url] = await Promise.all([createThumbnail(file), readFileAsDataUrl(file)]);
+  // 256, not the 80 default: the thumbnail is what the editor grid and the drop dialog
+  // actually paint now, and 80px was sized for prompt pills. Costs ~15KB per image in the
+  // persisted blob, against a full-res `url` measured in megabytes — noise.
+  const [thumbnailUrl, url] = await Promise.all([createThumbnail(file, 256), readFileAsDataUrl(file)]);
   let cacheId: string | undefined;
   try { cacheId = await cacheFile(file); } catch { /* cache is opportunistic — base64 is the durable source */ }
   return { id: crypto.randomUUID(), url, thumbnailUrl, cacheId, ...(file.name ? { file_name: file.name } : {}) };
+}
+
+/* ─── Drag & drop intake: OS files → assets named after the files ─── */
+// Every other way into this library makes you retype a name that is already sitting on the
+// file. This one reads the name off the file and asks the two things a filename cannot
+// settle: which category, and whether these files are one asset or several.
+//
+// ★ Names are unique per collection, enforced on mentionKey (store.ts). Not a tidiness
+// rule: paste-to-mention resolves a typed name to an asset by that exact key, so two
+// assets sharing it inside one collection would make the resolver pick one at random and
+// send the wrong images. Collisions are therefore never silently accepted — each
+// conflicting group is skipped or renamed, and the result is on screen before saving.
+// Across collections names may repeat, unchanged: only the bound collection feeds mentions.
+type GroupMode = 'auto' | 'each' | 'single';
+const GROUP_MODES: { id: GroupMode; label: string; hint: string }[] = [
+  { id: 'auto',   label: '자동',      hint: '이름 뒤 번호만 다른 파일은 한 어셋으로 (hero_1, hero_2 → hero)' },
+  { id: 'each',   label: '각각',      hint: '파일 하나당 어셋 하나' },
+  { id: 'single', label: '전부 하나', hint: '끌어온 파일 전부를 한 어셋의 이미지로' },
+];
+
+type IntakeGroup = { key: string; files: number[]; name: string; category: AssetCategory; rename: boolean };
+
+function DropIntake({ files, existing, collectionName, sendCap, modelName, onCancel, onCommit }: {
+  files: File[];
+  existing: ElementAsset[];     // assets already in the target collection
+  collectionName: string;
+  sendCap: number;              // modelImageMax of the host project's model
+  modelName: string;
+  onCancel: () => void;
+  onCommit: (items: { name: string; category: AssetCategory; images: ElementImage[] }[]) => void;
+}) {
+  const [mode, setMode] = useState<GroupMode>('auto');
+  const [groups, setGroups] = useState<IntakeGroup[]>(
+    () => groupElementFiles(files.map(f => f.name), 'auto').map((g, i) => ({ ...g, key: `g${i}`, category: 'character' as AssetCategory, rename: false })),
+  );
+  const [busy, setBusy] = useState(0);          // 0 = idle, else 1-based progress
+  const [failed, setFailed] = useState<string[]>([]);
+
+  // One object URL per FILE, made once. Regrouping reshuffles which group shows which
+  // file — recreating URLs there would leak one per switch.
+  const [previews] = useState<string[]>(() => files.map(f => URL.createObjectURL(f)));
+  useEffect(() => () => { previews.forEach(u => URL.revokeObjectURL(u)); }, []);
+
+  const applyMode = (m: GroupMode) => {
+    setMode(m);
+    setGroups(groupElementFiles(files.map(f => f.name), m).map((g, i) => ({ ...g, key: `g${i}`, category: 'character', rename: false })));
+  };
+
+  const existingKeyList: string[] = useMemo(() => existing.map(a => mentionKey(a.name)), [existing]);
+  const existingKeys: Set<string> = useMemo(() => new Set(existingKeyList), [existingKeyList]);
+
+  // ONE top-down pass produces everything the rows render, including the name a conflicted
+  // group WOULD take if renamed. Computing that inside the row markup instead meant
+  // rebuilding a set over every other group, per group, on every keystroke — O(n²) per
+  // render, and the reason a 20-file drop felt sluggish.
+  const resolved = useMemo(() => {
+    const taken = new Set(existingKeyList);
+    return groups.map(g => {
+      const base = g.name.trim();
+      const key = mentionKey(base);
+      const conflict: null | 'existing' | 'batch' = !base ? null
+        : existingKeys.has(key) ? 'existing'
+        : taken.has(key) ? 'batch'
+        : null;
+      const suggestion = conflict ? uniqueElementName(base, taken) : base;
+      if (!base) return { group: g, conflict: null, finalName: '', suggestion: '', skipped: true };
+      if (conflict && !g.rename) return { group: g, conflict, finalName: base, suggestion, skipped: true };
+      taken.add(mentionKey(suggestion));
+      return { group: g, conflict, finalName: suggestion, suggestion, skipped: false };
+    });
+  }, [groups, existingKeyList, existingKeys]);
+
+  const willAdd = resolved.filter(r => !r.skipped);
+  const skippedCount = resolved.filter(r => r.skipped).length;
+  const overSized = resolved.filter(r => !r.skipped && r.group.files.length > MAX_ELEMENT_IMAGES);
+  const patch = (key: string, up: Partial<IntakeGroup>) => setGroups(gs => gs.map(g => (g.key === key ? { ...g, ...up } : g)));
+  const setAllCategories = (c: AssetCategory) => setGroups(gs => gs.map(g => ({ ...g, category: c })));
+
+  const commit = async () => {
+    if (!willAdd.length || overSized.length) return;
+    const out: { name: string; category: AssetCategory; images: ElementImage[] }[] = [];
+    const bad: string[] = [];
+    const total = willAdd.reduce((n, r) => n + r.group.files.length, 0);
+    let done = 0;
+    // Sequential on purpose: each file becomes a full-res base64 string, and firing dozens
+    // of those in parallel spikes memory hard enough to take the renderer with it.
+    for (const r of willAdd) {
+      const imgs: ElementImage[] = [];
+      for (const fi of r.group.files) {
+        setBusy(++done);
+        try { imgs.push(await fileToElementImage(files[fi])); }
+        catch (e: any) { bad.push(`${files[fi].name}: ${e?.message || '처리 실패'}`); }
+      }
+      if (imgs.length) out.push({ name: r.finalName, category: r.group.category, images: imgs });
+    }
+    setBusy(0);
+    void total;
+    if (bad.length && !out.length) { setFailed(bad); return; }
+    if (bad.length) setFailed(bad);
+    onCommit(out);
+  };
+
+  const totalImages = willAdd.reduce((n, r) => n + r.group.files.length, 0);
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="absolute inset-0 z-30 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={busy ? undefined : onCancel}
+      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      onDrop={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+      <motion.div initial={{ scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 10 }}
+        transition={{ duration: 0.16, ease: 'easeOut' }}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-full flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}>
+
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100 shrink-0">
+          <div className="leading-tight min-w-0">
+            <h3 className="text-[15px] font-semibold text-[#1d1d1f]">파일 {files.length}개 추가</h3>
+            <p className="text-[11px] text-gray-400 -mt-0.5 truncate">‘{collectionName}’ · 파일 이름이 그대로 어셋 이름이 됩니다</p>
+          </div>
+          <button onClick={onCancel} disabled={!!busy} className="p-1 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 disabled:opacity-40 transition-colors shrink-0"><X size={18} /></button>
+        </div>
+
+        <div className="px-5 py-3 border-b border-gray-100 shrink-0 space-y-2.5">
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] font-semibold text-black/70 shrink-0 w-14">묶기</span>
+            <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
+              {GROUP_MODES.map(m => (
+                <button key={m.id} onClick={() => applyMode(m.id)} disabled={!!busy} title={m.hint}
+                  className={`px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors disabled:opacity-40 ${mode === m.id ? 'bg-white shadow-sm text-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-[10px] text-gray-400 truncate">{GROUP_MODES.find(m => m.id === mode)?.hint}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] font-semibold text-black/70 shrink-0 w-14">분류</span>
+            <div className="flex items-center gap-1.5">
+              {CATEGORIES.map(c => {
+                const Icon = CATEGORY_ICON[c]; const m = CATEGORY_META[c];
+                return (
+                  <button key={c} onClick={() => setAllCategories(c)} disabled={!!busy}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[12px] font-medium border transition-colors disabled:opacity-40"
+                    style={{ background: m.bg, borderColor: m.border, color: m.text }}>
+                    <Icon size={12} /> {m.name}
+                  </button>
+                );
+              })}
+            </div>
+            <span className="text-[10px] text-gray-400">전체 지정 · 아래에서 개별 변경</span>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-1.5 min-h-0">
+          {resolved.map(({ group, conflict, suggestion, skipped }) => {
+            const meta = CATEGORY_META[group.category];
+            const over = group.files.length > MAX_ELEMENT_IMAGES;
+            return (
+              <div key={group.key} className={`flex items-center gap-2.5 rounded-xl border p-2 transition-colors ${over ? 'border-red-300 bg-red-50/40' : skipped ? 'border-gray-200 bg-gray-50 opacity-60' : conflict ? 'border-amber-300 bg-amber-50/40' : 'border-gray-200'}`}>
+                <div className="relative shrink-0 w-10 h-10">
+                  {group.files.slice(0, 3).map((fi, i) => (
+                    <img key={fi} src={previews[fi]} alt="" loading="lazy" decoding="async"
+                      className="absolute w-10 h-10 rounded-lg object-cover bg-gray-100 border border-white"
+                      style={{ left: i * 3, top: i * -2, zIndex: 3 - i }} />
+                  ))}
+                  {group.files.length > 1 && (
+                    <span className="absolute -bottom-1 -right-1 z-10 text-[9px] font-semibold text-white bg-gray-800/85 rounded px-1 leading-[14px]">{group.files.length}</span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0 space-y-1">
+                  <input value={group.name} disabled={!!busy}
+                    onChange={(e) => patch(group.key, { name: e.target.value })}
+                    className="w-full px-2 py-1 text-[13px] bg-[#fafafc] border border-black/5 rounded-lg outline-none focus:border-[#0071e3] transition-colors disabled:opacity-50" />
+                  {over && <span className="text-[10px] text-red-600">이미지 {group.files.length}장 — 어셋 하나당 최대 {MAX_ELEMENT_IMAGES}장입니다. 묶기를 바꾸거나 나눠서 넣어주세요.</span>}
+                  {!over && conflict && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] text-amber-700">
+                        {conflict === 'existing' ? '이미 이 컬렉션에 있는 이름입니다' : '이번에 끌어온 파일끼리 이름이 겹칩니다'}
+                      </span>
+                      <button onClick={() => patch(group.key, { rename: !group.rename })} disabled={!!busy}
+                        className="text-[10px] font-medium text-[#0071e3] hover:underline disabled:opacity-40">
+                        {group.rename ? '건너뛰기로 변경' : `‘${suggestion}’ 로 추가`}
+                      </button>
+                    </div>
+                  )}
+                  {!over && conflict && group.rename && <span className="text-[10px] text-emerald-700">‘{suggestion}’ 로 추가됩니다</span>}
+                  {!over && !conflict && !group.name.trim() && <span className="text-[10px] text-gray-400">이름이 비어 건너뜁니다</span>}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {CATEGORIES.map(c => {
+                    const Icon = CATEGORY_ICON[c]; const on = group.category === c;
+                    return (
+                      <button key={c} onClick={() => patch(group.key, { category: c })} disabled={!!busy} title={CATEGORY_META[c].name}
+                        className={`p-1.5 rounded-lg border transition-colors disabled:opacity-40 ${on ? '' : 'border-transparent text-gray-300 hover:text-gray-500 hover:bg-gray-50'}`}
+                        style={on ? { background: meta.bg, borderColor: meta.border, color: meta.text } : undefined}>
+                        <Icon size={13} />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="px-5 py-3 border-t border-gray-100 shrink-0 space-y-2">
+          {failed.length > 0 && <p className="text-[11px] text-red-500 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-line max-h-20 overflow-y-auto">{failed.join('\n')}</p>}
+          {/* The library is global and outlives whichever project is open, so a big
+              collection is not itself a problem. What one request can carry is — say the
+              number rather than let it surface as a send-time rejection. */}
+          {existing.length + willAdd.length > sendCap && (
+            <p className="text-[11px] text-amber-700 bg-amber-50 rounded-lg px-3 py-2 flex gap-1.5">
+              <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+              <span>추가 후 이 컬렉션의 어셋은 {existing.length + willAdd.length}개가 됩니다. 저장에는 문제없지만, 한 번의 프롬프트에 언급할 수 있는 이미지는 {modelName} 기준 {sendCap}장입니다.</span>
+            </p>
+          )}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[12px] text-gray-500">
+              {busy ? `처리 중… ${busy}/${totalImages}` :
+                `어셋 ${willAdd.length}개 · 이미지 ${totalImages}장${skippedCount ? ` · ${skippedCount}개 건너뜀` : ''}`}
+            </span>
+            <div className="flex items-center gap-2">
+              <button onClick={onCancel} disabled={!!busy} className="text-[13px] font-medium text-gray-500 hover:text-gray-800 px-3 py-2 rounded-lg hover:bg-gray-100 disabled:opacity-40 transition-colors">취소</button>
+              <button onClick={commit} disabled={!!busy || willAdd.length === 0 || overSized.length > 0}
+                className="flex items-center gap-1.5 text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] disabled:opacity-40 px-4 py-2 rounded-lg transition-colors active:scale-95">
+                {busy ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} 추가
+              </button>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
 }
 
 /* ─── Asset create/edit form (local draft → committed on save) ─── */
@@ -130,18 +367,27 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
       onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
       onDrop={(e) => { e.preventDefault(); e.stopPropagation(); }}
     >
+      {/* Header / body / footer as a real flex column instead of one scrolling box with
+          sticky ends: the sticky footer used to float OVER the last row of images, so a
+          12-image asset read as cut off rather than scrollable.
+          ★ max-h-FULL, never a vh value. This overlay is absolute-positioned INSIDE the
+          library modal, which is h-[85vh] with overflow-hidden. A max-h-[88vh] child is
+          therefore taller than the box it lives in, and items-center splits the overflow
+          across the top AND bottom — the parent then clips both, which is the actual
+          reason images "got cut off" no matter how the inside scrolled. `full` is 100% of
+          the padded parent, so the footer is always reachable and only the body scrolls. */}
       <motion.div
         initial={{ scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 10 }}
         transition={{ duration: 0.16, ease: 'easeOut' }}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[88vh] overflow-y-auto"
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-full flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100 sticky top-0 bg-white/95 backdrop-blur-xl z-10">
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100 bg-white shrink-0">
           <h3 className="text-[15px] font-semibold text-[#1d1d1f] tracking-tight">{initial ? '어셋 편집' : '새 어셋'}</h3>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"><X size={18} /></button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="flex-1 overflow-y-auto p-5 space-y-4 min-h-0">
           {/* Category */}
           <div className="space-y-1.5">
             <label className="block text-[12px] font-semibold text-black/70">카테고리</label>
@@ -175,14 +421,20 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
               className="w-full px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[13px] outline-none focus:border-[#0071e3] transition-colors resize-none" />
           </div>
 
-          {/* Images — full-res `url` for crisp display; thumbnail is only for tiny pills */}
+          {/* Images — thumbnail in the grid, full-res only on hover.
+              These cells are ~96px. Painting the full-res `url` in each of them meant
+              decoding every attached image at native size the moment the editor opened:
+              a 12-image asset is ~24M pixels ≈ 100MB of bitmap, which is what made this
+              dialog crawl. The card grid above keeps full-res deliberately (its cells are
+              ~270px and the old 80px thumb looked mushy there) — at this size it does not.
+              HoverZoom still gets `fullSrc`, so zooming is as crisp as it ever was. */}
           <div className="space-y-1.5">
             <label className="block text-[12px] font-semibold text-black/70">이미지 <span className="text-gray-400 font-normal">{images.length}/{MAX_ELEMENT_IMAGES}</span></label>
             <div className="grid grid-cols-4 gap-2">
               {images.map(img => (
                 <div key={img.id} className="relative aspect-square rounded-[10px] overflow-hidden border border-gray-200 bg-gray-50 group">
-                  <HoverZoom className="block w-full h-full" src={img.url}>
-                    <img src={img.url} alt="" className="w-full h-full object-cover cursor-zoom-in" />
+                  <HoverZoom className="block w-full h-full" src={img.thumbnailUrl || img.url} fullSrc={img.url}>
+                    <img src={img.thumbnailUrl || img.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover cursor-zoom-in" />
                   </HoverZoom>
                   <button onClick={() => setImages(prev => prev.filter(i => i.id !== img.id))}
                     className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity" title="제거">
@@ -219,7 +471,7 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
           {error && <p className="text-[12px] text-red-500 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-line">{error}</p>}
         </div>
 
-        <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-gray-100 sticky bottom-0 bg-white/95 backdrop-blur-xl">
+        <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-gray-100 bg-white shrink-0">
           <div className="flex items-center gap-1">
             {onDelete && <button onClick={onDelete} className="flex items-center gap-1.5 text-[13px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-2 rounded-lg transition-colors"><Trash2 size={15} /> 삭제</button>}
             {onShare && <button onClick={onShare} disabled={sharing} title="이 어셋을 공유 링크로" className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-[#0071e3] hover:bg-indigo-50 disabled:opacity-50 px-3 py-2 rounded-lg transition-colors">{sharing ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />} 공유</button>}
@@ -274,7 +526,7 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
       className="absolute inset-0 z-20 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={onClose} onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }} onDrop={(e) => { e.preventDefault(); e.stopPropagation(); }}>
       <motion.div initial={{ scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 10 }} transition={{ duration: 0.16, ease: 'easeOut' }}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-full overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100">
           <h3 className="text-[15px] font-semibold text-[#1d1d1f]">어셋 가져오기</h3>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"><X size={18} /></button>
@@ -362,6 +614,9 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   const [shareBusy, setShareBusy] = useState<string | null>(null); // key currently generating a link
   const [shareLink, setShareLink] = useState<string | null>(null); // generated link banner
   const [importing, setImporting] = useState(false);              // import dialog open
+  const [intake, setIntake] = useState<File[] | null>(null);      // dropped OS files awaiting category
+  const [dropHint, setDropHint] = useState(false);                // drag is over the grid
+  const [dropNote, setDropNote] = useState('');                   // why a drop was refused / what it added
 
   // Keep the viewed collection valid: prefer current → bound → first.
   useEffect(() => {
@@ -379,13 +634,21 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (shareLink) setShareLink(null);
+      else if (intake) setIntake(null);
       else if (importing) setImporting(false);
       else if (editing) setEditing(null);
       else if (!renaming) onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, editing, renaming, shareLink, importing, onClose]);
+  }, [open, editing, renaming, shareLink, importing, intake, onClose]);
+
+  // The drop note is an outcome, not a dialog — it goes away on its own.
+  useEffect(() => {
+    if (!dropNote) return;
+    const t = setTimeout(() => setDropNote(''), 4000);
+    return () => clearTimeout(t);
+  }, [dropNote]);
 
   const collectionAssets = useMemo(
     () => elementAssets.filter(a => a.collectionId === selectedCollectionId),
@@ -426,6 +689,33 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
       updateElementAsset(editing.id, data); // id + collectionId pinned → mention pills + send stay valid
     }
     setEditing(null);
+  };
+
+  // ─── Drag & drop from the OS: one element per file, named after the file ───
+  // Refused rather than guessed when there is nowhere to put them: silently inventing a
+  // collection would bind this chat to it as a side effect (selectCollection does that),
+  // which is not what dropping a file asks for.
+  const handleDropFiles = (list: FileList | null) => {
+    setDropHint(false);
+    const files = Array.from(list || []).filter(f => f.type.startsWith('image/'));
+    if (!files.length) { setDropNote('이미지 파일만 추가할 수 있습니다.'); return; }
+    if (!selectedCollectionId) { setDropNote('먼저 왼쪽에서 컬렉션을 선택하거나 만들어 주세요.'); return; }
+    setDropNote('');
+    setIntake(files);
+  };
+
+  const commitIntake = (items: { name: string; category: AssetCategory; images: ElementImage[] }[]) => {
+    if (selectedCollectionId) {
+      // addElementAsset assigns the id, so mention pills bind to these exactly like
+      // hand-made assets do — nothing about the mention path is special-cased here.
+      items.forEach(it => addElementAsset({
+        collectionId: selectedCollectionId, category: it.category,
+        name: it.name, description: '', images: it.images,
+      }));
+    }
+    setIntake(null);
+    const imgs = items.reduce((n, it) => n + it.images.length, 0);
+    setDropNote(items.length ? `어셋 ${items.length}개 (이미지 ${imgs}장)를 추가했습니다.` : '');
   };
 
   // ─── Share: collection or single asset → R2 link (7-day, copied to clipboard) ───
@@ -571,12 +861,32 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                   </div>
                 </div>
 
-                {/* Grid */}
-                <div className="flex-1 overflow-y-auto p-5">
+                {/* Grid — also the drop target for OS files.
+                    Guarded on the overlays: the editor and the import dialog each own their
+                    own drop behaviour (images into ONE asset / a bundle file), and they sit
+                    above this. Reacting here while one of them is open would mean a drop
+                    aimed at the editor quietly created new assets instead. */}
+                <div className="flex-1 overflow-y-auto p-5 relative"
+                  onDragEnter={(e) => { if (!editing && !importing && !intake && e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); setDropHint(true); } }}
+                  onDragOver={(e) => { if (!editing && !importing && !intake && e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); e.stopPropagation(); setDropHint(true); } }}
+                  onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(false); }}
+                  onDrop={(e) => {
+                    if (editing || importing || intake) return;
+                    e.preventDefault(); e.stopPropagation();
+                    handleDropFiles(e.dataTransfer?.files || null);
+                  }}>
+                  {dropHint && (
+                    <div className="absolute inset-3 z-10 rounded-2xl border-2 border-dashed border-[#0071e3] bg-[#0071e3]/5 flex flex-col items-center justify-center gap-1.5 pointer-events-none">
+                      <Upload size={26} className="text-[#0071e3]" />
+                      <p className="text-[13px] font-medium text-[#0071e3]">놓으면 파일 이름 그대로 어셋이 됩니다</p>
+                      <p className="text-[11px] text-[#0071e3]/70">분류(캐릭터·로케이션·프랍)만 고르면 끝</p>
+                    </div>
+                  )}
                   {filtered.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-2">
                       <ImageIcon size={40} className="text-gray-300" />
                       <p className="text-[14px]">{collectionAssets.length === 0 ? '아직 어셋이 없습니다. “어셋 추가”로 등록하세요.' : '검색 결과가 없습니다.'}</p>
+                      {collectionAssets.length === 0 && <p className="text-[12px] text-gray-300">이미지 파일을 여기로 끌어다 놓아도 됩니다.</p>}
                     </div>
                   ) : (
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
@@ -643,6 +953,33 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
               </div>
               <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">받는 사람이 링크를 열면 어셋 파일이 다운로드됩니다 → element에서 <b>‘가져오기’</b>로 추가. · 링크는 <b>24시간</b> 유효(그 안엔 몇 번이든 다시 받기 가능)하며, 만료되면 서버에서 <b>자동 삭제</b>됩니다.</p>
             </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Drop result / refusal note — one line, dismissible, never blocks */}
+        <AnimatePresence>
+          {dropNote && (
+            <motion.div key="drop-note" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.16 }}
+              className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-white rounded-xl shadow-xl border border-gray-200 px-3.5 py-2">
+              <span className="text-[12px] text-gray-700">{dropNote}</span>
+              <button onClick={() => setDropNote('')} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Dropped-files intake (name from file, category asked) */}
+        <AnimatePresence>
+          {intake && selectedCollection && (
+            <DropIntake
+              files={intake}
+              existing={collectionAssets}
+              collectionName={selectedCollection.name}
+              sendCap={sendCap}
+              modelName={modelName}
+              onCancel={() => setIntake(null)}
+              onCommit={commitIntake}
+            />
           )}
         </AnimatePresence>
 
