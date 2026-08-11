@@ -75,9 +75,56 @@ const reportedTasks = new Set<string>();
 
 // Map: BytePlus task id → billing/tracking project name (from the app's dropdown).
 // Captured at task-create time (stripped from the BytePlus payload), read at
-// report time so the credit tracker can attribute usage to the project. Cleared
-// on terminal status alongside the R2 keys.
+// report time so the credit tracker can attribute usage to the project.
+//
+// ★ Mirrored to disk, and that is not belt-and-braces — it is the fix for silent
+// mis-billing. A generation outlives the app: it keeps running on BytePlus across a
+// quit, a crash and an auto-update. This map used to live only in memory, so any
+// restart between "task created" and "task reported" lost the attribution, and the row
+// still landed in usage_log — just with a blank project. Nothing errored, nothing was
+// logged; the usage simply stopped belonging to anyone.
+// Measured 2026-08-11: cgt-20260811142046-7zfj4 and -8tlnn (one send, output_count 2)
+// reported ~68 minutes after creation with an empty project, while sends from six
+// minutes later reported "TA Test" correctly — the batch boundary is the restart.
 const taskToProject = new Map<string, string>();
+// Same directory CACHE_DIR resolves to further down (userData/media-cache in the packaged
+// app), resolved independently because that constant is declared inside startServer().
+const TASK_PROJECT_DIR = process.env.MEDIA_CACHE_DIR || path.join(process.cwd(), 'media-cache');
+const TASK_PROJECT_FILE = path.join(TASK_PROJECT_DIR, 'task-project.json');
+// Entries are dropped when the task is reported. This TTL only catches the leftovers —
+// tasks that failed, expired, or were abandoned — so the file can't grow forever.
+const TASK_PROJECT_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+const taskProjectAt = new Map<string, number>();
+
+function loadTaskProjects() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(TASK_PROJECT_FILE, 'utf8')) as Record<string, { project: string; at: number }>;
+    const now = Date.now();
+    let kept = 0;
+    for (const [id, v] of Object.entries(raw || {})) {
+      if (!v?.project || now - (v.at || 0) > TASK_PROJECT_TTL_MS) continue;
+      taskToProject.set(id, v.project);
+      taskProjectAt.set(id, v.at);
+      kept++;
+    }
+    if (kept) console.log(`[Tracker] restored ${kept} task→project mapping(s) from disk`);
+  } catch { /* 없거나 깨졌으면 빈 상태로 시작 — 이 파일은 캐시지 원장이 아니다 */ }
+}
+
+// Writes are tiny (a few dozen short strings) and rare (one per task create / report),
+// so this stays synchronous: a debounce would reintroduce the exact hole it fixes —
+// a task created seconds before the app quits is precisely the one that needs the write.
+function saveTaskProjects() {
+  try {
+    const out: Record<string, { project: string; at: number }> = {};
+    for (const [id, project] of taskToProject) out[id] = { project, at: taskProjectAt.get(id) || Date.now() };
+    if (!fs.existsSync(TASK_PROJECT_DIR)) fs.mkdirSync(TASK_PROJECT_DIR, { recursive: true });
+    fs.writeFileSync(TASK_PROJECT_FILE, JSON.stringify(out));
+  } catch (e: any) {
+    console.warn('[Tracker] task→project 저장 실패:', e?.message);
+  }
+}
+loadTaskProjects();
 
 // Map: BytePlus task id → R2 object keys uploaded for this task.
 // extend_video can carry up to 3 videos, so this is string[] not string.
@@ -987,6 +1034,8 @@ async function startServer() {
       // Remember which billing project this task belongs to (read at report time).
       if (response.ok && data?.id && typeof billingProject === 'string' && billingProject) {
         taskToProject.set(data.id, billingProject);
+        taskProjectAt.set(data.id, Date.now());
+        saveTaskProjects();   // 재시작을 넘겨야 하므로 만든 즉시 디스크에 남긴다
         console.log(`[Tracker] task ${data.id} → project "${billingProject}"`);
       }
 
@@ -1052,7 +1101,16 @@ async function startServer() {
       // client stops asking) doesn't fire duplicate DeleteObjects.
       if (data?.status === 'succeeded' || data?.status === 'failed' || data?.status === 'expired') {
         scheduleR2Delete(req.params.id);
-        taskToProject.delete(req.params.id); // report (above) already read it
+        // Drop the mapping only once the report above has actually gone out. The old code
+        // deleted on ANY terminal status, but the report needs `usage.total_tokens` too —
+        // so a `succeeded` that arrived a moment before usage was populated threw the
+        // project away, and the next poll (10s later) reported it with a blank project.
+        // A failed/expired task is never reported at all, so it leaves nothing to read;
+        // those entries are cleaned up by the TTL prune at startup instead.
+        if (reportedTasks.has(req.params.id) && taskToProject.delete(req.params.id)) {
+          taskProjectAt.delete(req.params.id);
+          saveTaskProjects();
+        }
       }
 
       res.status(response.status).json(data);
