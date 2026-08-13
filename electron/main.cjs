@@ -114,6 +114,29 @@ function createWindow() {
       });
     }
   });
+
+  // A renderer can die on its own — an out-of-memory kill is the realistic one here, since
+  // the element library holds full-resolution images as base64 and a big collection is
+  // hundreds of megabytes of decoded bitmap. Nothing watched for it, so the window stayed
+  // blank or vanished while the process lived on holding the single-instance lock: the
+  // app was then unopenable until Task Manager. Rebuild it instead.
+  // `clean-exit` is the normal teardown during quit — leave that alone.
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[Renderer] gone:', details?.reason, details?.exitCode);
+    if (app.isQuitting || details?.reason === 'clean-exit') return;
+    try { mainWindow?.destroy(); } catch { /* 이미 사라졌으면 그대로 진행 */ }
+    mainWindow = null;
+    createWindow();
+  });
+
+  // The page failing to load leaves a window that is present but empty, which reads as
+  // "the app opened and did nothing". Retry the local server rather than sit on it.
+  // -3 is ERR_ABORTED, which fires on ordinary in-app navigation.
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+    if (!isMainFrame || code === -3 || app.isQuitting) return;
+    console.error('[Renderer] load failed:', code, desc, url);
+    setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(`http://localhost:${PORT}`); }, 1000);
+  });
 }
 
 // ─── Tray ───
@@ -130,11 +153,28 @@ function createTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Freewill Seedance 2.0', enabled: false },
     { type: 'separator' },
-    { label: 'Open', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
+    { label: 'Open', click: () => showOrCreateWindow() },
     { type: 'separator' },
     { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
   ]));
-  tray.on('double-click', () => { mainWindow?.show(); mainWindow?.focus(); });
+  tray.on('double-click', () => showOrCreateWindow());
+}
+
+// ─── The one way back to a window ────────────────────────────────────────────
+// Every "bring the app up" path goes through here, and every one of them used to be
+// `mainWindow?.show()` — a no-op when there is no window left.
+//
+// That is not hypothetical. `window-all-closed` is deliberately empty (closing hides to
+// tray), so losing the window does NOT quit the app: the process stays alive holding the
+// single-instance lock, every later launch quits on that lock, and the icon does nothing
+// forever. The only cure was Task Manager. Reported 2026-08-13 as "the app won't open
+// after updating"; the event log showed no crash of the installed build, which is exactly
+// what this looks like — a live process with nothing to show.
+function showOrCreateWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) { createWindow(); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 }
 
 // ─── Auto Updater ───
@@ -496,13 +536,10 @@ app.on('ready', () => {
   setupAutoUpdater();
 });
 
-app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-  }
-});
+// Launching again while an instance holds the lock must ALWAYS put a window on screen —
+// creating one if the old one is gone. Before this it silently did nothing in exactly the
+// case where the user is clicking the icon because they see nothing.
+app.on('second-instance', () => showOrCreateWindow());
 
 app.on('window-all-closed', () => {});
-app.on('activate', () => { if (!mainWindow) createWindow(); else mainWindow.show(); });
+app.on('activate', () => showOrCreateWindow());
