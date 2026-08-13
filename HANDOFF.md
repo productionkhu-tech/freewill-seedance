@@ -93,6 +93,31 @@ npx electron-builder --win --publish always
 **`npx electron-builder` 를 파이프/체이닝에 물리지 마라.** 실행이 통째로 누락된다(에러도 안
 남는다). 단독 실행하고 릴리스 존재를 API 로 검증할 것.
 
+### 2-3b. `quitAndInstall` 은 반드시 `(true, true)` — 인자 없이 부르지 마라
+
+2026-08-13, 팀에서 **"업데이트하니까 앱이 안 켜진다. 트레이에도 작업관리자에도 없다"**.
+설치본은 직접 실행하면 멀쩡했고 크래시 기록도 없었다. 수동으로 Setup exe 를 받아 깔면
+잠깐 살아났다가, 그 앱이 다시 업데이트를 찾으면 같은 자리로 돌아갔다.
+
+`autoUpdater.quitAndInstall()` 의 기본값은 `isSilent = false` 이고 이 앱의 NSIS 는
+`oneClick: false` 다. 그래서 업데이트마다 **앱이 먼저 종료된 뒤 설치 마법사 창이 뜬다.**
+그 창이 다른 창 뒤로 가리면 사용자가 보는 것은 사라진 앱뿐이다. 프로세스가 정말 없으니
+작업관리자에도 안 보이고, 아이콘을 눌러도 설치 대기 중이라 뜨지 않는다.
+
+실측 로그(1301 → 1302 자동 업데이트, 재현 성공):
+
+```
+Install on explicit quitAndInstall
+Install: isSilent: false, isForceRunAfter: true
+Update installer has already been triggered. Quitting application.
+→ 앱 프로세스 0개 · "Freewill Seedance 2.0 설치" 창이 클릭 대기
+```
+
+`quitAndInstall(true, true)` 로 고정한다. `/S` 무인 설치 + `--force-run` 자동 재실행이며,
+둘 다 `NsisUpdater.doInstall` 이 그대로 CLI 인자로 넘긴다. 참고로 `isSilent = false` 일
+때는 두 번째 인자가 무시되고 `autoRunAppAfterInstall` 이 대신 쓰인다
+(`BaseUpdater.quitAndInstall`), 그래서 "force-run 을 켰는데도" 마법사가 떴던 것이다.
+
 ### 2-4. 배포 후 검증 (이 5개는 매번)
 
 ```
