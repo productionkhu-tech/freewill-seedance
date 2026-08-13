@@ -193,12 +193,24 @@ function setupAutoUpdater() {
     autoUpdater.downloadUpdate();
   });
 
-  autoUpdater.on('update-downloaded', () => {
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('[Updater] downloaded', info?.version, '→ 조용히 설치 후 재실행');
     app.isQuitting = true;
-    autoUpdater.quitAndInstall();
+    // ★ (true, true) = 조용히 설치하고, 끝나면 앱을 다시 띄운다. 인자 없이 부르면 안 된다.
+    // quitAndInstall() 의 기본값은 isSilent=false 이고, 이 앱의 NSIS 는 oneClick:false —
+    // 그래서 업데이트할 때마다 앱이 먼저 종료된 뒤 "설치 마법사 창"이 떴다. 그 창이 다른
+    // 창 뒤에 가리면 사용자가 보는 것은 트레이에도 작업관리자에도 없는 사라진 앱뿐이고,
+    // 아이콘을 눌러도 설치 중이라 뜨지 않는다. 2026-08-13 팀에서 "업데이트하니까 앱이
+    // 안 켜진다"로 보고된 것이 이것이다. 수동으로 Setup exe 를 받아 깔면 잠깐 되살아나고,
+    // 그 앱이 다시 업데이트를 찾아 같은 자리로 돌아가는 것까지 증상이 일치했다.
+    // isSilent=true 면 /S 로 설치하고, isForceRunAfter=true 가 --force-run 을 붙여
+    // 설치 후 자동 실행한다(둘 다 NsisUpdater.doInstall 에서 인자로 나간다).
+    autoUpdater.quitAndInstall(true, true);
   });
 
-  autoUpdater.on('error', (err) => console.error('[Updater]', err));
+  // 업데이트가 실패하면 앱은 계속 쓸 수 있어야 한다 — 조용히 넘기되 기록은 남긴다.
+  autoUpdater.on('error', (err) => console.error('[Updater] error:', err?.message || err));
+  autoUpdater.on('download-progress', (p) => console.log(`[Updater] ${Math.round(p.percent)}%`));
 
   if (!isDev) autoUpdater.checkForUpdates().catch(() => {});
 }
