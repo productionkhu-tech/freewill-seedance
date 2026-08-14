@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, isDemoModel } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -212,13 +212,6 @@ export function SettingsPanel() {
   // panel only) and is committed to the store ONCE on release. Writing the store per
   // drag-tick re-serialized the whole persisted blob + re-rendered the entire app
   // dozens of times a second — the duration/output gauges visibly stuttered.
-  // Whether this install has the 2.5 Demo credentials. Local state on purpose: it's a
-  // read-only server fact, so putting it in the store would add a write + a re-render
-  // of every message card for no gain.
-  const [demo25, setDemo25] = useState(false);
-  useEffect(() => {
-    fetch('/api/capabilities').then(r => r.json()).then(j => setDemo25(j?.demo25 === true)).catch(() => {});
-  }, []);
   const [draftDuration, setDraftDuration] = useState<number | null>(null);
   const [draftOutput, setDraftOutput] = useState<number | null>(null);
   // A project switch mid-drag must not carry a stale draft over.
@@ -297,15 +290,12 @@ export function SettingsPanel() {
   // knock every saved 2.5 project down to 2.0 on restart. The placeholder below covers the
   // gap instead; the send gate (client + server) is what actually enforces this.
   const selectableModels = MODELS.filter(m =>
-    (!m.demo || demo25) &&
-    (!billingProject || isModelAllowed(m.id, { billingProject, billingProjects })));
+    !billingProject || isModelAllowed(m.id, { billingProject, billingProjects }));
   // Shown when the stored model isn't in the list above, so the control reads as "not
   // available to you" instead of silently displaying the first option as if it were picked.
   const modelPlaceholder = selectableModels.some(m => m.id === settings.model)
     ? undefined
-    : MODELS.find(m => m.id === settings.model)?.demo && !demo25
-      ? 'Seedance 2.5 Demo (키 없음)'
-      : `${modelLabel} (권한 없음)`;
+    : `${modelLabel} (권한 없음)`;
   // Single store write on slider release (no-op if nothing is in flight).
   const commitDuration = () => { if (draftDuration != null) { updateProjectSettings(project.id, { duration: draftDuration }); setDraftDuration(null); } };
   const commitOutput = () => { if (draftOutput != null) { updateProjectSettings(project.id, { output_count: draftOutput }); setDraftOutput(null); } };

@@ -14,27 +14,17 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // Shared with the client store — see src/lib/model-access.ts for why these two facts
 // live outside both files.
-import { DEMO_MODEL_ID, MODEL_GRANTS } from './src/lib/model-access';
+import { MODEL_GRANTS } from './src/lib/model-access';
 
 dotenv.config();
 
 const API_KEY = process.env.SEEDANCE_API_KEY;
 
-// ── Seedance 2.5 Demo (BytePlus demo endpoint) ──────────────────────────────
-// A completely separate BytePlus credential that can ONLY reach its own endpoint —
-// measured: this key on any other model, and the normal key on this endpoint, both
-// return AccessDenied. So it can't be folded into SEEDANCE_API_KEY; it's its own lane.
-// Both vars are set by F:\시댄스\2.5 demo.bat and are absent for users who shouldn't
-// have 2.5, which is exactly how access is granted (see /api/capabilities).
-// The endpoint id lives here and NOT in the client bundle: the demo terms forbid
-// sharing it, and the frontend ships to every team and to a public repo. The client
-// only ever says DEMO_MODEL_ID; this file substitutes the real endpoint.
-const DEMO25_KEY = process.env.SEEDANCE_25_DEMO_KEY;
-const DEMO25_ENDPOINT = process.env.SEEDANCE_25_DEMO_ENDPOINT;
-const DEMO25_AVAILABLE = !!(DEMO25_KEY && DEMO25_ENDPOINT);
-// DEMO_MODEL_ID / MODEL_GRANTS are imported above — they were hand-synced with a comment
-// until 26.8.1101, which is fine for a label and not fine for a permission.
-console.log(`[2.5 Demo] ${DEMO25_AVAILABLE ? 'enabled' : 'disabled (env not set)'}`);
+// ★ 2.5 Demo — 2026-08-14 종료. 별도 키(SEEDANCE_25_DEMO_KEY) · 별도 엔드포인트 ·
+// 별도 계약으로 돌던 레인이었고, 키를 읽는 코드부터 모델 id, 요청 분기,
+// /api/capabilities 게이트까지 전부 제거했다. 남은 것은 은퇴한 모델 id 를 정식 2.5 로
+// 옮기는 매핑 하나뿐이다(src/lib/model-access.ts). 되살릴 일이 생기면 되돌리지 말고
+// 새로 설계할 것 — 반쯤 남은 분기가 제일 위험하다.
 const R2_ENDPOINT = process.env.R2_ENDPOINT;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
@@ -812,13 +802,6 @@ async function startServer() {
     }
   });
 
-  // What this install can do, decided purely by which env vars are present. The client
-  // uses it to show/hide the 2.5 Demo model. Deliberately exposes only a boolean —
-  // never the key or the endpoint id.
-  app.get('/api/capabilities', (_req, res) => {
-    res.json({ demo25: DEMO25_AVAILABLE });
-  });
-
   // ── Gemini Omni Flash — video generation proxy (separate provider) ──────────
   // Uses NANOBANANA_STUDIO_KEY (Google AI Studio). The Interactions create call is
   // SYNCHRONOUS (~30-40s for a 720p clip) and returns the video inline as base64
@@ -961,26 +944,11 @@ async function startServer() {
     // receive it (unknown top-level fields can 400). The rest is forwarded as-is.
     const { project: billingProject, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
 
-    // 2.5 Demo rides its own key + endpoint. Everything else is untouched: `isDemo`
-    // is false for every existing model, so the body and key below are identical to
-    // what they were. Reject early with a clear message rather than letting the
-    // normal key hit the demo endpoint (which returns an opaque AccessDenied).
-    const isDemo = byteplusBody.model === DEMO_MODEL_ID;
-    if (isDemo) {
-      if (!DEMO25_AVAILABLE) {
-        return res.status(403).json({ error: { message: 'Seedance 2.5 Demo 키가 설정되지 않았습니다. ' + (process.platform === 'win32'
-              ? 'F:\\시댄스\\2.5 demo.bat 을 실행한 뒤 앱을 재시작해주세요.'
-              : '.env 에 SEEDANCE_25_DEMO_KEY / SEEDANCE_25_DEMO_ENDPOINT 를 추가한 뒤 다시 실행해주세요.') } });
-      }
-      byteplusBody.model = DEMO25_ENDPOINT;   // logical id → real endpoint (server-only)
-    }
-
     // Gated models (2.5) must be granted to the SELECTED billing project. Checked here,
     // against the tracker, so no amount of switching app projects / models / stored state
-    // gets a request through. Demo is exempt by construction: its own key, its own
-    // endpoint, never billed to a project.
+    // gets a request through.
     const grant = MODEL_GRANTS[byteplusBody.model as string];
-    if (grant && !isDemo) {
+    if (grant) {
       const roster = await getRoster();
       if (!roster) {
         return res.status(503).json({ error: { message: '크레딧 시트를 확인할 수 없어 이 모델을 사용할 수 없습니다. 잠시 후 다시 시도해주세요.' } });
@@ -995,7 +963,7 @@ async function startServer() {
     try {
       const response = await fetch('https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${isDemo ? DEMO25_KEY : API_KEY}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
         body: JSON.stringify(byteplusBody)
       });
 
@@ -1049,14 +1017,9 @@ async function startServer() {
 
   // BytePlus API — Get Task
   app.get('/api/byteplus/tasks/:id', async (req, res) => {
-    // ?demo=1 says "this task was created on the demo key". The client derives it from
-    // the message's own usedSettings.model, so it survives an app restart — a server-side
-    // taskId→key Map would not, and an in-flight 2.5 task would then be polled with the
-    // wrong key forever. Absent (every existing caller) → normal key, unchanged.
-    const isDemo = req.query.demo === '1' && DEMO25_AVAILABLE;
     try {
       const response = await fetch(`https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/${req.params.id}`, {
-        headers: { 'Authorization': `Bearer ${isDemo ? DEMO25_KEY : API_KEY}` }
+        headers: { 'Authorization': `Bearer ${API_KEY}` }
       });
       const data = await response.json() as any;
 
@@ -1064,14 +1027,7 @@ async function startServer() {
       // (reportedTasks dedupes), only on success with valid usage data, and any
       // failure here is swallowed so the polling response to the frontend is
       // never delayed or corrupted.
-      // ★ Demo generations are deliberately NOT reported: they run on a separate
-      // BytePlus contract, aren't part of team credit, and TEAM_NAME (derived by
-      // hashing SEEDANCE_API_KEY) would be meaningless for them anyway.
-      // NOTE: BytePlus's task list is NOT a substitute ledger for the demo key —
-      // measured 2026-07-30, that account is SHARED (2186 tasks, oldest 7/23, i.e.
-      // 5 days before our endpoint existed, plus traffic while we were idle). The
-      // app's own taskIds are the only trustworthy record of what WE generated.
-      if (!isDemo && data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(req.params.id)) {
+      if (data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(req.params.id)) {
         reportedTasks.add(req.params.id);
         fetch(TRACKER_URL, {
           method: 'POST',
@@ -1125,7 +1081,7 @@ async function startServer() {
     try {
       const response = await fetch(`https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/${req.params.id}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${req.query.demo === '1' && DEMO25_AVAILABLE ? DEMO25_KEY : API_KEY}` }
+        headers: { 'Authorization': `Bearer ${API_KEY}` }
       });
       // Clean up R2 inputs whether or not the upstream cancel succeeded — by the time
       // a user clicks cancel they don't want the bytes lingering, and the 1-day

@@ -3,7 +3,7 @@ import { persist, type PersistStorage, type StorageValue } from 'zustand/middlew
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS } from './lib/utils';
-import { MODEL_GRANTS } from './lib/model-access';
+import { MODEL_GRANTS, resolveModelId } from './lib/model-access';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -803,12 +803,10 @@ export const defaultSettings: GenerationSettings = {
 //   adaptiveOnly  modes where the API accepts ONLY ratio:'adaptive'
 //   autoDurationOnly modes where the API accepts ONLY duration:-1
 //   refTaskTypes  mode → API `omni_reference_task_type` (default: omitted → API infers)
-//   demo        routed to a separate key/endpoint server-side, never billed to the sheet
 //   defaults    the model's OWN documented defaults, used when a mode is picked
 //               (default: the app-wide defaultSettings — what 2.0 has always used)
 
-// Seedance 2.5's capability set, shared by the official row and the demo row (same model
-// underneath — verified: identical output and identical token count on both keys).
+// Seedance 2.5's capability set.
 // Numbers are the official datasheet AND re-measured against the live API 2026-08-07:
 //   · 480p/720p only. The doc states 1080p/4k are unsupported; the API happens to ACCEPT
 //     those values at validation, which is a validation gap, not a capability — do not be
@@ -863,7 +861,7 @@ const SEEDANCE_25 = {
 export const MODELS: {
   id: string; name: string; provider?: 'byteplus' | 'gemini';
   res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
-  refVideoSec?: number; refAudioSec?: number; demo?: boolean;
+  refVideoSec?: number; refAudioSec?: number;
   outputFormat?: string; audioOnly?: boolean;
   adaptiveOnly?: GenerationMode[]; autoDurationOnly?: GenerationMode[];
   refTaskTypes?: Partial<Record<GenerationMode, string>>;
@@ -877,28 +875,13 @@ export const MODELS: {
   // button read the same number (they briefly disagreed — 9 vs 10 — when the literal was
   // swapped for modelImageMax without giving Omni its own value).
   { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10 },
-  // ── Seedance 2.5 — official (2026-08-07) and the demo endpoint, SAME model ───────────
-  // Both rows below point at `dreamina-seedance-2-5`; the API's own error messages name
-  // that model for either key, and a probe on each returned identical output (38,830
-  // tokens for 480p/4s, mov both times). So the capabilities live in ONE object and both
-  // rows spread it — two hand-maintained copies of the same numbers is how they drift.
-  //
-  // The two rows differ only in WHO PAYS:
-  //   official → team key, team credit, reported to the tracker sheet like any model
-  //   demo     → separate key + endpoint (server.ts swaps the logical id), separate
-  //              contract, deliberately NOT reported. Only visible where the demo key is
-  //              installed (`demo` flag → /api/capabilities gate in SettingsPanel).
-  // Keep BOTH: removing either one sends every project saved on it back to 2.0 flagship
-  // at hydration (§5-3). And migrating demo projects onto the official id would silently
-  // move someone's work onto team billing — not ours to decide.
-  // Only the official row carries `grant` — it spends TEAM credit, so who may use it is a
-  // per-project decision made in the tracker sheet. The demo row is already gated by simply
-  // possessing the demo key, and it bills to a separate contract, so a second gate on top
-  // would only lock out the people who were given that key on purpose.
+  // ── Seedance 2.5 (official, 2026-08-07) ─────────────────────────────────────────────
+  // The demo endpoint that used to sit beside this row was retired 2026-08-14; projects
+  // saved on it are moved here at hydration (LEGACY_MODEL_IDS in src/lib/model-access.ts),
+  // which is safe because the two always had the identical capability set.
   // Permission lives in MODEL_GRANTS (src/lib/model-access.ts), not here — server.ts has
   // to read the same fact and must not import the store.
   { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5', ...SEEDANCE_25 },
-  { id: 'seedance-2-5-demo', name: 'Seedance 2.5 Demo', ...SEEDANCE_25, demo: true },
 ];
 
 // Capability lookups. Each returns the model's override when present, otherwise the
@@ -1102,12 +1085,6 @@ export function settingsDefaultsFor(model: string, mode: GenerationMode): { reso
   }
   return withMode;
 }
-// Demo models are billed against a separate BytePlus key and are deliberately NOT
-// reported to the credit tracker; the server decides both, this just tells the UI.
-export function isDemoModel(model: string): boolean {
-  return MODELS.find(m => m.id === model)?.demo === true;
-}
-
 // Which backend a model routes to. Gemini Omni → Interactions API (server
 // /api/gemini/*, key NANOBANANA_STUDIO_KEY); everything else → BytePlus. This is
 // the single switch the send path / settings UI branch on. Default byteplus.
@@ -1686,11 +1663,7 @@ export const useAppStore = create<AppState>()(
 
         try {
           console.log(`[Poll] Checking ${taskId}...`);
-          // Tell the server which BytePlus key this task belongs to. Derived from the
-          // message's own usedSettings, so it stays correct across app restarts.
-          // Empty string for every non-demo model → URL identical to before.
-          const demoQ = isDemoModel(message.usedSettings?.model || '') ? '?demo=1' : '';
-          const res = await fetch(`/api/byteplus/tasks/${taskId}${demoQ}`, { signal: ac.signal });
+          const res = await fetch(`/api/byteplus/tasks/${taskId}`, { signal: ac.signal });
           if (!res.ok) {
             // Transient HTTP error (5xx, 502, etc.) — leave status unchanged so the next
             // interval retries. Only AbortError + JSON parse fall through to the catch.
@@ -1810,9 +1783,7 @@ export const useAppStore = create<AppState>()(
       // for and the tracker records it.
       cancelTask: async (projectId, messageId, taskId) => {
         try {
-          const msg = get().projects.find(p => p.id === projectId)?.messages.find(m => m.id === messageId);
-          const demoQ = isDemoModel(msg?.usedSettings?.model || '') ? '?demo=1' : '';
-          const res = await fetch(`/api/byteplus/tasks/${taskId}${demoQ}`, { method: 'DELETE' });
+          const res = await fetch(`/api/byteplus/tasks/${taskId}`, { method: 'DELETE' });
           if (!res.ok) {
             let code = '';
             try { code = (await res.json())?.error?.code || ''; } catch { /* body may be empty */ }
@@ -1870,10 +1841,11 @@ export const useAppStore = create<AppState>()(
           const state = useAppStore.getState();
           const patched = state.projects.map(p => {
             const s = { ...defaultSettings, ...p.settings };
-            // ★ Deliberately NOT migrating `seedance-2-5-demo` → the official 2.5 id. Both
-            // rows still exist in MODELS, so nothing falls back to 2.0, and rewriting the
-            // model would silently move a demo project (separate contract, unbilled) onto
-            // team credit. Which one to pay from is the user's call, not a migration's.
+            // Retired ids → their replacement, BEFORE anything reads the model. This has
+            // to run first: the unknown-model fallback further down would send a demo
+            // project to 2.0, and the duration/resolution clamps just below would then
+            // trim settings that were perfectly valid for it (30s → 15s, 30 → 9 images).
+            s.model = resolveModelId(s.model);
             // Clamp duration to the provider's range: Omni 3–10, Seedance 4–15.
             // -1 = Auto (Seedance only; model picks the length — valid, don't clamp).
             // Range is per-model now; for 2.0/Omni modelDurationRange returns exactly the

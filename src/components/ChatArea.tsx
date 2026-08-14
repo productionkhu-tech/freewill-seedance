@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, modelOutputFormat, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
+import { resolveModelId } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -1580,7 +1581,14 @@ export function ChatArea() {
     // Returns false if any reference asset could not be restored (already alerted).
     // 재사용 ignores the return; 재생성 uses it to abort before sending.
     let assetsOk = true;
-    if (msg.usedSettings) useAppStore.getState().updateProjectSettings(project.id, msg.usedSettings);
+    // Past messages keep the model they were generated on, and one of those (the 2.5 demo)
+    // no longer exists. Reusing such a card would restore a dead id into the live settings
+    // and the send would 400 — map it forward here, the same way hydration does for the
+    // project's own settings.
+    if (msg.usedSettings) useAppStore.getState().updateProjectSettings(project.id, {
+      ...msg.usedSettings,
+      ...(msg.usedSettings.model ? { model: resolveModelId(msg.usedSettings.model) } : {}),
+    });
     if (msg.usedAssets) {
       // Build the full restored list FIRST, then commit in one atomic store call.
       // Old approach (clearAssets + N×addAsset across awaits) could interleave

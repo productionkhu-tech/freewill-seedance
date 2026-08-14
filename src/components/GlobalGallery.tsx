@@ -355,7 +355,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           keys => [...RES_LADDER, ...extra(keys, RES_LADDER)]),
         ratios: build('ratio', r => r.usedSettings?.ratio,
           keys => [...RATIO_LADDER, ...extra(keys, RATIO_LADDER)]),
-        // Duration is an OPEN set spanning three models' ranges (2.0 4–15, 2.5 demo 4–30,
+        // Duration is an OPEN set spanning three models' ranges (2.0 4–15, 2.5 4–30,
         // 옴니 3–10), so a fixed ladder would be mostly empty rows or simply wrong.
         durations: build('dur', r => durKey(r.usedSettings?.duration),
           keys => keys.sort((a, b) => a === '자동' ? 1 : b === '자동' ? -1 : parseInt(a) - parseInt(b))),
