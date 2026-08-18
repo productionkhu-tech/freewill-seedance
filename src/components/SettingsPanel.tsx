@@ -876,10 +876,6 @@ export function SettingsPanel() {
                   );
                 })}
               </div>
-              <p className="text-[10px] text-gray-400 leading-relaxed">
-                둘 다 10bit입니다. MOV 는 색 정보를 온전히(4:4:4) 담고 오디오가 무손실이라 보정·합성에 유리하고,
-                MP4 는 크로마가 4:2:0 · 오디오가 AAC 인 대신 편집툴과 플레이어가 다 엽니다.
-              </p>
             </div>
           )}
         </div>
