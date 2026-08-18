@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, modelOutputFormat, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
 import { resolveModelId } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -2000,7 +2000,9 @@ export function ChatArea() {
       };
       // Only models that declare one send output_format at all — omitting it keeps every
       // 2.0 request byte-for-byte what it has always been.
-      const outFmt = modelOutputFormat(currentSettings.model);
+      // User's pick when this model offers one, else the model's default. Models that
+      // never declared a format still send nothing at all — unchanged requests.
+      const outFmt = resolveOutputFormat(currentSettings.model, currentSettings.output_format);
       if (outFmt) payload.output_format = outFmt;
       // The mode the user picked, stated outright. reference / edit / extend all travel as
       // the same reference_* role, so without this the API had to read the intent out of the

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -136,6 +136,14 @@ const MODES: { id: GenerationMode; name: string }[] = [
   { id: 'edit_video', name: 'Edit Video' },
   { id: 'extend_video', name: 'Extend Video' },
 ];
+
+// Labels for the output-format picker. Wording comes from what was measured on the real
+// output at 1080p, not from the datasheet — the doc calls mp4 "standard color precision",
+// which reads as 8-bit and is wrong: both tiers are 10-bit, the difference is chroma.
+const OUTPUT_FORMAT_META: Record<string, { label: string; sub: string }> = {
+  mov: { label: 'MOV · 편집용', sub: '4:4:4 · 무손실 오디오' },
+  mp4: { label: 'MP4 · 호환',   sub: '4:2:0 · AAC · 어디서나 재생' },
+};
 
 // Modes where return_last_frame makes sense
 const RETURN_LAST_FRAME_MODES: GenerationMode[] = [
@@ -293,6 +301,9 @@ export function SettingsPanel() {
     !billingProject || isModelAllowed(m.id, { billingProject, billingProjects }));
   // Shown when the stored model isn't in the list above, so the control reads as "not
   // available to you" instead of silently displaying the first option as if it were picked.
+  // Formats this model offers, and which one is in effect right now.
+  const outputFormats = modelOutputFormats(settings.model);
+  const currentOutputFormat = resolveOutputFormat(settings.model, settings.output_format);
   const modelPlaceholder = selectableModels.some(m => m.id === settings.model)
     ? undefined
     : `${modelLabel} (권한 없음)`;
@@ -656,6 +667,10 @@ export function SettingsPanel() {
                 // on 720p via 1080p rather than snapping straight to a hardcoded value.
                 const res = clampResolution(val, settings.resolution, allow4k);
                 const patch: any = { model: val, resolution: res };
+                // Drop a format the new model doesn't offer, same reason as the resolution
+                // clamp above — otherwise 2.5's 'mov' rides along onto a model that never
+                // accepted the parameter.
+                if (settings.output_format && !modelOutputFormats(val).includes(settings.output_format)) patch.output_format = undefined;
                 // Duration ranges differ per model (2.0: 4–15, 2.5: 4–30, Omni: 3–10), so a
                 // switch can strand an out-of-range value — 2.5@30s → 2.0 stayed at 30 and got
                 // rejected by the API at send. Clamp on EVERY switch, not just the Omni one.
@@ -837,6 +852,35 @@ export function SettingsPanel() {
             )}
             </AnimatePresence>
           </div>
+          )}
+
+          {/* Output format — only for models that render more than one (2.5).
+              This is a GENERATION parameter, not a download choice: the clip exists on the
+              API in whichever format it was made with, so offering it at download time
+              would mean re-encoding locally, and re-encoding a 4:4:4 master down is worse
+              than just asking the API for mp4 up front. */}
+          {outputFormats.length > 1 && (
+            <div className="space-y-2">
+              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">출력 형식</label>
+              <div className="grid grid-cols-2 gap-2">
+                {outputFormats.map(f => {
+                  const on = currentOutputFormat === f;
+                  const meta = OUTPUT_FORMAT_META[f] || { label: f.toUpperCase(), sub: '' };
+                  return (
+                    <button key={f}
+                      onClick={() => updateProjectSettings(project.id, { output_format: f })}
+                      className={`px-3 py-2 rounded-[10px] border-2 text-left transition-colors ${on ? 'border-[#0071e3] bg-indigo-50/50' : 'border-transparent bg-[#f5f5f7] hover:bg-[#ededf0]'}`}>
+                      <div className={`text-[13px] font-medium ${on ? 'text-[#0071e3]' : 'text-gray-700'}`}>{meta.label}</div>
+                      <div className="text-[10px] text-gray-400 leading-tight mt-0.5">{meta.sub}</div>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-gray-400 leading-relaxed">
+                둘 다 10bit입니다. MOV 는 색 정보를 온전히(4:4:4) 담고 오디오가 무손실이라 보정·합성에 유리하고,
+                MP4 는 크로마가 4:2:0 · 오디오가 AAC 인 대신 편집툴과 플레이어가 다 엽니다.
+              </p>
+            </div>
           )}
         </div>
 

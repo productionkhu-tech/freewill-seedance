@@ -475,6 +475,10 @@ export interface GenerationSettings {
   // Gemini Omni only — explicit task (text_to_video|image_to_video|reference_to_video|edit). Seedance ignores it.
   // Reuses `ratio` (aspect 16:9/9:16) and `duration` (3–10s) from above.
   omniTask?: string;
+  // Container/codec the API renders to. Only meaningful for models that offer a choice
+  // (MODELS.outputFormats); absent or unsupported falls back to the model's default, so
+  // every model that never had this behaves exactly as before.
+  output_format?: string;
 }
 
 export interface ChatMessage {
@@ -834,6 +838,19 @@ const SEEDANCE_25 = {
   // 57 decoded frames, 0 dropped, full canvas readback. Note canPlayType('video/quicktime')
   // returns '' for it, so never gate playback on canPlayType (same trap as HEVC in §5-2).
   outputFormat: 'mov',
+  // The API renders EITHER format; it is a generation-time parameter, so a finished clip
+  // exists only in the one it was made with — there is no "download as mp4" without
+  // re-encoding locally, which we do not do (no ffmpeg bundled, and re-encoding a 4:4:4
+  // master down to H.264 would lose more than asking the API for mp4 in the first place).
+  // Measured at 1080p, same settings, one generation each:
+  //   mov → HEVC Rext    yuv444p10le, PCM 1024kbps, 12.2Mbps
+  //   mp4 → HEVC Main 10 yuv420p10le, AAC  129kbps, 14.5Mbps
+  // So mp4 keeps 10-bit — the doc's "standard color precision" wording suggests 8-bit and
+  // is wrong for this tier. What it actually costs is chroma (4:4:4 → 4:2:0) and lossless
+  // audio. What it buys is a decoder profile everything can open; Rext 4:4:4 is refused by
+  // most editors and players (our own Electron plays both — measured).
+  // Default stays 'mov' so existing behaviour is unchanged.
+  outputFormats: ['mov', 'mp4'],
   // ★ Task-type constraints from the official doc. Violating these does NOT fail fast — the
   // task is created, queues, gets classified, and only THEN returns
   // InvalidParameter.TaskTypeConstraint. That is time and a slot already spent, so the app
@@ -872,7 +889,7 @@ export const MODELS: {
   id: string; name: string; provider?: 'byteplus' | 'gemini';
   res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
   refVideoSec?: number; refAudioSec?: number;
-  outputFormat?: string; audioOnly?: boolean;
+  outputFormat?: string; outputFormats?: string[]; audioOnly?: boolean;
   adaptiveOnly?: GenerationMode[]; autoDurationOnly?: GenerationMode[];
   refTaskTypes?: Partial<Record<GenerationMode, string>>;
   defaults?: { resolution?: string; ratio?: string; duration?: number };
@@ -920,6 +937,18 @@ export function modelRefAudioSec(model: string): number {
 // has always sent, so their requests are byte-for-byte unchanged.
 export function modelOutputFormat(model: string): string | undefined {
   return MODELS.find(m => m.id === model)?.outputFormat;
+}
+// The formats this model lets the user choose between. Empty for every model that renders
+// only one thing, which is how the picker stays hidden for 2.0 and Omni.
+export function modelOutputFormats(model: string): string[] {
+  return MODELS.find(m => m.id === model)?.outputFormats ?? [];
+}
+// What to actually send. A stored choice only counts if THIS model offers it — switching
+// 2.5(mov) → 2.0 must not carry `mov` onto a model that never accepted the parameter.
+export function resolveOutputFormat(model: string, chosen?: string): string | undefined {
+  const offered = modelOutputFormats(model);
+  if (chosen && offered.includes(chosen)) return chosen;
+  return modelOutputFormat(model);
 }
 // Extension for a finished video. Reads it off the URL the API actually returned, and only
 // falls back to the model's declared format when the URL says nothing. Deriving beats
@@ -1868,6 +1897,9 @@ export const useAppStore = create<AppState>()(
             }
             // Unknown/legacy model → flagship default
             if (!validModelIds.includes(s.model)) s.model = defaultSettings.model;
+            // A format this model doesn't offer is dropped rather than carried — same rule
+            // as the resolution clamp right below, and it keeps the send path honest.
+            if (s.output_format && !modelOutputFormats(s.model).includes(s.output_format)) delete s.output_format;
             // Clamp resolution to what THIS model supports (Fast/Mini: no 1080p)
             if (!modelResolutions(s.model).includes(s.resolution)) s.resolution = '720p';
             // Clear in-progress draft prompts on app restart (session-only persistence)

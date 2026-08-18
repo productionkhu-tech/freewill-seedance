@@ -221,7 +221,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v26.8.1801
+        v26.8.1802
       </div>
     </div>
   );
