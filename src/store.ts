@@ -814,7 +814,17 @@ export const defaultSettings: GenerationSettings = {
 //   · 4–30s output (or -1), 30 images / 10 videos / 10 audio (= the advertised 50 assets)
 //   · reference video AND audio ≤30.2s, per-clip and summed (API states both verbatim)
 const SEEDANCE_25 = {
-  res: ['480p', '720p'],
+  // 1080p added 2026-08-18 (BytePlus opened it; the 08-07 datasheet still said "not
+  // currently supported"). 4k remains 2.0-only, so nothing here needs the allow4k gate.
+  // ★ 1080p is NOT just a bigger 720p on this model. Measured on the real output:
+  //   480p/720p → H.264 8-bit,           1080p → HEVC, profile Rext, yuv444p10le
+  // The doc only promises "10-bit + H.265"; it is actually 4:4:4 Rext, a profile most
+  // browser decoders refuse. Verified it plays in our Electron renderer before shipping
+  // it — loadeddata, readyState 3, 1920×1080, 9 frames decoded, 0 dropped. If a machine
+  // without HEVC support ever turns up, the failure is preview-only: the .mov still
+  // downloads and opens in a real player. Do not "simplify" this back into a plain
+  // resolution list without re-measuring playback.
+  res: ['480p', '720p', '1080p'],
   dur: [4, 30] as [number, number],
   imgMax: 30, vidMax: 10, audMax: 10,
   refVideoSec: 30.2, refAudioSec: 30.2,
