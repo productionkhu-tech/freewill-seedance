@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider } from '../store';
 import { resolveModelId } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -363,7 +363,7 @@ const OMNI_TASK_LABELS: Record<string, string> = {
 };
 // Settings chips for a message / preview card. Omni shows its task + fixed 720p (its
 // `mode` field is a stale Seedance leftover); Seedance shows mode / resolution as before.
-const settingsTagList = (us: any): string[] => {
+const settingsTagList = (us: any, videoUrl?: string): string[] => {
   if (!us) return [];
   const modelName = MODELS.find((m: any) => m.id === us.model)?.name?.replace('Seedance ', '') || '2.0';
   if (modelProvider(us.model) === 'gemini') {
@@ -372,7 +372,17 @@ const settingsTagList = (us: any): string[] => {
   }
   // API value is lowercase '4k'; display it as "4K" to match the Resolution dropdown.
   const res = us.resolution === '4k' ? '4K' : us.resolution;
-  return [modelName, us.mode, res, us.ratio, us.duration === -1 ? 'Auto' : `${us.duration}s`];
+  const tags = [modelName, us.mode, res, us.ratio, us.duration === -1 ? 'Auto' : `${us.duration}s`];
+  // Output format, but ONLY for models where it was a choice — every 2.0 clip has always
+  // been mp4, so a chip there is noise on cards that never had a decision behind them.
+  // Read off the finished URL first and the stored setting only as a fallback: the URL is
+  // what the API actually produced, the setting is what we asked for.
+  if (modelOutputFormats(us.model).length > 1) {
+    const fromUrl = (videoUrl || '').split('?')[0].match(/\.(mov|mp4)$/i)?.[1];
+    const fmt = fromUrl || resolveOutputFormat(us.model, us.output_format);
+    if (fmt) tags.push(fmt.toLowerCase());
+  }
+  return tags;
 };
 
 // filename → messageId, for downloads whose save path only arrives with the Electron
@@ -2444,7 +2454,7 @@ export function ChatArea() {
               )}
               {previewItem.usedSettings && (
                 <div className="flex flex-wrap gap-2">
-                  {settingsTagList(previewItem.usedSettings).map((tag, i) => (
+                  {settingsTagList(previewItem.usedSettings, previewItem.videoUrl).map((tag, i) => (
                     <span key={i} className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded-full text-[11px] font-medium">{tag}</span>
                   ))}
                 </div>
@@ -2646,7 +2656,7 @@ export function ChatArea() {
                               : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
-                                {settingsTagList(msg.usedSettings).map((tag, i) => (
+                                {settingsTagList(msg.usedSettings, msg.videoUrl).map((tag, i) => (
                                   <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full text-[10px] font-medium">{tag}</span>
                                 ))}
                               </div>

@@ -783,6 +783,11 @@ export const defaultSettings: GenerationSettings = {
   use_asset_id: false,
   mode: 'text_to_video',
   omniTask: 'text_to_video', // Omni task is always explicit (no "Unspecified"/auto-infer)
+  // Present, and undefined on purpose. Settings are merged as {...current, ...patch}, so a
+  // key that is ABSENT from defaultSettings survives every "reset to defaults" spread —
+  // 초기화 would have restored everything except this one. Declaring it here means the
+  // reset carries it, and undefined is exactly "use whatever this model renders by default".
+  output_format: undefined,
 };
 
 // ── Seedance 2.0 model catalog ──────────────────────────────────────────────
