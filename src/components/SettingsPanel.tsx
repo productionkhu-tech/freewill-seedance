@@ -137,12 +137,12 @@ const MODES: { id: GenerationMode; name: string }[] = [
   { id: 'extend_video', name: 'Extend Video' },
 ];
 
-// Labels for the output-format picker. Wording comes from what was measured on the real
-// output at 1080p, not from the datasheet — the doc calls mp4 "standard color precision",
-// which reads as 8-bit and is wrong: both tiers are 10-bit, the difference is chroma.
-const OUTPUT_FORMAT_META: Record<string, { label: string; sub: string }> = {
-  mov: { label: 'MOV · 편집용', sub: '4:4:4 · 무손실 오디오' },
-  mp4: { label: 'MP4 · 호환',   sub: '4:2:0 · AAC · 어디서나 재생' },
+// Labels for the output-format picker. Codec details (4:4:4 vs 4:2:0, PCM vs AAC) stay out
+// of the UI on purpose — the choice people actually make is "editing" vs "share it around".
+// The measured difference is recorded on MODELS.outputFormats in store.ts if it's ever needed again.
+const OUTPUT_FORMAT_LABEL: Record<string, string> = {
+  mov: 'MOV · 편집용',
+  mp4: 'MP4 · 호환',
 };
 
 // Modes where return_last_frame makes sense
@@ -865,13 +865,11 @@ export function SettingsPanel() {
               <div className="grid grid-cols-2 gap-2">
                 {outputFormats.map(f => {
                   const on = currentOutputFormat === f;
-                  const meta = OUTPUT_FORMAT_META[f] || { label: f.toUpperCase(), sub: '' };
                   return (
                     <button key={f}
                       onClick={() => updateProjectSettings(project.id, { output_format: f })}
-                      className={`px-3 py-2 rounded-[10px] border-2 text-left transition-colors ${on ? 'border-[#0071e3] bg-indigo-50/50' : 'border-transparent bg-[#f5f5f7] hover:bg-[#ededf0]'}`}>
-                      <div className={`text-[13px] font-medium ${on ? 'text-[#0071e3]' : 'text-gray-700'}`}>{meta.label}</div>
-                      <div className="text-[10px] text-gray-400 leading-tight mt-0.5">{meta.sub}</div>
+                      className={`px-3 py-2 rounded-[10px] border-2 text-[13px] font-medium transition-colors ${on ? 'border-[#0071e3] bg-indigo-50/50 text-[#0071e3]' : 'border-transparent bg-[#f5f5f7] text-gray-600 hover:bg-[#ededf0]'}`}>
+                      {OUTPUT_FORMAT_LABEL[f] || f.toUpperCase()}
                     </button>
                   );
                 })}
