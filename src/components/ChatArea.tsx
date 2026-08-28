@@ -2374,9 +2374,11 @@ export function ChatArea() {
         // 40 minutes. This was 4, which was shorter than the server's own limits — so a slow
         // job was cut off by US before any answer could arrive, and the card said "생성 시간
         // 초과 (4분)" with nothing else to act on. Sized from measurement, not taste:
-        // 2026-08-28 a 4K extend (10.0s source, +3s) returned HTTP 200 after 1311s — 21.9
-        // minutes — and a bigger append will take longer still. 360p lands in ~50s and 1080p
-        // in ~2min, so this ceiling only ever matters to 4K. Omni is synchronous, but the
+        // 2026-08-28, same 10s 4K source: +3s returned HTTP 200 after 1311s (21.9 min) and
+        // +10s came back in about 10 — the bigger append was faster, so this tracks load
+        // rather than output length and cannot be predicted from the request. 40 min leaves
+        // room above the slower sample. 360p lands in ~50s and 1080p in ~2min, so this
+        // ceiling only ever matters to 4K. Omni is synchronous, but the
         // fetch is fired unawaited, so a long wait holds one card open and nothing else.
         const timer = window.setTimeout(() => ctrl.abort(), 2400000);
         try {
