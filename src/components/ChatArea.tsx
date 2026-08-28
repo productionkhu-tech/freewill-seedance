@@ -29,15 +29,19 @@ function translateError(error: string): string {
   if (error.includes('API Key is required'))
     return `API 키 오류: 서버를 재시작해주세요. (${navigator.platform.startsWith('Mac') ? 'start.command' : 'start.bat'})`;
   if (error.includes('Payload Too Large')) return '파일 크기 초과: 이미지 개당 30MB, 전체 요청 64MB 이하여야 합니다.';
-  // Gemini Omni's input filter. Its own wording ("sensitive words that violate Google's
-  // Prohibited Use policy") is actively misleading — measured 2026-08-28 on one unchanged
-  // golden-retriever clip, what it rejects is asking for the OPERATION, in any language:
-  //   차단: 연장 · 영상 확장 · 늘려줘 · 뒤에 이어붙여줘 · extend the video · lengthen · extension
-  //   통과: 이어서 계속 · 강아지가 고개를 돌린다 · 카메라가 천천히 뒤로 빠진다 · Continue.
-  // So it is not a word blocklist and not a Korean problem; a scene description always
-  // passed. Say that, because "민감한 단어" sends people looking for the wrong thing.
+  // Gemini Omni's input filter. Its wording ("sensitive words that violate Google's
+  // Prohibited Use policy") sends people hunting for a forbidden word, and that is not
+  // what it keys on. Measured 2026-08-28 on one unchanged clip: asking for the
+  // OPERATION is refused in any language (연장 · 확장 · 늘려줘 · 뒤에 이어붙여줘 ·
+  // extend the video · lengthen · extension), while a scene description passed
+  // (강아지가 고개를 돌린다 · 카메라가 천천히 뒤로 빠진다 · Continue.).
+  // ★ But that is a tendency, not the rule: a plain scene description was blocked in
+  // real use and the SAME sentence then passed against a different source clip. So the
+  // filter reads the whole request, video included, and is not reproducible from the
+  // text alone. Say both, or the message sends someone to rewrite a prompt that was
+  // already fine.
   if (error.includes('Input blocked') || error.includes('Prohibited Use'))
-    return '프롬프트가 Google 정책 필터에 막혔습니다.\n민감한 단어 때문이 아니라 "연장 / 늘려줘 / extend" 처럼 작업을 지시하면 막힙니다 (영어도 동일).\n이어서 무슨 일이 일어나는지 장면으로 적어주세요 — 예: "강아지가 고개를 돌린다", "카메라가 천천히 뒤로 빠진다".';
+    return '프롬프트가 Google 정책 필터에 막혔습니다. (생성 전 단계라 과금은 없습니다.)\n"연장 / 늘려줘 / extend" 처럼 작업을 지시하면 거의 항상 막힙니다 — 이어질 장면을 묘사로 적어주세요.\n장면 묘사인데도 막혔다면 필터가 원본 영상까지 함께 본 경우입니다. 같은 문장이 다른 영상에서는 통과하니, 문장을 조금 바꾸거나 다시 시도해보세요.';
   if (error.includes('resource download failed')) return '리소스 다운로드 실패: 이미지에 접근할 수 없습니다. 파일을 다시 업로드해주세요.';
   if (error.includes('real person') || error.includes('PrivacyInformation')) return '실사 인물 감지: Seedance 2.0은 실제 사람 얼굴이 담긴 레퍼런스 이미지·영상을 받지 않습니다. Seedance로 생성한 결과물이나 비실사(스타일라이즈) 캐릭터 이미지를 사용해주세요.';
   if (error.includes('SensitiveContentDetected') || error.includes('SensitiveContent')) return '민감 콘텐츠 감지: 레퍼런스 이미지 또는 프롬프트가 BytePlus 콘텐츠 정책에 의해 거부되었습니다.';
