@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
+import https from 'https';
 import {
   S3Client,
   PutObjectCommand,
@@ -802,6 +803,42 @@ async function startServer() {
     }
   });
 
+  // POST JSON over node:https with NO response deadline.
+  //
+  // node's built-in fetch (undici) applies a 300s headersTimeout that cannot be changed
+  // without the `undici` package — which is not a dependency here and resolves, on this
+  // machine only, from outside the project. Gemini Omni is a SYNCHRONOUS API: a 4K extend
+  // holds the connection well past five minutes, so fetch killed the request before Google
+  // ever answered and every 4K extend failed with the bare string "fetch failed" (measured
+  // 2026-08-28: 319s, always). https.request has no such default, so the wait is bounded by
+  // the caller instead — the client's own 15-minute abort, or the user closing the card,
+  // which reaches us through `signal`.
+  function postJsonNoDeadline(url: string, headers: Record<string, string>, payload: string, signal?: AbortSignal):
+    Promise<{ status: number; text: string }> {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const req = https.request({
+        hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'POST',
+        headers: { ...headers, 'Content-Length': Buffer.byteLength(payload) },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode || 0, text: Buffer.concat(chunks).toString('utf8') }));
+        res.on('error', reject);
+      });
+      // Both node's own socket timeout and the 300s default are off; only an explicit abort
+      // or a dead socket ends this.
+      req.setTimeout(0);
+      req.on('error', reject);
+      if (signal) {
+        if (signal.aborted) { req.destroy(new Error('aborted')); }
+        else signal.addEventListener('abort', () => req.destroy(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+      }
+      req.write(payload);
+      req.end();
+    });
+  }
+
   // ── Gemini Omni Flash — video generation proxy (separate provider) ──────────
   // Uses NANOBANANA_STUDIO_KEY (Google AI Studio). The Interactions create call is
   // SYNCHRONOUS (~30-40s for a 720p clip) and returns the video inline as base64
@@ -901,14 +938,21 @@ async function startServer() {
       body.background = false;
       body.stream = false;
       body.store = true;
-      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
-        body: JSON.stringify(body),
-      });
-      const text = await r.text();
-      let data: any; try { data = JSON.parse(text); } catch { return res.status(r.status).json({ error: `Gemini 응답 파싱 실패 (${r.status})` }); }
-      if (!r.ok) {
+      // Hang up on Google the moment the app gives up. Without this the generation runs to
+      // completion on a request nobody is waiting for any more — the result is written to a
+      // cache id the client never learns, and the tokens are spent all the same. /api/download
+      // has had this guard for the same reason; this route did not.
+      const geminiCtrl = new AbortController();
+      req.on('close', () => { if (!res.writableEnded) { try { geminiCtrl.abort(); } catch { /* already settled */ } } });
+      const r = await postJsonNoDeadline(
+        'https://generativelanguage.googleapis.com/v1beta/interactions',
+        { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
+        JSON.stringify(body), geminiCtrl.signal,
+      );
+      const text = r.text;
+      const rOk = r.status >= 200 && r.status < 300;
+      let data: any; try { data = JSON.parse(text); } catch { return res.status(r.status || 502).json({ error: `Gemini 응답 파싱 실패 (${r.status})` }); }
+      if (!rOk) {
         const msg = data?.error?.message || (Array.isArray(data) && data[0]?.error?.message) || `Gemini 오류 (${r.status})`;
         console.warn('[Gemini] error', r.status, msg);
         return res.status(r.status).json({ error: msg });
@@ -945,7 +989,19 @@ async function startServer() {
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, buf);
       console.log(`[Gemini] ok — interaction ${data.id}, ${(buf.length / 1048576).toFixed(2)}MB → ${cacheId}`);
       res.json({ id: data.id, status: data.status || 'completed', videoUrl: `/api/cache/${cacheId}`, usage: data.usage });
-    } catch (error: any) { console.error('[Gemini] fetch error', error.message); res.status(500).json({ error: error.message }); }
+    } catch (error: any) {
+      // node's fetch reports every transport failure as the bare string "fetch failed",
+      // including its own 300s headersTimeout — which is what a slow 4K job hits. Passing
+      // that through gave the user a two-word error with nothing to act on. Name the case.
+      const raw = error?.message || String(error);
+      const msg = error?.name === 'AbortError'
+        ? '요청이 취소되었습니다.'
+        : raw === 'fetch failed'
+          ? 'Gemini 응답이 5분 안에 오지 않았습니다 (node fetch 기본 한도). 4K 등 무거운 요청에서 발생합니다 — 해상도를 낮추거나 원본을 짧게 해주세요.'
+          : raw;
+      console.error('[Gemini] fetch error', raw);
+      res.status(500).json({ error: msg });
+    }
   });
 
   // BytePlus API — Create Task

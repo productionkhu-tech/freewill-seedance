@@ -1032,6 +1032,14 @@ export function SettingsPanel() {
                                     원본이 {d!.toFixed(1)}초입니다 — <b>{srcCap}초를 넘으면 이어붙일 수 없습니다</b> (API 제한). 더 늘리려면 새로 생성해야 합니다.
                                   </p>
                                 )}
+                                {/* 4K extend is measurably slow — 21.9 minutes for a 10s source
+                                    plus 3s (2026-08-28). Saying so up front is the difference
+                                    between "it's working" and "it's hung"; the card shows a live
+                                    timer but nothing tells you what to expect. Restarting the app
+                                    kills the request, so that warning belongs here too. */}
+                                {settings.resolution === '4k' && (
+                                  <p className="text-[10px] text-amber-600 leading-snug break-keep">4K 이어붙이기는 <b>20분 이상</b> 걸립니다 (10초 원본 +3초 = 실측 22분). 그동안 앱을 껐다 켜면 요청이 취소됩니다. 720p·1080p는 1~2분입니다.</p>
+                                )}
                                 {srcCap !== undefined && (
                                   <p className="text-[10px] text-gray-400 leading-snug break-keep">원본 {srcCap}초까지 · 최대 {outCap}초까지 만들 수 있어요. 이어붙일 때마다 <b>전체가 다시 인코딩</b>되니 반복하면 앞부분 화질이 조금씩 떨어집니다.</p>
                                 )}

@@ -2371,7 +2371,14 @@ export function ChatArea() {
       // guards against a rare server stall leaving a card spinning "생성 중" forever.
       ids.forEach((id) => { void (async () => {
         const ctrl = new AbortController();
-        const timer = window.setTimeout(() => ctrl.abort(), 240000);
+        // 40 minutes. This was 4, which was shorter than the server's own limits — so a slow
+        // job was cut off by US before any answer could arrive, and the card said "생성 시간
+        // 초과 (4분)" with nothing else to act on. Sized from measurement, not taste:
+        // 2026-08-28 a 4K extend (10.0s source, +3s) returned HTTP 200 after 1311s — 21.9
+        // minutes — and a bigger append will take longer still. 360p lands in ~50s and 1080p
+        // in ~2min, so this ceiling only ever matters to 4K. Omni is synchronous, but the
+        // fetch is fired unawaited, so a long wait holds one card open and nothing else.
+        const timer = window.setTimeout(() => ctrl.abort(), 2400000);
         try {
           const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: ctrl.signal });
           const t = await r.text();
@@ -2380,7 +2387,9 @@ export function ChatArea() {
           if (!d.videoUrl) throw new Error('영상 URL을 받지 못했습니다.');
           updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', endTime: Date.now() });
         } catch (error: any) {
-          const msg = error.name === 'AbortError' ? '생성 시간 초과 (4분) — 다시 시도해주세요.' : error.message;
+          const msg = error.name === 'AbortError'
+            ? '응답 없이 40분이 지나 중단했습니다.\n4K 이어붙이기는 20분 이상 걸리는 게 정상이지만 여기까지는 아닙니다 — 요청이 중간에 끊겼거나 앱이 재시작된 경우입니다.'
+            : error.message;
           updateMessage(project.id, id, { status: 'failed', content: '생성 실패', error: msg, endTime: Date.now() });
         } finally {
           window.clearTimeout(timer);
