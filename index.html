@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Freewill Seedance 2.0</title>
+    <!-- Theme, applied BEFORE the first paint. The real value lives in the persisted store,
+         but IndexedDB hydration is async, so reading it there would paint one light frame
+         and then flip. localStorage is synchronous and applyTheme() keeps it in sync. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('seedance-theme');
+          if (t === 'dark') {
+            document.documentElement.classList.add('dark');
+            document.documentElement.style.colorScheme = 'dark';
+          }
+        } catch (e) { /* private mode: fall back to light, the store fixes it on hydrate */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

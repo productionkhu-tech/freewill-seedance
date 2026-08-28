@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback, memo } from 'react';
 import { useAppStore, AssetCategory, ElementAsset, ElementImage, MODELS, modelImageMax, mentionKey, uniqueElementName, groupElementFiles } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Search, Trash2, Image as ImageIcon, Upload, Check, Link2, Pencil, Layers, User, MapPin, Package, AlertTriangle, Share2, Copy, Loader2 } from 'lucide-react';
@@ -8,9 +8,11 @@ import { HoverZoom } from './HoverZoom';
 // Category visuals — shared with ChatArea mention pills. `accent` is the solid
 // dot color used in the prompt pills (kept emoji-free for a cleaner look).
 export const CATEGORY_META: Record<AssetCategory, { name: string; bg: string; border: string; text: string; accent: string }> = {
-  character: { name: '캐릭터',  bg: '#eef2ff', border: '#c7d2fe', text: '#4338ca', accent: '#6366f1' },
-  location:  { name: '로케이션', bg: '#ecfdf5', border: '#a7f3d0', text: '#047857', accent: '#10b981' },
-  prop:      { name: '프랍',    bg: '#fff7ed', border: '#fed7aa', text: '#c2410c', accent: '#f97316' },
+  // Values are CSS variables (defined light+dark in index.css) rather than literals: these
+  // are spread into inline style={{}} at ~10 sites, where a dark: class can never reach.
+  character: { name: '캐릭터',  bg: 'var(--cat-character-bg)', border: 'var(--cat-character-border)', text: 'var(--cat-character-text)', accent: 'var(--cat-character-accent)' },
+  location:  { name: '로케이션', bg: 'var(--cat-location-bg)',  border: 'var(--cat-location-border)',  text: 'var(--cat-location-text)',  accent: 'var(--cat-location-accent)' },
+  prop:      { name: '프랍',    bg: 'var(--cat-prop-bg)',      border: 'var(--cat-prop-border)',      text: 'var(--cat-prop-text)',      accent: 'var(--cat-prop-accent)' },
 };
 const CATEGORY_ICON: Record<AssetCategory, any> = { character: User, location: MapPin, prop: Package };
 const CATEGORIES = Object.keys(CATEGORY_META) as AssetCategory[];
@@ -188,12 +190,12 @@ function DropIntake({ files, existing, collectionName, sendCap, modelName, onCan
       onDrop={(e) => { e.preventDefault(); e.stopPropagation(); }}>
       <motion.div initial={{ scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 10 }}
         transition={{ duration: 0.16, ease: 'easeOut' }}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-full flex flex-col overflow-hidden"
+        className="bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-2xl w-full max-w-xl max-h-full flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}>
 
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100 shrink-0">
           <div className="leading-tight min-w-0">
-            <h3 className="text-[15px] font-semibold text-[#1d1d1f]">파일 {files.length}개 추가</h3>
+            <h3 className="text-[15px] font-semibold text-[#1d1d1f] dark:text-gray-900">파일 {files.length}개 추가</h3>
             <p className="text-[11px] text-gray-400 -mt-0.5 truncate">‘{collectionName}’ · 파일 이름이 그대로 어셋 이름이 됩니다</p>
           </div>
           <button onClick={onCancel} disabled={!!busy} className="p-1 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 disabled:opacity-40 transition-colors shrink-0"><X size={18} /></button>
@@ -201,11 +203,11 @@ function DropIntake({ files, existing, collectionName, sendCap, modelName, onCan
 
         <div className="px-5 py-3 border-b border-gray-100 shrink-0 space-y-2.5">
           <div className="flex items-center gap-2">
-            <span className="text-[12px] font-semibold text-black/70 shrink-0 w-14">묶기</span>
+            <span className="text-[12px] font-semibold text-black/70 dark:text-white/75 shrink-0 w-14">묶기</span>
             <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
               {GROUP_MODES.map(m => (
                 <button key={m.id} onClick={() => applyMode(m.id)} disabled={!!busy} title={m.hint}
-                  className={`px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors disabled:opacity-40 ${mode === m.id ? 'bg-white shadow-sm text-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>
+                  className={`px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors disabled:opacity-40 ${mode === m.id ? 'bg-white dark:bg-[#1c1c1e] shadow-sm text-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>
                   {m.label}
                 </button>
               ))}
@@ -213,7 +215,7 @@ function DropIntake({ files, existing, collectionName, sendCap, modelName, onCan
             <span className="text-[10px] text-gray-400 truncate">{GROUP_MODES.find(m => m.id === mode)?.hint}</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[12px] font-semibold text-black/70 shrink-0 w-14">분류</span>
+            <span className="text-[12px] font-semibold text-black/70 dark:text-white/75 shrink-0 w-14">분류</span>
             <div className="flex items-center gap-1.5">
               {CATEGORIES.map(c => {
                 const Icon = CATEGORY_ICON[c]; const m = CATEGORY_META[c];
@@ -249,7 +251,7 @@ function DropIntake({ files, existing, collectionName, sendCap, modelName, onCan
                 <div className="flex-1 min-w-0 space-y-1">
                   <input value={group.name} disabled={!!busy}
                     onChange={(e) => patch(group.key, { name: e.target.value })}
-                    className="w-full px-2 py-1 text-[13px] bg-[#fafafc] border border-black/5 rounded-lg outline-none focus:border-[#0071e3] transition-colors disabled:opacity-50" />
+                    className="w-full px-2 py-1 text-[13px] bg-[#fafafc] dark:bg-[#242426] border border-black/5 dark:border-white/10 rounded-lg outline-none focus:border-[#0071e3] transition-colors disabled:opacity-50" />
                   {over && <span className="text-[10px] text-red-600">이미지 {group.files.length}장 — 어셋 하나당 최대 {MAX_ELEMENT_IMAGES}장입니다. 묶기를 바꾸거나 나눠서 넣어주세요.</span>}
                   {!over && conflict && (
                     <div className="flex items-center gap-2 flex-wrap">
@@ -257,7 +259,7 @@ function DropIntake({ files, existing, collectionName, sendCap, modelName, onCan
                         {conflict === 'existing' ? '이미 이 컬렉션에 있는 이름입니다' : '이번에 끌어온 파일끼리 이름이 겹칩니다'}
                       </span>
                       <button onClick={() => patch(group.key, { rename: !group.rename })} disabled={!!busy}
-                        className="text-[10px] font-medium text-[#0071e3] hover:underline disabled:opacity-40">
+                        className="text-[10px] font-medium text-[#0071e3] dark:text-[#4da3ff] hover:underline disabled:opacity-40">
                         {group.rename ? '건너뛰기로 변경' : `‘${suggestion}’ 로 추가`}
                       </button>
                     </div>
@@ -379,24 +381,24 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
       <motion.div
         initial={{ scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 10 }}
         transition={{ duration: 0.16, ease: 'easeOut' }}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-full flex flex-col overflow-hidden"
+        className="bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-2xl w-full max-w-lg max-h-full flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100 bg-white shrink-0">
-          <h3 className="text-[15px] font-semibold text-[#1d1d1f] tracking-tight">{initial ? '어셋 편집' : '새 어셋'}</h3>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100 bg-white dark:bg-[#1c1c1e] shrink-0">
+          <h3 className="text-[15px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight">{initial ? '어셋 편집' : '새 어셋'}</h3>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"><X size={18} /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4 min-h-0">
           {/* Category */}
           <div className="space-y-1.5">
-            <label className="block text-[12px] font-semibold text-black/70">카테고리</label>
+            <label className="block text-[12px] font-semibold text-black/70 dark:text-white/75">카테고리</label>
             <div className="flex gap-2">
               {CATEGORIES.map(c => {
                 const Icon = CATEGORY_ICON[c]; const on = category === c;
                 return (
                   <button key={c} onClick={() => setCategory(c)}
-                    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-[10px] text-[13px] font-medium border-2 transition-colors ${on ? 'border-current' : 'border-transparent bg-[#f5f5f7] text-gray-500 hover:bg-[#ededf0]'}`}
+                    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-[10px] text-[13px] font-medium border-2 transition-colors ${on ? 'border-current' : 'border-transparent bg-[#f5f5f7] dark:bg-[#242426] text-gray-500 hover:bg-[#ededf0] dark:hover:bg-[#2e2e31]'}`}
                     style={on ? { background: CATEGORY_META[c].bg, color: CATEGORY_META[c].text, borderColor: CATEGORY_META[c].border } : undefined}>
                     <Icon size={14} /> {CATEGORY_META[c].name}
                   </button>
@@ -407,18 +409,18 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
 
           {/* Name */}
           <div className="space-y-1.5">
-            <label className="block text-[12px] font-semibold text-black/70">이름</label>
+            <label className="block text-[12px] font-semibold text-black/70 dark:text-white/75">이름</label>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 김현우" autoFocus
               onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (!busy) save(); } }}
-              className="w-full px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[14px] outline-none focus:border-[#0071e3] transition-colors" />
+              className="w-full px-3 py-2 bg-[#fafafc] dark:bg-[#242426] border-[3px] border-black/5 dark:border-white/10 rounded-[11px] text-[14px] outline-none focus:border-[#0071e3] transition-colors" />
           </div>
 
           {/* Description */}
           <div className="space-y-1.5">
-            <label className="block text-[12px] font-semibold text-black/70">설명 <span className="text-gray-400 font-normal">(선택)</span></label>
+            <label className="block text-[12px] font-semibold text-black/70 dark:text-white/75">설명 <span className="text-gray-400 font-normal">(선택)</span></label>
             <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="간단한 설명 (검색에 사용됨) · 저장은 Ctrl+Enter"
               onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!busy) save(); } }}
-              className="w-full px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[13px] outline-none focus:border-[#0071e3] transition-colors resize-none" />
+              className="w-full px-3 py-2 bg-[#fafafc] dark:bg-[#242426] border-[3px] border-black/5 dark:border-white/10 rounded-[11px] text-[13px] outline-none focus:border-[#0071e3] transition-colors resize-none" />
           </div>
 
           {/* Images — thumbnail in the grid, full-res only on hover.
@@ -429,7 +431,7 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
               ~270px and the old 80px thumb looked mushy there) — at this size it does not.
               HoverZoom still gets `fullSrc`, so zooming is as crisp as it ever was. */}
           <div className="space-y-1.5">
-            <label className="block text-[12px] font-semibold text-black/70">이미지 <span className="text-gray-400 font-normal">{images.length}/{MAX_ELEMENT_IMAGES}</span></label>
+            <label className="block text-[12px] font-semibold text-black/70 dark:text-white/75">이미지 <span className="text-gray-400 font-normal">{images.length}/{MAX_ELEMENT_IMAGES}</span></label>
             <div className="grid grid-cols-4 gap-2">
               {images.map(img => (
                 <div key={img.id} className="relative aspect-square rounded-[10px] overflow-hidden border border-gray-200 bg-gray-50 group">
@@ -471,10 +473,10 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
           {error && <p className="text-[12px] text-red-500 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-line">{error}</p>}
         </div>
 
-        <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-gray-100 bg-white shrink-0">
+        <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-gray-100 bg-white dark:bg-[#1c1c1e] shrink-0">
           <div className="flex items-center gap-1">
             {onDelete && <button onClick={onDelete} className="flex items-center gap-1.5 text-[13px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-2 rounded-lg transition-colors"><Trash2 size={15} /> 삭제</button>}
-            {onShare && <button onClick={onShare} disabled={sharing} title="이 어셋을 공유 링크로" className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-[#0071e3] hover:bg-indigo-50 disabled:opacity-50 px-3 py-2 rounded-lg transition-colors">{sharing ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />} 공유</button>}
+            {onShare && <button onClick={onShare} disabled={sharing} title="이 어셋을 공유 링크로" className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-[#0071e3] dark:hover:text-[#4da3ff] hover:bg-indigo-50 disabled:opacity-50 px-3 py-2 rounded-lg transition-colors">{sharing ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />} 공유</button>}
           </div>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="text-[13px] font-medium text-gray-500 hover:text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100 transition-colors">취소</button>
@@ -526,25 +528,25 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
       className="absolute inset-0 z-20 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={onClose} onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }} onDrop={(e) => { e.preventDefault(); e.stopPropagation(); }}>
       <motion.div initial={{ scale: 0.96, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 10 }} transition={{ duration: 0.16, ease: 'easeOut' }}
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-full overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        className="bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-2xl w-full max-w-md max-h-full overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-100">
-          <h3 className="text-[15px] font-semibold text-[#1d1d1f]">어셋 가져오기</h3>
+          <h3 className="text-[15px] font-semibold text-[#1d1d1f] dark:text-gray-900">어셋 가져오기</h3>
           <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition-colors"><X size={18} /></button>
         </div>
 
         {!parsed ? (
           <div className="p-5 space-y-4">
             <div className="space-y-1.5">
-              <label className="block text-[12px] font-semibold text-black/70">공유 링크로 가져오기</label>
+              <label className="block text-[12px] font-semibold text-black/70 dark:text-white/75">공유 링크로 가져오기</label>
               <div className="flex items-center gap-1.5">
                 <input value={link} onChange={(e) => setLink(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') loadLink(); }} placeholder="공유받은 링크를 붙여넣기"
-                  className="flex-1 min-w-0 px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[13px] outline-none focus:border-[#0071e3] transition-colors" />
+                  className="flex-1 min-w-0 px-3 py-2 bg-[#fafafc] dark:bg-[#242426] border-[3px] border-black/5 dark:border-white/10 rounded-[11px] text-[13px] outline-none focus:border-[#0071e3] transition-colors" />
                 <button onClick={loadLink} disabled={busy || !link.trim()} className="flex items-center gap-1 text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] disabled:opacity-50 px-3 py-2 rounded-[11px] shrink-0">{busy ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />} 불러오기</button>
               </div>
               <p className="text-[10px] text-gray-400">받은 Freewill 공유 링크를 그대로 붙여넣으면 됩니다.</p>
             </div>
             <div className="flex items-center gap-2 text-[11px] text-gray-300"><div className="flex-1 h-px bg-gray-100" />또는<div className="flex-1 h-px bg-gray-100" /></div>
-            <label className="flex items-center justify-center gap-2 w-full px-3 py-2.5 rounded-[11px] text-[13px] font-medium text-gray-600 bg-[#fafafc] hover:bg-[#f0f0f2] border-[3px] border-black/5 cursor-pointer transition-colors">
+            <label className="flex items-center justify-center gap-2 w-full px-3 py-2.5 rounded-[11px] text-[13px] font-medium text-gray-600 bg-[#fafafc] dark:bg-[#242426] hover:bg-[#f0f0f2] dark:hover:bg-[#2e2e31] border-[3px] border-black/5 dark:border-white/10 cursor-pointer transition-colors">
               <Upload size={15} /> 파일에서 선택 (.fwsl.json)
               <input type="file" accept="application/json,.json,.fwsl" className="hidden" onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ''; }} />
             </label>
@@ -552,7 +554,7 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
           </div>
         ) : (
           <div className="p-5 space-y-4">
-            <div className="flex items-center gap-3 bg-[#fafafc] rounded-xl p-3 border border-gray-100">
+            <div className="flex items-center gap-3 bg-[#fafafc] dark:bg-[#242426] rounded-xl p-3 border border-gray-100">
               <div className="flex -space-x-2 shrink-0">
                 {parsed.assets.slice(0, 3).map((a, i) => (<img key={i} src={a.images[0]?.url} className="w-9 h-9 rounded-lg object-cover border-2 border-white" alt="" />))}
               </div>
@@ -562,7 +564,7 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
               </div>
             </div>
             <div className="space-y-2">
-              <label className="block text-[12px] font-semibold text-black/70">어디에 추가할까요?</label>
+              <label className="block text-[12px] font-semibold text-black/70 dark:text-white/75">어디에 추가할까요?</label>
               <button onClick={() => setMode('new')} className={`w-full text-left px-3 py-2.5 rounded-[11px] border-2 transition-colors ${mode === 'new' ? 'border-[#0071e3] bg-indigo-50/50' : 'border-gray-200 hover:bg-gray-50'}`}>
                 <div className="flex items-center gap-2"><span className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 ${mode === 'new' ? 'border-[#0071e3] bg-[#0071e3]' : 'border-gray-300'}`} /><span className="text-[13px] font-medium text-gray-800">새 컬렉션으로 추가</span></div>
                 <p className="text-[11px] text-gray-400 ml-[22px] mt-0.5">받은 어셋을 별도의 새 컬렉션으로 따로 보관합니다.</p>
@@ -583,17 +585,76 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
   );
 }
 
+/* ─── Asset card (memoized) ─── */
+// ★ memo 가 여기서 하는 일이 큰 이유: 커버가 원본 base64 라 문자열 하나가 수백 KB 다.
+// asset 객체는 편집하지 않는 한 참조가 그대로이므로, memo 가 얕은 비교 한 번으로 subtree 를
+// 통째로 건너뛴다. 그러면 그 거대한 문자열이 diff 대상에서 아예 빠진다.
+// 부모에서 넘기는 콜백은 전부 useCallback 으로 참조를 고정해야 이 memo 가 의미를 갖는다.
+//
+// content-visibility:auto — 화면 밖 카드는 레이아웃·페인트를 건너뛴다. 창을 열고 닫을 때의
+// 애니메이션이 49장을 한꺼번에 그리느라 끊기던 것을 이걸로 없앤다. 스크롤 시 높이가 튀지
+// 않도록 contain-intrinsic-size 로 예상 크기를 알려준다.
+const AssetCard = memo(function AssetCard({ asset, sharing, imagesReady, onOpen, onShare, onDelete }: {
+  asset: ElementAsset; sharing: boolean;
+  // 열기 애니메이션이 끝나기 전에는 false. 커버가 원본 해상도라 디코딩이 무거운데,
+  // 그게 애니메이션과 같은 프레임에서 경쟁하면 창이 뚝뚝 끊긴다. 애니메이션을 먼저 끝내고
+  // 그 다음에 이미지를 붙인다.
+  imagesReady: boolean;
+  onOpen: (a: ElementAsset) => void;
+  onShare: (a: ElementAsset) => void;
+  onDelete: (a: ElementAsset) => void;
+}) {
+  const meta = CATEGORY_META[asset.category];
+  const CatIcon = CATEGORY_ICON[asset.category];
+  const cover = asset.images[0];
+  return (
+    <div onClick={() => onOpen(asset)} role="button"
+      style={{ contentVisibility: 'auto', containIntrinsicSize: '260px 300px' } as any}
+      className="text-left bg-white dark:bg-[#1c1c1e] rounded-xl border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all group cursor-pointer">
+      {/* Cover uses the FULL-RES url: the 80px/q0.5 thumbnailUrl was far too small for this
+          ~270px card and rendered visibly mushy (v26.7.2101 regression). loading="lazy" +
+          decoding="async" keeps only on-screen covers decoding, off the main thread. */}
+      <div className="aspect-square bg-gray-50 relative overflow-hidden">
+        {cover && imagesReady
+          ? <img src={cover.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
+          : <div className="w-full h-full flex items-center justify-center text-gray-300"><ImageIcon size={28} /></div>}
+        <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ background: meta.bg, color: meta.text }}><CatIcon size={10} /> {meta.name}</span>
+        {asset.images.length > 1 && <span className="absolute bottom-1.5 right-1.5 text-[10px] font-medium text-white bg-black/55 px-1.5 py-0.5 rounded-full">{asset.images.length}장</span>}
+        <div className="absolute top-1 right-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button onClick={(e) => { e.stopPropagation(); onShare(asset); }} disabled={sharing} title="이 어셋 공유 링크" className="bg-black/55 hover:bg-[#0071e3] text-white rounded-full p-1">{sharing ? <Loader2 size={12} className="animate-spin" /> : <Share2 size={12} />}</button>
+          <button onClick={(e) => { e.stopPropagation(); onDelete(asset); }} title="삭제" className="bg-black/55 hover:bg-red-500 text-white rounded-full p-1"><Trash2 size={12} /></button>
+        </div>
+      </div>
+      <div className="px-2.5 py-2">
+        <p className="text-[13px] font-semibold text-gray-800 truncate">{asset.name}</p>
+        {asset.description && <p className="text-[11px] text-gray-400 truncate">{asset.description}</p>}
+      </div>
+    </div>
+  );
+});
+
 /* ─── Element library modal ─── */
 export function ElementLibrary({ open, onClose, projectId }: { open: boolean; onClose: () => void; projectId: string }) {
-  const {
-    projects, assetCollections, elementAssets, projectCollectionId,
-    createCollection, renameCollection, deleteCollection,
-    addElementAsset, updateElementAsset, deleteElementAsset, setProjectCollection,
-  } = useAppStore();
+  // ★ 셀렉터로 좁혀서 구독한다. 예전에는 useAppStore() 를 통째로 구독했는데, 그러면
+  // projects 가 바뀔 때마다 — 즉 영상 생성 중 10초 폴링마다 — 이 창 전체가 리렌더됐다.
+  // 카드 커버가 수백 KB 짜리 base64 문자열이라 리렌더 한 번에 수십 MB 를 diff 하게 되고,
+  // 그게 "생성 중에 엘리먼트 창이 뚝뚝 끊긴다"의 정체였다.
+  // 아래 셀렉터들은 전부 원시값이거나 실제로 이 창이 쓰는 슬라이스뿐이다.
+  const hostModel = useAppStore((s) => s.projects.find((p) => p.id === projectId)?.settings.model || '');
+  const assetCollections = useAppStore((s) => s.assetCollections);
+  const elementAssets = useAppStore((s) => s.elementAssets);
+  const projectCollectionId = useAppStore((s) => s.projectCollectionId);
+  // 액션은 zustand 에서 참조가 고정이라 개별 선택해도 리렌더를 유발하지 않는다.
+  const createCollection = useAppStore((s) => s.createCollection);
+  const renameCollection = useAppStore((s) => s.renameCollection);
+  const deleteCollection = useAppStore((s) => s.deleteCollection);
+  const addElementAsset = useAppStore((s) => s.addElementAsset);
+  const updateElementAsset = useAppStore((s) => s.updateElementAsset);
+  const deleteElementAsset = useAppStore((s) => s.deleteElementAsset);
+  const setProjectCollection = useAppStore((s) => s.setProjectCollection);
 
   // The library is global, but the request it feeds is not: how many images may actually
   // go out is decided by the model of the project this modal was opened from.
-  const hostModel = projects.find(p => p.id === projectId)?.settings.model || '';
   const sendCap = modelImageMax(hostModel);
   const modelName = MODELS.find(m => m.id === hostModel)?.name || '현재 모델';
 
@@ -617,6 +678,8 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   const [intake, setIntake] = useState<File[] | null>(null);      // dropped OS files awaiting category
   const [dropHint, setDropHint] = useState(false);                // drag is over the grid
   const [dropNote, setDropNote] = useState('');                   // why a drop was refused / what it added
+  // 커버 로딩을 열기 애니메이션 뒤로 미룬다. 모달 트랜지션이 0.18s 라 그보다 조금 뒤.
+  const [imagesReady, setImagesReady] = useState(false);
 
   // Keep the viewed collection valid: prefer current → bound → first.
   useEffect(() => {
@@ -642,6 +705,13 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, editing, renaming, shareLink, importing, intake, onClose]);
+
+  // 창이 닫히면 다시 false 로 돌려, 다음에 열 때도 애니메이션이 먼저 끝나게 한다.
+  useEffect(() => {
+    if (!open) { setImagesReady(false); return; }
+    const t = setTimeout(() => setImagesReady(true), 240);
+    return () => clearTimeout(t);
+  }, [open]);
 
   // The drop note is an outcome, not a dialog — it goes away on its own.
   useEffect(() => {
@@ -719,7 +789,14 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   };
 
   // ─── Share: collection or single asset → R2 link (7-day, copied to clipboard) ───
-  const shareBundle = async (bundle: Bundle, key: string) => {
+  // ★ 아래 세 핸들러는 참조가 고정돼야 한다. 매 렌더마다 새 함수를 만들면 AssetCard 의
+  // memo 가 매번 깨져서, 애초에 memo 를 단 이유(거대한 base64 diff 회피)가 사라진다.
+  const openEditor = useCallback((a: ElementAsset) => setEditing(a), []);
+  const removeAsset = useCallback((a: ElementAsset) => {
+    if (confirm(`'${a.name}' 어셋을 삭제할까요? (앱에 저장된 이미지도 함께 삭제)`)) deleteElementAsset(a.id);
+  }, [deleteElementAsset]);
+
+  const shareBundle = useCallback(async (bundle: Bundle, key: string) => {
     setShareBusy(key);
     try {
       const url = await createElementPackLink(JSON.stringify(bundle));
@@ -730,15 +807,15 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
     } finally {
       setShareBusy(null);
     }
-  };
+  }, []);
   const shareCollection = (col: { id: string; name: string }) => {
     const assets = elementAssets.filter(a => a.collectionId === col.id);
     if (assets.length === 0) { alert('공유할 어셋이 없습니다.'); return; }
     shareBundle({ format: BUNDLE_FORMAT, version: 1, kind: 'collection', collectionName: col.name, assets: assets.map(stripAssetForExport) }, 'col-' + col.id);
   };
-  const shareAsset = (a: ElementAsset) => {
+  const shareAsset = useCallback((a: ElementAsset) => {
     shareBundle({ format: BUNDLE_FORMAT, version: 1, kind: 'asset', collectionName: a.name, assets: [stripAssetForExport(a)] }, 'asset-' + a.id);
-  };
+  }, [shareBundle]);
 
   // ─── Import (receiving end of a share link): link or file → placement choice ───
   const commitImport = (parsed: ParsedBundle, mode: 'new' | 'merge') => {
@@ -766,15 +843,15 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
       <motion.div
         initial={{ scale: 0.97, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.97, y: 12 }}
         transition={{ duration: 0.18, ease: 'easeOut' }}
-        className="relative bg-[#f5f5f7] rounded-2xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden"
+        className="relative bg-[#f5f5f7] dark:bg-[#242426] rounded-2xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3.5 bg-white border-b border-gray-200/70 shrink-0">
+        <div className="flex items-center justify-between px-5 py-3.5 bg-white dark:bg-[#1c1c1e] border-b border-gray-200/70 shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-[#0071e3]/10 flex items-center justify-center"><Layers size={16} className="text-[#0071e3]" /></div>
+            <div className="w-7 h-7 rounded-lg bg-[#0071e3]/10 flex items-center justify-center"><Layers size={16} className="text-[#0071e3] dark:text-[#4da3ff]" /></div>
             <div className="leading-tight">
-              <h2 className="text-[16px] font-semibold text-[#1d1d1f] tracking-tight">Element</h2>
+              <h2 className="text-[16px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight">Element</h2>
               <p className="text-[11px] text-gray-400 -mt-0.5">어셋 라이브러리</p>
             </div>
           </div>
@@ -783,10 +860,10 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
 
         <div className="flex-1 flex min-h-0">
           {/* Collections sidebar */}
-          <div className="w-56 shrink-0 bg-white border-r border-gray-200/70 flex flex-col">
+          <div className="w-56 shrink-0 bg-white dark:bg-[#1c1c1e] border-r border-gray-200/70 flex flex-col">
             <div className="px-3 py-2.5 flex items-center justify-between">
               <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">컬렉션</span>
-              <button onClick={handleNewCollection} title="새 컬렉션" className="p-1 text-gray-400 hover:text-[#0071e3] rounded-md hover:bg-indigo-50 transition-colors"><Plus size={16} /></button>
+              <button onClick={handleNewCollection} title="새 컬렉션" className="p-1 text-gray-400 hover:text-[#0071e3] dark:hover:text-[#4da3ff] rounded-md hover:bg-indigo-50 transition-colors"><Plus size={16} /></button>
             </div>
             <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5">
               {assetCollections.length === 0 && (
@@ -798,7 +875,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                 return (
                   <div key={c.id}
                     onClick={() => selectCollection(c.id)}
-                    className={`group flex items-center gap-1.5 px-2.5 py-2 rounded-[9px] cursor-pointer transition-colors ${active ? 'bg-indigo-50 text-[#0071e3]' : 'text-gray-700 hover:bg-gray-50'}`}>
+                    className={`group flex items-center gap-1.5 px-2.5 py-2 rounded-[9px] cursor-pointer transition-colors ${active ? 'bg-indigo-50 text-[#0071e3] dark:text-[#4da3ff]' : 'text-gray-700 hover:bg-gray-50'}`}>
                     {renaming?.id === c.id ? (
                       <input autoFocus value={renaming.value}
                         onChange={(e) => setRenaming({ id: c.id, value: e.target.value })}
@@ -826,27 +903,27 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
             {selectedCollection ? (
               <>
                 {/* Toolbar */}
-                <div className="px-5 py-3 bg-white/60 border-b border-gray-200/70 space-y-2.5 shrink-0">
+                <div className="px-5 py-3 bg-white/60 dark:bg-[#1c1c1e]/60 border-b border-gray-200/70 space-y-2.5 shrink-0">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2 min-w-0">
-                      <h3 className="text-[15px] font-semibold text-[#1d1d1f] truncate">{selectedCollection.name}</h3>
+                      <h3 className="text-[15px] font-semibold text-[#1d1d1f] dark:text-gray-900 truncate">{selectedCollection.name}</h3>
                       {isBound
                         ? <span className="flex items-center gap-1 text-[11px] font-medium text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full shrink-0" title="지금 이 채팅의 @멘션이 이 컬렉션의 어셋을 사용합니다"><Check size={11} /> 이 채팅에서 사용 중</span>
-                        : <button onClick={() => setProjectCollection(projectId, selectedCollectionId)} className="flex items-center gap-1 text-[11px] font-medium text-[#0071e3] bg-indigo-50 hover:bg-indigo-100 px-2 py-0.5 rounded-full transition-colors shrink-0"><Link2 size={11} /> 이 채팅에 사용</button>}
+                        : <button onClick={() => setProjectCollection(projectId, selectedCollectionId)} className="flex items-center gap-1 text-[11px] font-medium text-[#0071e3] dark:text-[#4da3ff] bg-indigo-50 hover:bg-indigo-100 px-2 py-0.5 rounded-full transition-colors shrink-0"><Link2 size={11} /> 이 채팅에 사용</button>}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <button onClick={() => shareCollection(selectedCollection)} disabled={shareBusy === 'col-' + selectedCollection.id} title="이 컬렉션 전체를 공유 링크로 (받는 사람은 ‘가져오기’로 추가)" className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600 hover:text-[#0071e3] bg-white border border-gray-200 hover:border-indigo-300 disabled:opacity-50 px-2.5 py-1.5 rounded-lg transition-colors">{shareBusy === 'col-' + selectedCollection.id ? <Loader2 size={13} className="animate-spin" /> : <Share2 size={13} />} 공유 링크</button>
-                      <button onClick={() => setImporting(true)} title="공유 링크 또는 파일로 어셋/컬렉션 가져오기" className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600 hover:text-[#0071e3] bg-white border border-gray-200 hover:border-indigo-300 px-2.5 py-1.5 rounded-lg transition-colors"><Upload size={13} /> 가져오기</button>
+                      <button onClick={() => shareCollection(selectedCollection)} disabled={shareBusy === 'col-' + selectedCollection.id} title="이 컬렉션 전체를 공유 링크로 (받는 사람은 ‘가져오기’로 추가)" className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600 hover:text-[#0071e3] dark:hover:text-[#4da3ff] bg-white dark:bg-[#1c1c1e] border border-gray-200 hover:border-indigo-300 disabled:opacity-50 px-2.5 py-1.5 rounded-lg transition-colors">{shareBusy === 'col-' + selectedCollection.id ? <Loader2 size={13} className="animate-spin" /> : <Share2 size={13} />} 공유 링크</button>
+                      <button onClick={() => setImporting(true)} title="공유 링크 또는 파일로 어셋/컬렉션 가져오기" className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600 hover:text-[#0071e3] dark:hover:text-[#4da3ff] bg-white dark:bg-[#1c1c1e] border border-gray-200 hover:border-indigo-300 px-2.5 py-1.5 rounded-lg transition-colors"><Upload size={13} /> 가져오기</button>
                       <button onClick={() => setEditing('new')} className="flex items-center gap-1.5 text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] px-3 py-1.5 rounded-lg transition-colors active:scale-95"><Plus size={15} /> 어셋 추가</button>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
-                      <button onClick={() => setCategoryFilter('all')} className={`px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors ${categoryFilter === 'all' ? 'bg-white shadow-sm text-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>전체</button>
+                      <button onClick={() => setCategoryFilter('all')} className={`px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors ${categoryFilter === 'all' ? 'bg-white dark:bg-[#1c1c1e] shadow-sm text-gray-800' : 'text-gray-500 hover:text-gray-700'}`}>전체</button>
                       {CATEGORIES.map(c => {
                         const Icon = CATEGORY_ICON[c]; const on = categoryFilter === c;
                         return (
-                          <button key={c} onClick={() => setCategoryFilter(c)} className={`flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors ${on ? 'bg-white shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                          <button key={c} onClick={() => setCategoryFilter(c)} className={`flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium rounded-md transition-colors ${on ? 'bg-white dark:bg-[#1c1c1e] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                             style={on ? { color: CATEGORY_META[c].text } : undefined}>
                             <Icon size={11} /> {CATEGORY_META[c].name}
                           </button>
@@ -856,7 +933,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                     <div className="relative flex-1 max-w-xs ml-auto">
                       <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
                       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="어셋 검색..."
-                        className="w-full pl-8 pr-3 py-1.5 bg-white border border-gray-200 focus:border-indigo-400 rounded-lg text-[13px] outline-none transition-colors" />
+                        className="w-full pl-8 pr-3 py-1.5 bg-white dark:bg-[#1c1c1e] border border-gray-200 focus:border-indigo-400 rounded-lg text-[13px] outline-none transition-colors" />
                     </div>
                   </div>
                 </div>
@@ -877,9 +954,9 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                   }}>
                   {dropHint && (
                     <div className="absolute inset-3 z-10 rounded-2xl border-2 border-dashed border-[#0071e3] bg-[#0071e3]/5 flex flex-col items-center justify-center gap-1.5 pointer-events-none">
-                      <Upload size={26} className="text-[#0071e3]" />
-                      <p className="text-[13px] font-medium text-[#0071e3]">놓으면 파일 이름 그대로 어셋이 됩니다</p>
-                      <p className="text-[11px] text-[#0071e3]/70">분류(캐릭터·로케이션·프랍)만 고르면 끝</p>
+                      <Upload size={26} className="text-[#0071e3] dark:text-[#4da3ff]" />
+                      <p className="text-[13px] font-medium text-[#0071e3] dark:text-[#4da3ff]">놓으면 파일 이름 그대로 어셋이 됩니다</p>
+                      <p className="text-[11px] text-[#0071e3]/70 dark:text-[#4da3ff]/70">분류(캐릭터·로케이션·프랍)만 고르면 끝</p>
                     </div>
                   )}
                   {filtered.length === 0 ? (
@@ -890,35 +967,11 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                     </div>
                   ) : (
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-                      {filtered.map(a => {
-                        const meta = CATEGORY_META[a.category];
-                        const CatIcon = CATEGORY_ICON[a.category];
-                        const cover = a.images[0];
-                        return (
-                          <div key={a.id} onClick={() => setEditing(a)} role="button"
-                            className="text-left bg-white rounded-xl border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all group cursor-pointer">
-                            {/* Cover uses the FULL-RES url: the 80px/q0.5 thumbnailUrl was far too
-                                small for this ~270px card and rendered visibly mushy (v26.7.2101
-                                regression). loading="lazy" + decoding="async" is what actually fixed
-                                the modal-open jank — only on-screen covers decode, off the main thread. */}
-                            <div className="aspect-square bg-gray-50 relative overflow-hidden">
-                              {cover
-                                ? <img src={cover.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
-                                : <div className="w-full h-full flex items-center justify-center text-gray-300"><ImageIcon size={28} /></div>}
-                              <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ background: meta.bg, color: meta.text }}><CatIcon size={10} /> {meta.name}</span>
-                              {a.images.length > 1 && <span className="absolute bottom-1.5 right-1.5 text-[10px] font-medium text-white bg-black/55 px-1.5 py-0.5 rounded-full">{a.images.length}장</span>}
-                              <div className="absolute top-1 right-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button onClick={(e) => { e.stopPropagation(); shareAsset(a); }} disabled={shareBusy === 'asset-' + a.id} title="이 어셋 공유 링크" className="bg-black/55 hover:bg-[#0071e3] text-white rounded-full p-1">{shareBusy === 'asset-' + a.id ? <Loader2 size={12} className="animate-spin" /> : <Share2 size={12} />}</button>
-                                <button onClick={(e) => { e.stopPropagation(); if (confirm(`'${a.name}' 어셋을 삭제할까요? (앱에 저장된 이미지도 함께 삭제)`)) deleteElementAsset(a.id); }} title="삭제" className="bg-black/55 hover:bg-red-500 text-white rounded-full p-1"><Trash2 size={12} /></button>
-                              </div>
-                            </div>
-                            <div className="px-2.5 py-2">
-                              <p className="text-[13px] font-semibold text-gray-800 truncate">{a.name}</p>
-                              {a.description && <p className="text-[11px] text-gray-400 truncate">{a.description}</p>}
-                            </div>
-                          </div>
-                        );
-                      })}
+                      {filtered.map(a => (
+                        <AssetCard key={a.id} asset={a} sharing={shareBusy === 'asset-' + a.id}
+                          imagesReady={imagesReady}
+                          onOpen={openEditor} onShare={shareAsset} onDelete={removeAsset} />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -929,7 +982,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                 <p className="text-[14px]">컬렉션을 만들거나, 공유받은 어셋을 가져오세요.</p>
                 <div className="flex items-center gap-2">
                   <button onClick={handleNewCollection} className="flex items-center gap-1.5 text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] px-4 py-2 rounded-lg transition-colors"><Plus size={15} /> 새 컬렉션</button>
-                  <button onClick={() => setImporting(true)} className="flex items-center gap-1.5 text-[13px] font-medium text-gray-600 bg-white border border-gray-200 hover:border-indigo-300 px-4 py-2 rounded-lg transition-colors"><Upload size={15} /> 가져오기</button>
+                  <button onClick={() => setImporting(true)} className="flex items-center gap-1.5 text-[13px] font-medium text-gray-600 bg-white dark:bg-[#1c1c1e] border border-gray-200 hover:border-indigo-300 px-4 py-2 rounded-lg transition-colors"><Upload size={15} /> 가져오기</button>
                 </div>
               </div>
             )}
@@ -941,14 +994,14 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
           {shareLink && (
             <motion.div key="share-banner" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.16 }}
-              className="absolute top-3 left-1/2 -translate-x-1/2 z-30 w-[min(560px,92%)] bg-white rounded-xl shadow-2xl border border-gray-200 px-4 py-3">
+              className="absolute top-3 left-1/2 -translate-x-1/2 z-30 w-[min(560px,92%)] bg-white dark:bg-[#1c1c1e] rounded-xl shadow-2xl border border-gray-200 px-4 py-3">
               <div className="flex items-center gap-2 mb-2">
                 <div className="w-6 h-6 rounded-full bg-emerald-50 flex items-center justify-center"><Check size={14} className="text-emerald-600" /></div>
                 <span className="text-[13px] font-semibold text-gray-800">공유 링크 생성됨 · 클립보드에 복사됨</span>
                 <button onClick={() => setShareLink(null)} className="ml-auto text-gray-400 hover:text-gray-600"><X size={16} /></button>
               </div>
               <div className="flex items-center gap-1.5">
-                <input readOnly value={shareLink} onFocus={(e) => e.currentTarget.select()} className="flex-1 min-w-0 px-2.5 py-1.5 bg-[#fafafc] border border-gray-200 rounded-lg text-[12px] text-gray-600 outline-none font-mono" />
+                <input readOnly value={shareLink} onFocus={(e) => e.currentTarget.select()} className="flex-1 min-w-0 px-2.5 py-1.5 bg-[#fafafc] dark:bg-[#242426] border border-gray-200 rounded-lg text-[12px] text-gray-600 outline-none font-mono" />
                 <button onClick={() => { navigator.clipboard.writeText(shareLink).catch(() => {}); }} className="flex items-center gap-1 text-[12px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] px-2.5 py-1.5 rounded-lg shrink-0"><Copy size={13} /> 복사</button>
               </div>
               <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">받는 사람이 링크를 열면 어셋 파일이 다운로드됩니다 → element에서 <b>‘가져오기’</b>로 추가. · 링크는 <b>24시간</b> 유효(그 안엔 몇 번이든 다시 받기 가능)하며, 만료되면 서버에서 <b>자동 삭제</b>됩니다.</p>
@@ -961,7 +1014,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
           {dropNote && (
             <motion.div key="drop-note" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.16 }}
-              className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-white rounded-xl shadow-xl border border-gray-200 px-3.5 py-2">
+              className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-white dark:bg-[#1c1c1e] rounded-xl shadow-xl border border-gray-200 px-3.5 py-2">
               <span className="text-[12px] text-gray-700">{dropNote}</span>
               <button onClick={() => setDropNote('')} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
             </motion.div>

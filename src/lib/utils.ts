@@ -195,9 +195,11 @@ export function validateImageDimensions(source: File | string): Promise<string |
 }
 
 // Validate video file (size + duration + resolution + fps)
-// maxSec: per-model reference-video cap. Omitted (every pre-existing caller) → the
-// original API_LIMITS value, so behaviour for 2.0/Fast/Mini/Omni is unchanged.
-export function validateVideoFile(file: File, maxSec?: number): Promise<string | null> {
+// maxSec: per-model reference-video cap. minSec: per-TASK floor — Seedance 2.5 editing
+// requires 4s (BytePlus doc 2607688), everything else keeps the API-wide 2s. Both omitted
+// (every pre-existing caller) → the original API_LIMITS values, so behaviour for
+// 2.0/Fast/Mini/Omni is unchanged.
+export function validateVideoFile(file: File, maxSec?: number, minSec?: number): Promise<string | null> {
   return new Promise((resolve) => {
     const sizeMB = file.size / (1024 * 1024);
     if (sizeMB > API_LIMITS.video.maxSizeMB) { resolve(`비디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${API_LIMITS.video.maxSizeMB}MB)`); return; }
@@ -217,7 +219,8 @@ export function validateVideoFile(file: File, maxSec?: number): Promise<string |
     video.onloadedmetadata = () => {
       URL.revokeObjectURL(video.src);
       const d = video.duration;
-      if (d < API_LIMITS.video.minDuration) { resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${API_LIMITS.video.minDuration}초)`); return; }
+      const vMin = minSec ?? API_LIMITS.video.minDuration;
+      if (d < vMin) { resolve(`비디오 너무 짧음: ${d.toFixed(1)}초 (최소 ${vMin}초)`); return; }
       // Enforce the real limit (15.2) but quote the round number (15) — see displayMaxDuration.
       const vMax = maxSec ?? API_LIMITS.video.maxDuration;
       // Quote the round number, enforce the real one (15.2 → "15", 30.2 → "30").
@@ -626,16 +629,29 @@ export async function downloadViaProxy(remoteUrl: string, filename: string): Pro
   // downloadURL() direct from the BytePlus signed URL throttled to ~70KB/s here (14MB → 5min),
   // while the server proxy fetches the same URL at full speed (~4MB/s) and serves it from
   // localhost. So route the Electron download at the proxy endpoint.
+  // Our OWN media-cache clips (Gemini Omni) are stored as a relative "/api/cache/<id>.mp4",
+  // and those must NOT go through the CDN proxy: it runs `new URL(url)` on the value, which
+  // throws for a relative path and answers 400 "Invalid URL". That made every Omni download
+  // fail whenever the clip wasn't already in the in-memory blobCache above — i.e. after any
+  // restart, or for a clip the user never played. They also gain nothing from the proxy,
+  // which exists only to dodge BytePlus CDN throttling; this file is already on localhost.
+  const localUrl = remoteUrl.startsWith('/') ? location.origin + remoteUrl
+    : remoteUrl.startsWith(location.origin) ? remoteUrl
+    : null;
+
   const api = (window as any).electronAPI;
   if (api?.download) {
-    const proxied = `${location.origin}/api/download?url=${encodeURIComponent(remoteUrl)}&filename=${encodeURIComponent(filename)}`;
-    await api.download({ url: proxied, filename });
+    // downloadURL() saves regardless of Content-Type, and the filename travels in the main
+    // process's pendingDownloads map, so the local URL needs no Content-Disposition.
+    const target = localUrl
+      || `${location.origin}/api/download?url=${encodeURIComponent(remoteUrl)}&filename=${encodeURIComponent(filename)}`;
+    await api.download({ url: target, filename });
     return ''; // path arrives later via 'download-done'
   }
   // Browser/dev fallback
   const params = new URLSearchParams({ url: remoteUrl, filename });
   const a = document.createElement('a');
-  a.href = `/api/download?${params.toString()}`;
+  a.href = localUrl || `/api/download?${params.toString()}`;
   a.download = filename;
   document.body.appendChild(a);
   a.click();

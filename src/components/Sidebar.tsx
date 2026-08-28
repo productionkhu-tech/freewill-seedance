@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type RefObject, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw, Sun, Moon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppStore, groupTree, type Project, type ProjectGroup } from '../store';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
@@ -186,7 +186,7 @@ function IconPicker({ anchor, current, onPick, onClose }: {
         ref={boxRef}
         onClick={(e) => e.stopPropagation()}
         style={{ left, top, width: PANEL_W }}
-        className="absolute bg-white rounded-xl shadow-2xl border border-gray-200 p-2.5 text-gray-900"
+        className="absolute bg-white dark:bg-[#1c1c1e] rounded-xl shadow-2xl border border-gray-200 p-2.5 text-gray-900"
       >
         {/* Category tabs. A single flat grid of ~600 glyphs is a scroll-hunt; tabs keep
             any one page to a couple of screenfuls. */}
@@ -334,7 +334,7 @@ function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
         ref={boxRef}
         onClick={(e) => e.stopPropagation()}
         style={{ left, top, width: W }}
-        className="absolute bg-white rounded-xl shadow-2xl border border-gray-200 py-1 text-gray-900 overflow-hidden"
+        className="absolute bg-white dark:bg-[#1c1c1e] rounded-xl shadow-2xl border border-gray-200 py-1 text-gray-900 overflow-hidden"
       >
         <div className="px-3 py-1.5 text-[11px] text-gray-400 truncate border-b border-gray-100">{project.name}</div>
         <button onClick={() => { onNewGroup(); onClose(); }}
@@ -409,7 +409,7 @@ function formatBytes(bytes: number | null): string {
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
     projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, setGroupParent, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
-    autoDownload, setAutoDownload } = useAppStore();
+    autoDownload, setAutoDownload, theme, setTheme } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
@@ -1055,7 +1055,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                   // status when idle, rename/delete on hover.
                   <div className="relative shrink-0 ml-2 flex items-center" style={{ minWidth: 44, height: 22 }}>
                     <div className="absolute inset-0 flex items-center justify-end gap-1 opacity-100 group-hover:opacity-0 transition-opacity pointer-events-none">
-                      {running && <Loader2 size={14} className="text-[#0071e3] animate-spin" />}
+                      {running && <Loader2 size={14} className="text-[#0071e3] dark:text-[#4da3ff] animate-spin" />}
                       {!running && unseen > 0 && (
                         <span title={`새로 완성된 영상 ${unseen}개`}
                           className="min-w-[17px] h-[17px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[10px] font-bold leading-[17px] text-center tabular-nums">
@@ -1186,7 +1186,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               </span>
             )}
             <span className="shrink-0 text-[10px] text-white/25 tabular-nums group-hover/g:hidden">{all.length}</span>
-            {g.collapsed && running && <Loader2 size={12} className="shrink-0 text-[#0071e3] animate-spin" />}
+            {g.collapsed && running && <Loader2 size={12} className="shrink-0 text-[#0071e3] dark:text-[#4da3ff] animate-spin" />}
             {g.collapsed && !running && unseen > 0 && (
               <span title={`이 그룹에 새로 완성된 영상 ${unseen}개`}
                 className="shrink-0 min-w-[16px] h-[16px] px-1 rounded-full bg-[#30d158] text-[#0b2c16] text-[9px] font-bold leading-[16px] text-center tabular-nums">
@@ -1383,6 +1383,17 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             <span className="text-[11px] text-white/70">생성 시 자동 다운로드</span>
           </label>
         </div>
+        {/* Theme. Lives beside the other app-wide switches (not per project) because it
+            is a property of this installation, and it is persisted so a restart keeps it. */}
+        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
+          title={theme === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'}>
+          <div className="flex items-center gap-2">
+            {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+            <span className="font-medium">{theme === 'dark' ? '라이트 모드' : '다크 모드'}</span>
+          </div>
+          <span className="text-[10px] text-white/40">{theme === 'dark' ? 'ON' : 'OFF'}</span>
+        </button>
         <button onClick={openDashboard}
           className="w-full flex items-center gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
           title="크레딧 사용량 대시보드 열기 (외부 브라우저)">
@@ -1476,7 +1487,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.995 }}
             transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="fixed inset-0 z-[90] bg-[#f5f5f7] flex flex-col text-gray-900"
+            className="fixed inset-0 z-[90] bg-[#f5f5f7] dark:bg-[#242426] flex flex-col text-gray-900"
           >
             <GlobalGallery onClose={() => setGalleryOpen(false)} />
           </motion.div>
@@ -1500,7 +1511,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             initial={{ opacity: 0, scale: 0.94, y: 12 }} animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.94, y: 12 }} transition={{ duration: 0.18, ease: 'easeOut' }}
             onClick={(e) => e.stopPropagation()}
-            className="w-[min(92vw,27rem)] bg-white rounded-2xl shadow-2xl overflow-hidden text-gray-900">
+            className="w-[min(92vw,27rem)] bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-2xl overflow-hidden text-gray-900">
             <div className="p-5 space-y-3">
               <div className="flex items-start gap-3">
                 <div className="shrink-0 w-9 h-9 rounded-full bg-amber-50 flex items-center justify-center">
@@ -1578,7 +1589,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               exit={{ opacity: 0, scale: 0.94, y: 12 }}
               transition={{ duration: 0.18, ease: 'easeOut' }}
               onClick={(e) => e.stopPropagation()}
-              className="w-[min(92vw,26rem)] bg-white rounded-2xl shadow-2xl overflow-hidden text-gray-900"
+              className="w-[min(92vw,26rem)] bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-2xl overflow-hidden text-gray-900"
             >
               <div className="p-5 space-y-3">
                 <div className="flex items-start gap-3">

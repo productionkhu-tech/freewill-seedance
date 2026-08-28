@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -7,6 +7,9 @@ import { HoverZoom } from './HoverZoom';
 import { ElementLibrary } from './ElementLibrary';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
+  // Gemini Omni 1.1 only — no Seedance model lists it, so allowedResolutions() filters it
+  // straight back out for every BytePlus model and this row never renders there.
+  { id: '360p', name: '360p' },
   { id: '480p', name: '480p' },
   { id: '720p', name: '720p' },
   { id: '1080p', name: '1080p' },
@@ -15,15 +18,19 @@ const RESOLUTIONS: { id: string; name: string }[] = [
   { id: '4k', name: '4K' },
 ];
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
-// Gemini Omni Flash — its own knobs (see gemini-omni-flash-preview spec).
-// The 4 real API tasks only. "Unspecified" (omit task → model infers) is intentionally
-// NOT offered: task must be an explicit user choice, never auto-derived.
-const OMNI_TASKS: { id: string; name: string }[] = [
-  { id: 'text_to_video', name: 'Text to Video' },
-  { id: 'image_to_video', name: 'Image to Video' },
-  { id: 'reference_to_video', name: 'Reference to Video' },
-  { id: 'edit', name: 'Edit Video' },
-];
+// Gemini Omni — display names for the API's task values. Which of these a given model
+// actually offers comes from modelOmniTasks(); this map is only the label lookup, so a
+// task added for one model can never appear on another just by living in this file.
+// "Unspecified" (omit task → model infers) is intentionally absent — see OMNI_DEFAULT_TASKS.
+const OMNI_TASK_NAMES: Record<string, string> = {
+  text_to_video: 'Text to Video',
+  image_to_video: 'Image to Video',
+  reference_to_video: 'Reference to Video',
+  edit: 'Edit Video',
+  extend: 'Extend Video',
+};
+const omniTaskOptions = (model: string) =>
+  modelOmniTasks(model).map(id => ({ id, name: OMNI_TASK_NAMES[id] || id }));
 const OMNI_RATIOS: { id: string; name: string }[] = [{ id: '16:9', name: '16:9' }, { id: '9:16', name: '9:16' }];
 
 // File picker accept filter per asset type (used by per-asset replace).
@@ -63,7 +70,7 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
         e.preventDefault(); e.stopPropagation(); setDragOverId(null);
         const f = e.dataTransfer.files?.[0]; if (f) onReplaceFile(asset, f);
       }}
-      className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] border-black/5'}`}
+      className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] dark:bg-[#242426] border-black/5 dark:border-white/10'}`}
     >
       <div className="flex items-center gap-2 overflow-hidden">
         {locked
@@ -164,7 +171,7 @@ function CustomSelect({ value, options, onChange, placeholder }: { value: string
     <div className="relative">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between px-3 py-2 bg-[#fafafc] border-[3px] border-black/5 rounded-[11px] text-[14px] focus:outline-none focus:border-[#0071e3] transition-colors"
+        className="w-full flex items-center justify-between px-3 py-2 bg-[#fafafc] dark:bg-[#242426] border-[3px] border-black/5 dark:border-white/10 rounded-[11px] text-[14px] focus:outline-none focus:border-[#0071e3] transition-colors"
       >
         <span className={`truncate ${selected ? '' : 'text-gray-400'}`}>{selected ? selected.name : placeholder}</span>
         <ChevronDown size={16} className={`transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
@@ -178,13 +185,13 @@ function CustomSelect({ value, options, onChange, placeholder }: { value: string
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -10, scale: 0.95 }}
               transition={{ duration: 0.15, ease: "easeOut" }}
-              className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-[11px] shadow-xl overflow-hidden"
+              className="absolute z-50 w-full mt-1 bg-white dark:bg-[#1c1c1e] border border-gray-200 rounded-[11px] shadow-xl overflow-hidden"
             >
               {options.map(opt => (
                 <button
                   key={opt.id}
                   onClick={() => { onChange(opt.id); setIsOpen(false); }}
-                  className={`w-full text-left px-3 py-2 text-[14px] hover:bg-[#f5f5f7] transition-colors ${value === opt.id ? 'bg-[#f0f0f2] font-medium text-[#0071e3]' : 'text-gray-700'}`}
+                  className={`w-full text-left px-3 py-2 text-[14px] hover:bg-[#f5f5f7] dark:hover:bg-[#2e2e31] transition-colors ${value === opt.id ? 'bg-[#f0f0f2] dark:bg-[#2e2e31] font-medium text-[#0071e3] dark:text-[#4da3ff]' : 'text-gray-700'}`}
                 >
                   {opt.name}
                 </button>
@@ -239,6 +246,15 @@ export function SettingsPanel() {
   if (!project) return null;
   const { settings, assets } = project;
   const isOmni = modelProvider(settings.model) === 'gemini'; // Gemini Omni → different settings surface
+  // The task as this model actually understands it. Never read settings.omniTask raw in
+  // the render path — a project can hold a task belonging to the other Omni model.
+  const omniTask = resolveOmniTask(settings.model, settings.omniTask);
+  // Edit and Extend take their FRAMING from the source clip — the API rejects aspect_ratio
+  // for both. Resolution is a different story, and calling it "source-driven" was my error:
+  // both tasks accept and honour it (measured 2026-08-28 — a 360p source with
+  // resolution:'1080p' returned 1920x1080). OMITTING it is what caps the output at 720p,
+  // which is why extending a 4K clip came back 720p. Ratio picker hides; resolution stays.
+  const omniRatioFromSource = isOmni && (omniTask === 'edit' || omniTask === 'extend');
   // Live 4k permission for the selected billing project (sheet column F). Derived every
   // render, so a grant/revoke lands as soon as the poll updates billingProjects.
   const allow4k = isFourKAllowed({ billingProject, billingProjects });
@@ -247,12 +263,22 @@ export function SettingsPanel() {
   // rewrite settings here — that would mutate the project out from under someone who may
   // be mid-prompt. Show the state instead; handleSend does the actual clamp to 1080p when
   // the queue is fired (and only then writes back).
-  const fourKBlocked = settings.resolution === '4k' && !allow4k;
+  // Derived from the OPTION LIST, not from allow4k directly: the tracker's 4K grant is a
+  // BytePlus-only control now, so Omni offers 4K with allow4k false and neither notice may
+  // fire there. resOptions is already structural ∩ policy for this model.
+  const fourKAvailable = resOptions.some(r => r.id === '4k');
+  const fourKBlocked = settings.resolution === '4k' && !fourKAvailable;
+  // 4K is in this model's structural list but the project isn't granted it AND the user
+  // hasn't got it selected — so fourKBlocked is false, the option is simply absent from the
+  // dropdown, and nothing says why ("4k는 어디갔누"). The silence is the bug, not the gate.
+  // Only shown while the picker is actually visible (edit/extend hide it entirely).
+  const fourKHidden = !fourKAvailable && !fourKBlocked && modelResolutions(settings.model).includes('4k');
   const [durMin, durMax] = modelDurationRange(settings.model);   // 2.0: 4–15 (unchanged)
   const imgMax = modelImageMax(settings.model);                  // 2.0: 9 (unchanged)
   const vidMax = modelVideoMax(settings.model);                  // 2.0: 3 (unchanged)
   const audMax = modelAudioMax(settings.model);                  // 2.0: 3 (unchanged)
   const refVidSec = modelRefVideoSec(settings.model);            // 2.0: 15.2 (unchanged)
+  const refVidMin = refVideoMinSecFor(settings.model, settings.mode); // 2.5 편집만 4s, 그 외 2s
   const refAudSec = modelRefAudioSec(settings.model);            // 2.0: 15.2 · 2.5: 30.2
   // The cap to enforce for a given asset type — video and audio have separate per-model
   // limits, so passing one for both (what totalDurationError used to get) is wrong.
@@ -333,11 +359,13 @@ export function SettingsPanel() {
 
   const availableTypes = useMemo(() => {
     if (isOmni) {
-      // Omni: no audio ever; text→none, edit→video, else images. Coerce any empty/legacy
-      // task to text_to_video (Unspecified was removed — task is always explicit).
-      const t = OMNI_TASKS.some(x => x.id === settings.omniTask) ? settings.omniTask : 'text_to_video';
+      // Omni: no audio ever; text→none, edit/extend→video, else images. Coerce any
+      // empty/legacy/other-model task to text_to_video (task is always explicit).
+      const t = resolveOmniTask(settings.model, settings.omniTask);
       if (t === 'text_to_video') return [];
-      if (t === 'edit') return ['video_url'];
+      // Extend takes exactly the same asset shape as Edit — 1 source clip, no images —
+      // which is what keeps it out of the reference/element machinery entirely.
+      if (t === 'edit' || t === 'extend') return ['video_url'];
       if (t === 'reference_to_video') return ['image_url', 'video_url']; // images (≥1) + optional 1 video ref
       return ['image_url']; // image_to_video
     }
@@ -346,7 +374,7 @@ export function SettingsPanel() {
     if (settings.mode === 'multimodal_reference') return ['image_url', 'video_url', 'audio_url'];
     if (settings.mode === 'image_to_video_first' || settings.mode === 'image_to_video_first_last') return ['image_url'];
     return [];
-  }, [settings.mode, isOmni, settings.omniTask]);
+  }, [settings.mode, isOmni, settings.omniTask, settings.model]);
 
   useEffect(() => {
     if (availableTypes.length > 0 && !availableTypes.includes(assetIdType)) {
@@ -433,10 +461,16 @@ export function SettingsPanel() {
     let maxAllowed = Infinity;
 
     if (isOmni) {
-      // Omni limits (per task): images ≤10; video = edit(1 source) / reference(≤3 refs) / else none;
-      // no audio. No Seedance-style 15s total-duration rule (that cap is skipped below).
-      if (type === 'image_url') maxAllowed = 10;
-      else if (type === 'video_url') maxAllowed = (settings.omniTask === 'edit' || settings.omniTask === 'reference_to_video') ? 1 : 0; // Edit source / 1 reference video
+      // Omni limits (per task): images ≤10; video = edit/extend(1 source) / reference(1 ref) /
+      // else none; no audio. No Seedance-style 15s total-duration rule (skipped below).
+      // Read the task through resolveOmniTask so a value the CURRENT model doesn't offer
+      // can't widen a cap (a stored 'extend' on the preview must not unlock a video slot).
+      const omniT = resolveOmniTask(settings.model, settings.omniTask);
+      if (type === 'image_url') maxAllowed = imgMax; // modelImageMax — never a literal (see the 9-vs-10 note in store.ts)
+      // Edit/Extend act ON one clip, so exactly 1. Reference takes several: 3 verified
+      // working 2026-08-28 (the old cap of 1 came from a doc line saying multiple videos
+      // were unsupported — no longer true), read from the model so it can't drift.
+      else if (type === 'video_url') maxAllowed = (omniT === 'edit' || omniT === 'extend') ? 1 : omniT === 'reference_to_video' ? vidMax : 0;
       else maxAllowed = 0;
     } else if (settings.mode === 'multimodal_reference') {
       if (type === 'image_url') maxAllowed = imgMax;
@@ -486,13 +520,24 @@ export function SettingsPanel() {
               const okFmt = /\.(mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv)$/i.test(file.name) || /^video\//i.test(file.type);
               vErr = sizeMB > 50 ? `비디오 크기 초과: ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)` : !okFmt ? '지원하지 않는 형식 (mp4·mov·webm·mpeg·wmv·3gpp·flv)' : null;
             } else {
-              vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file, refAudSec);
+              vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec, refVidMin) : await validateAudioFile(file, refAudSec);
             }
             if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
             // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s
             // total. Read fresh assets — earlier loop iterations add to them.
             // Omni has no 15s rule (edit source can be longer, capped only by 50MB), so skip it there.
             const durationSec = await getMediaDurationSec(file, type === 'video_url' ? 'video' : 'audio');
+            // Extend refuses a source over 30s at the API ("Videos longer than 30s are not
+            // supported for extension") — and it is a hard INPUT cap, not an output budget:
+            // a 33s clip is refused even when asked for only +3s. So there is no shorter
+            // append that rescues it, and the honest place to say so is here, at attach.
+            if (isOmni && type === 'video_url' && resolveOmniTask(settings.model, settings.omniTask) === 'extend') {
+              const cap = modelExtendMaxSrcSec(settings.model);
+              if (cap !== undefined && typeof durationSec === 'number' && durationSec > cap) {
+                rejected.push(`${(file as File).name}: ${durationSec.toFixed(1)}초 — 이어붙일 원본은 ${cap}초까지입니다 (최대 ${modelExtendMaxOutSec(settings.model)}초까지 생성 가능)`);
+                continue;
+              }
+            }
             if (!isOmni) {
               const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
               const totErr = totalDurationError(freshAssets, type, durationSec, refSecFor(type));
@@ -539,7 +584,7 @@ export function SettingsPanel() {
         updates.url = '';
         updates.cacheId = await cacheFile(file);
       } else {
-        const vErr = existing.type === 'video_url' ? await validateVideoFile(file, refVidSec) : await validateAudioFile(file, refAudSec);
+        const vErr = existing.type === 'video_url' ? await validateVideoFile(file, refVidSec, refVidMin) : await validateAudioFile(file, refAudSec);
         if (vErr) { alert(vErr); return; }
         // Combined 15s cap — the asset being swapped out doesn't count
         const durationSec = await getMediaDurationSec(file, existing.type === 'video_url' ? 'video' : 'audio');
@@ -568,7 +613,7 @@ export function SettingsPanel() {
     };
     return (
       <label
-        className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-[11px] text-[14px] font-medium transition-colors border-[3px] bg-[#fafafc] hover:bg-[#f0f0f2] text-[#1d1d1f] border-black/5 cursor-pointer"
+        className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-[11px] text-[14px] font-medium transition-colors border-[3px] bg-[#fafafc] dark:bg-[#242426] hover:bg-[#f0f0f2] dark:hover:bg-[#2e2e31] text-[#1d1d1f] dark:text-gray-900 border-black/5 dark:border-white/10 cursor-pointer"
         onDrop={handleDrop}
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
@@ -596,7 +641,7 @@ export function SettingsPanel() {
 
     return (
       <label
-        className={`flex items-center justify-center gap-2 w-full px-3 py-2 rounded-[11px] text-[14px] font-medium transition-colors border-[3px] ${disabled ? 'bg-[#f5f5f7] text-black/20 border-black/5 cursor-not-allowed' : 'bg-[#fafafc] hover:bg-[#f0f0f2] text-[#1d1d1f] border-black/5 cursor-pointer'}`}
+        className={`flex items-center justify-center gap-2 w-full px-3 py-2 rounded-[11px] text-[14px] font-medium transition-colors border-[3px] ${disabled ? 'bg-[#f5f5f7] dark:bg-[#242426] text-black/20 dark:text-white/25 border-black/5 dark:border-white/10 cursor-not-allowed' : 'bg-[#fafafc] dark:bg-[#242426] hover:bg-[#f0f0f2] dark:hover:bg-[#2e2e31] text-[#1d1d1f] dark:text-gray-900 border-black/5 dark:border-white/10 cursor-pointer'}`}
         onDrop={handleDrop}
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
@@ -608,20 +653,20 @@ export function SettingsPanel() {
   };
 
   return (
-    <div className="w-80 bg-[#f5f5f7] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0"
+    <div className="w-80 bg-[#f5f5f7] dark:bg-[#242426] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => { e.preventDefault(); setDragOverAssetId(null); }}>
-      <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 backdrop-blur-xl z-10">
+      <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 dark:bg-[#242426]/80 backdrop-blur-xl z-10">
         <Settings size={18} className="text-gray-500" />
-        <h2 className="text-[21px] font-semibold text-[#1d1d1f] tracking-tight">Settings</h2>
+        <h2 className="text-[21px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight">Settings</h2>
       </div>
 
       <div className="p-4 space-y-6">
         {/* 프로젝트 (시트 연동) — Generation Settings 위. 생성하려면 반드시 선택(strict:
             없으면 생성 불가). 언제든 변경 가능. 큐 전송/로컬 프로젝트 전환엔 안 바뀌고,
             진행→종료되면 자동 해제 후 재선택 요구. */}
-        <div className={`bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection ? 'ring-2 ring-amber-400' : ''}`}>
-          <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">프로젝트</label>
+        <div className={`bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection ? 'ring-2 ring-amber-400' : ''}`}>
+          <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">프로젝트</label>
           {/* ★ Empty list is not one state, it is three. Conflating them told users to go
               ask their PM about a roster that was sitting in the sheet the whole time —
               the tracker just hadn't answered yet. trackerReachable carries the server's
@@ -648,16 +693,16 @@ export function SettingsPanel() {
         </div>
 
         {/* Generation Mode */}
-        <div className="bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">
+        <div className="bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">
           <div className="flex items-center justify-between border-b border-gray-100 pb-2">
-            <h3 className="text-[14px] font-semibold text-[#1d1d1f] tracking-tight">Generation Settings</h3>
+            <h3 className="text-[14px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight">Generation Settings</h3>
             <button onClick={() => { updateProjectSettings(project.id, { ...defaultSettings, model: settings.model }); assets.forEach(a => removeAsset(project.id, a.id)); window.dispatchEvent(new CustomEvent('seedance:reset', { detail: { projectId: project.id } })); }} className="text-[11px] text-gray-400 hover:text-red-500 px-2 py-1 rounded-md hover:bg-red-50 active:scale-95 transition-all">
               초기화
             </button>
           </div>
 
           <div className="space-y-2">
-            <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Model</label>
+            <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Model</label>
             <CustomSelect
               value={settings.model}
               onChange={(val) => {
@@ -685,13 +730,21 @@ export function SettingsPanel() {
                 if (modelProvider(val) === 'gemini') {
                   if (settings.ratio !== '16:9' && settings.ratio !== '9:16') patch.ratio = '16:9';
                   if (settings.duration === -1 || settings.duration < 3 || settings.duration > 10) patch.duration = 5;
-                  // Task is always explicit — normalize any empty/legacy value to a real task.
-                  if (!OMNI_TASKS.some(t => t.id === settings.omniTask)) patch.omniTask = 'text_to_video';
+                  // Task is always explicit — normalize any empty/legacy value to a real task,
+                  // and against the INCOMING model (`val`), not the outgoing one. 1.1 → the
+                  // Flash preview with 'extend' selected is the case that matters: the preview
+                  // has no Extend, and the API would not reject the task if it were sent.
+                  const nextTask = resolveOmniTask(val, settings.omniTask);
+                  if (nextTask !== settings.omniTask) patch.omniTask = nextTask;
                 }
                 // Provider switch (Seedance ↔ Omni) → clear assets. The two have different
                 // asset semantics (roles/types/limits); stale refs otherwise error or block
                 // the new provider (e.g. leftover Seedance images make Omni Edit reject).
-                if (modelProvider(val) !== modelProvider(settings.model)) {
+                // A forced task change does the same thing for the same reason: 1.1/Extend
+                // holds a source clip, and landing on the preview's Text to Video would leave
+                // that clip attached to a task that accepts no assets at all — invisible in
+                // the panel (availableTypes is empty) but still in the project.
+                if (modelProvider(val) !== modelProvider(settings.model) || patch.omniTask) {
                   assets.forEach(a => removeAsset(project.id, a.id));
                   setAssetIdType('image_url');
                 }
@@ -735,33 +788,35 @@ export function SettingsPanel() {
           )}
 
           <div className="space-y-2">
-            <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">{isOmni ? 'Video task' : 'Generation Mode'}</label>
+            <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">{isOmni ? 'Video task' : 'Generation Mode'}</label>
             {isOmni
-              ? <CustomSelect value={OMNI_TASKS.some(t => t.id === settings.omniTask) ? (settings.omniTask as string) : 'text_to_video'} onChange={handleOmniTaskChange} options={OMNI_TASKS} />
+              ? <CustomSelect value={resolveOmniTask(settings.model, settings.omniTask)} onChange={handleOmniTaskChange} options={omniTaskOptions(settings.model)} />
               : <CustomSelect value={settings.mode} onChange={(val) => handleModeChange(val as GenerationMode)} options={MODES} />}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Resolution</label>
+              <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Resolution</label>
               {/* When 4k isn't permitted the saved value is missing from the option list.
                   CustomSelect falls back to options[0] ("480p") in that case — a flat lie
                   about what's stored — so pass a placeholder, which it renders instead.
                   The dropdown stays FULLY USABLE: replacing it with a static notice would
                   strand the user, unable to pick 720p/480p without sending first. */}
-              <div onPointerDown={() => window.dispatchEvent(new CustomEvent('seedance:refresh-projects'))}>
-                <CustomSelect
-                  value={settings.resolution}
-                  onChange={(val) => updateProjectSettings(project.id, { resolution: val })}
-                  options={resOptions}
-                  // Short on purpose — this column is ~140px, so anything longer truncates.
-                  placeholder={fourKBlocked ? '4K 잠김' : undefined}
-                />
-              </div>
+              {(
+                <div onPointerDown={() => window.dispatchEvent(new CustomEvent('seedance:refresh-projects'))}>
+                  <CustomSelect
+                    value={settings.resolution}
+                    onChange={(val) => updateProjectSettings(project.id, { resolution: val })}
+                    options={resOptions}
+                    // Short on purpose — this column is ~140px, so anything longer truncates.
+                    placeholder={fourKBlocked ? '4K 잠김' : undefined}
+                  />
+                </div>
+              )}
             </div>
             <div className="space-y-2">
-              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Ratio</label>
-              {(isOmni && settings.omniTask === 'edit') || ratioLockedToSource
+              <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Ratio</label>
+              {omniRatioFromSource || ratioLockedToSource
                 ? <div className="text-[12px] text-gray-400 py-1.5 px-1">원본 영상 따라감</div>
                 : <CustomSelect value={settings.ratio} onChange={(val) => updateProjectSettings(project.id, { ratio: val })} options={isOmni ? OMNI_RATIOS : RATIOS.map(r => ({ id: r, name: r }))} />}
             </div>
@@ -776,26 +831,36 @@ export function SettingsPanel() {
                 : '이 프로젝트는 4K 권한이 없습니다 · 전송 시 1080p'}
             </p>
           )}
+          {fourKHidden && (
+            <p className="text-[11px] text-gray-400 leading-snug -mt-2">
+              {fourKBlockedReason === 'no-project'
+                ? '프로젝트를 선택하면 4K가 목록에 나옵니다.'
+                : '4K는 이 프로젝트에 권한이 없어 목록에 없습니다 (크레딧 시트 · 4K 허용)'}
+            </p>
+          )}
 
           {durationLockedToSource ? (
             /* Seedance 2.5 editing: duration must be -1, the output matches the source clip.
                Display only — the project's own duration is untouched and comes back the
                moment the mode changes. */
             <div className="space-y-2">
-              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
+              <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Duration (s)</label>
               <div className="text-[12px] text-gray-400 px-1">원본 영상 길이 그대로 (편집은 길이 지정 불가)</div>
             </div>
           ) : isOmni ? (
-            settings.omniTask === 'edit' ? (
+            omniTask === 'edit' ? (
               <div className="space-y-2">
-                <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
+                <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Duration (s)</label>
                 <div className="text-[12px] text-gray-400 px-1">원본 영상 길이 그대로 (편집은 길이 지정 불가)</div>
               </div>
             ) : (
             <div className="space-y-2">
               <div className="flex justify-between items-center">
-                <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
-                <span className="text-[12px] text-gray-500">{draftDuration ?? Math.max(3, Math.min(10, settings.duration || 5))}s</span>
+                {/* Extend's duration is the length to APPEND, not the total — measured
+                    2026-08-28: a 10s source with duration:'3s' returns 13.0s, and omitting
+                    it returns 20.0s. Same slider, different meaning, so say which. */}
+                <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">{omniTask === 'extend' ? '이어붙일 길이 (s)' : 'Duration (s)'}</label>
+                <span className="text-[12px] text-gray-500">{omniTask === 'extend' ? '+' : ''}{draftDuration ?? Math.max(3, Math.min(10, settings.duration || 5))}s</span>
               </div>
               <input type="range" min="3" max="10" value={draftDuration ?? Math.max(3, Math.min(10, settings.duration || 5))} onChange={(e) => setDraftDuration(parseInt(e.target.value))} onPointerUp={commitDuration} onKeyUp={commitDuration} onBlur={commitDuration} className="w-full accent-[#0071e3]" />
             </div>
@@ -803,12 +868,12 @@ export function SettingsPanel() {
           ) : (
           <div className="space-y-2">
             <div className="flex justify-between items-center">
-              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Duration (s)</label>
+              <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Duration (s)</label>
               <div className="flex items-center gap-2">
                 {/* duration -1 = API 지능형 길이 선택 (모델이 4~15초 중 자동 결정) */}
                 <button
                   onClick={() => updateProjectSettings(project.id, { duration: settings.duration === -1 ? 5 : -1 })}
-                  className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${settings.duration === -1 ? 'bg-[#0071e3] text-white border-[#0071e3]' : 'bg-white text-gray-400 border-gray-300 hover:border-gray-400 hover:text-gray-600'}`}
+                  className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${settings.duration === -1 ? 'bg-[#0071e3] text-white border-[#0071e3]' : 'bg-white dark:bg-[#1c1c1e] text-gray-400 border-gray-300 hover:border-gray-400 hover:text-gray-600'}`}
                 >Auto</button>
                 <span className="text-[12px] text-gray-500">{settings.duration === -1 ? '모델 자동' : `${draftDuration ?? settings.duration}s`}</span>
               </div>
@@ -820,7 +885,7 @@ export function SettingsPanel() {
 
           <div className="space-y-2">
             <div className="flex justify-between">
-              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">Output Count</label>
+              <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Output Count</label>
               <span className="text-[12px] text-gray-500">{draftOutput ?? (settings.output_count || 1)}</span>
             </div>
             <input type="range" min="1" max="3" value={draftOutput ?? (settings.output_count || 1)} onChange={(e) => setDraftOutput(parseInt(e.target.value))} onPointerUp={commitOutput} onKeyUp={commitOutput} onBlur={commitOutput} className="w-full accent-[#0071e3]" />
@@ -828,13 +893,19 @@ export function SettingsPanel() {
 
           {isOmni ? (
             <div className="pt-2 text-[11px] text-gray-400 leading-relaxed">
-              Thinking <span className="text-gray-600 font-medium">High</span> 고정 · 오디오 자동 생성 · 720p · SynthID 워터마크
+              {/* The resolution here used to be the literal "720p" — true for the Flash
+                  preview, which ignores the field and renders 720p whatever you ask for,
+                  and false for 1.1, which really does render 360p/1080p/4K. Edit and
+                  Extend take theirs from the source clip, so they say so instead. */}
+              Thinking <span className="text-gray-600 font-medium">High</span> 고정 · 오디오 자동 생성 · {
+                modelResolutions(settings.model).length > 1 ? (settings.resolution === '4k' ? '4K' : settings.resolution) : '720p'
+              } · SynthID 워터마크
             </div>
           ) : (
           <div className="space-y-3 pt-2">
             <div>
               <label className={`flex items-center gap-2 ${settings.return_last_frame ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
-                <input type="checkbox" checked={settings.generate_audio} disabled={settings.return_last_frame} onChange={(e) => updateProjectSettings(project.id, { generate_audio: e.target.checked })} className="rounded text-[#0071e3] focus:ring-[#0071e3] shrink-0" />
+                <input type="checkbox" checked={settings.generate_audio} disabled={settings.return_last_frame} onChange={(e) => updateProjectSettings(project.id, { generate_audio: e.target.checked })} className="rounded text-[#0071e3] dark:text-[#4da3ff] focus:ring-[#0071e3] shrink-0" />
                 <span className="text-[14px] text-gray-700">Generate Audio</span>
               </label>
               {settings.return_last_frame && <p className="text-[11px] text-amber-600 mt-1 ml-6">라스트프레임 사용 시 비활성</p>}
@@ -845,7 +916,7 @@ export function SettingsPanel() {
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={settings.return_last_frame} onChange={(e) => {
                     updateProjectSettings(project.id, { return_last_frame: e.target.checked, ...(e.target.checked ? { generate_audio: false } : {}) });
-                  }} className="rounded text-[#0071e3] focus:ring-[#0071e3]" />
+                  }} className="rounded text-[#0071e3] dark:text-[#4da3ff] focus:ring-[#0071e3]" />
                   <span className="text-[14px] text-gray-700">Return Last Frame</span>
                 </label>
               </motion.div>
@@ -861,14 +932,14 @@ export function SettingsPanel() {
               than just asking the API for mp4 up front. */}
           {outputFormats.length > 1 && (
             <div className="space-y-2">
-              <label className="block text-[12px] font-semibold text-black/80 tracking-[-0.12px]">출력 형식</label>
+              <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">출력 형식</label>
               <div className="grid grid-cols-2 gap-2">
                 {outputFormats.map(f => {
                   const on = currentOutputFormat === f;
                   return (
                     <button key={f}
                       onClick={() => updateProjectSettings(project.id, { output_format: f })}
-                      className={`px-3 py-2 rounded-[10px] border-2 text-[13px] font-medium transition-colors ${on ? 'border-[#0071e3] bg-indigo-50/50 text-[#0071e3]' : 'border-transparent bg-[#f5f5f7] text-gray-600 hover:bg-[#ededf0]'}`}>
+                      className={`px-3 py-2 rounded-[10px] border-2 text-[13px] font-medium transition-colors ${on ? 'border-[#0071e3] bg-indigo-50/50 text-[#0071e3] dark:text-[#4da3ff]' : 'border-transparent bg-[#f5f5f7] dark:bg-[#242426] text-gray-600 hover:bg-[#ededf0] dark:hover:bg-[#2e2e31]'}`}>
                       {OUTPUT_FORMAT_LABEL[f] || f.toUpperCase()}
                     </button>
                   );
@@ -879,10 +950,10 @@ export function SettingsPanel() {
         </div>
 
         {/* Assets */}
-        <div className="bg-white p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">
+        <div className="bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">
           <div className="flex items-center justify-between border-b border-gray-100 pb-2">
             <div className="min-w-0">
-              <h3 className="text-[14px] font-semibold text-[#1d1d1f] tracking-tight">Reference Assets</h3>
+              <h3 className="text-[14px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight">Reference Assets</h3>
               {boundCollectionName && (
                 <button onClick={() => setElementOpen(true)} title="이 채팅의 @멘션에 사용 중인 어셋 컬렉션 (클릭: element 열기)"
                   className="flex items-center gap-1 text-[10px] text-emerald-600 hover:text-emerald-700 font-medium mt-0.5 max-w-full">
@@ -891,7 +962,7 @@ export function SettingsPanel() {
               )}
             </div>
             <button onClick={() => setElementOpen(true)} title="어셋 라이브러리 — 등록해 둔 캐릭터·로케이션·프랍을 @로 멘션"
-              className="flex items-center gap-1 text-[12px] font-medium text-[#0071e3] bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg transition-colors active:scale-95 shrink-0">
+              className="flex items-center gap-1 text-[12px] font-medium text-[#0071e3] dark:text-[#4da3ff] bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg transition-colors active:scale-95 shrink-0">
               <Layers size={13} /> element
             </button>
           </div>
@@ -916,13 +987,13 @@ export function SettingsPanel() {
           </div>
 
           <AnimatePresence mode="wait">
-            <motion.div key={isOmni ? `omni-${settings.omniTask}` : settings.mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.15 }} className="space-y-2 pt-2">
+            <motion.div key={isOmni ? `omni-${omniTask}` : settings.mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.15 }} className="space-y-2 pt-2">
               {/* ── Gemini Omni asset UI (mirrors the Seedance per-mode pattern, Omni values) ── */}
               {isOmni && (
                 <div className="space-y-2">
-                  {settings.omniTask === 'text_to_video' ? (
+                  {omniTask === 'text_to_video' ? (
                     <p className="text-xs text-gray-500 text-center">Text to Video는 에셋을 사용하지 않습니다.</p>
-                  ) : settings.omniTask === 'edit' ? (
+                  ) : omniTask === 'edit' || omniTask === 'extend' ? (
                     <>
                       {(() => {
                         const vidCount = assets.filter(a => a.type === 'video_url').length;
@@ -930,7 +1001,7 @@ export function SettingsPanel() {
                           <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">
                             <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
                             <span className={`w-12 shrink-0 tabular-nums ${vidCount > 1 ? 'text-red-500' : 'text-gray-700'}`}>{vidCount}/1</span>
-                            <span className="text-gray-400 min-w-0 break-keep">편집할 소스 영상 1개 · 개당 50MB · mp4·mov·webm</span>
+                            <span className="text-gray-400 min-w-0 break-keep">{omniTask === 'extend' ? '이어붙일 원본 영상 1개' : '편집할 소스 영상 1개'} · 개당 50MB · mp4·mov·webm</span>
                           </div>
                         );
                       })()}
@@ -940,9 +1011,36 @@ export function SettingsPanel() {
                           ? renderReplaceButton('영상 교체', existingVideo, 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm')
                           : renderUploadButton('영상 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm', false, assets.filter(a => a.type === 'video_url').length >= 1);
                       })()}
-                      <p className="text-[10px] text-gray-400 leading-snug break-keep">프롬프트에 <b>어떻게 편집할지</b> 적어주세요 (예: 눈 내리는 효과 추가). 길이·비율은 원본 영상을 그대로 따라갑니다.</p>
+                      {omniTask === 'extend'
+                        ? (() => {
+                            const v = assets.find(a => a.type === 'video_url');
+                            const d = (v as any)?.durationSec as number | undefined;
+                            const srcCap = modelExtendMaxSrcSec(settings.model);
+                            const outCap = modelExtendMaxOutSec(settings.model);
+                            const add = Math.max(3, Math.min(10, settings.duration || 5));
+                            const over = typeof d === 'number' && srcCap !== undefined && d > srcCap;
+                            return (
+                              <>
+                                <p className="text-[10px] text-gray-400 leading-snug break-keep">프롬프트에 <b>이어서 무슨 일이 일어날지</b> 적어주세요 (예: 그대로 걸어가 문을 연다). <b>"연장·늘려줘" 같은 지시문은 Google 필터에 막힙니다.</b> 위 슬라이더 길이만큼 원본 <b>뒤에 이어붙습니다</b>. 비율은 원본을 따라가고, <b>해상도는 위에서 고른 값</b>으로 나옵니다.</p>
+                                {/* Concrete arithmetic beats a rule the user has to apply themselves —
+                                    the source length is already on the asset, so just show the answer. */}
+                                {typeof d === 'number' && !over && (
+                                  <p className="text-[10px] text-gray-500 leading-snug">원본 {d.toFixed(1)}초 + {add}초 → <b>{(d + add).toFixed(1)}초</b></p>
+                                )}
+                                {over && (
+                                  <p className="text-[10px] text-red-500 leading-snug break-keep">
+                                    원본이 {d!.toFixed(1)}초입니다 — <b>{srcCap}초를 넘으면 이어붙일 수 없습니다</b> (API 제한). 더 늘리려면 새로 생성해야 합니다.
+                                  </p>
+                                )}
+                                {srcCap !== undefined && (
+                                  <p className="text-[10px] text-gray-400 leading-snug break-keep">원본 {srcCap}초까지 · 최대 {outCap}초까지 만들 수 있어요. 이어붙일 때마다 <b>전체가 다시 인코딩</b>되니 반복하면 앞부분 화질이 조금씩 떨어집니다.</p>
+                                )}
+                              </>
+                            );
+                          })()
+                        : <p className="text-[10px] text-gray-400 leading-snug break-keep">프롬프트에 <b>어떻게 편집할지</b> 적어주세요 (예: 눈 내리는 효과 추가). 길이·비율은 원본을 따라가고, <b>해상도는 위에서 고른 값</b>으로 나옵니다.</p>}
                     </>
-                  ) : settings.omniTask === 'image_to_video' ? (
+                  ) : omniTask === 'image_to_video' ? (
                     <p className="text-xs text-gray-500 text-center">프레임은 위 입력창 슬롯에서 넣어주세요.</p>
                   ) : (
                     <>
@@ -958,7 +1056,7 @@ export function SettingsPanel() {
                             </div>
                             <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">
                               <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
-                              <span className={`w-12 shrink-0 tabular-nums ${vidCount > 1 ? 'text-red-500' : 'text-gray-700'}`}>{vidCount}/1</span>
+                              <span className={`w-12 shrink-0 tabular-nums ${vidCount > vidMax ? 'text-red-500' : vidCount === vidMax ? 'text-amber-600' : 'text-gray-700'}`}>{vidCount}/{vidMax}</span>
                               <span className="text-gray-400 min-w-0 break-keep">개당 50MB · 선택(이미지와 함께)</span>
                             </div>
                           </>
@@ -968,12 +1066,10 @@ export function SettingsPanel() {
                           2.5 → 30). Hardcoding 10 both let 2.0 build a 10th image the send
                           then refused, and locked 2.5 out of 20 of its allowed 30. */}
                       {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/png,image/jpeg,image/webp,image/heic,image/heif', true, (assets.filter(a => a.type === 'image_url').length + mentionedElementImages) >= imgMax)}
-                      {(() => {
-                        const existingVideo = assets.find(a => a.type === 'video_url');
-                        return existingVideo
-                          ? renderReplaceButton('영상 교체', existingVideo, 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm')
-                          : renderUploadButton('영상 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm', false, false);
-                      })()}
+                      {/* Reference takes several clips (3 verified 2026-08-28), so this is an
+                          ADD button up to vidMax — it used to be replace-only because the cap
+                          was 1. Each row still has its own ↻ for replacing that one clip. */}
+                      {renderUploadButton('영상 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= vidMax)}
                       <p className="text-[10px] text-gray-400 leading-snug break-keep">비디오는 <b>이미지 1장 이상과 함께</b>일 때만 참조로 쓸 수 있어요(영상만은 불가).</p>
                     </>
                   )}
@@ -1030,6 +1126,11 @@ export function SettingsPanel() {
 
               {!isOmni && settings.mode === 'edit_video' && (
                 <div className="space-y-2">
+                  {/* Same trap as extend: the model re-derives the task from the prompt after
+                      the task is queued, so an edit prompt that doesn't read as an edit fails
+                      asynchronously (InvalidParameter.TaskTypeMismatch). BytePlus doc 2607688
+                      names the wording. The source clip must also be 4-30s for editing. */}
+                  <p className="text-[10px] text-amber-600 leading-snug break-keep">프롬프트에 <b>편집한다는 뜻</b>이 드러나야 합니다 — "@Video 1에 ~를 추가/삭제/교체", "바꿔줘". 없으면 모델이 다른 작업으로 분류해 전송 후 실패합니다. 소스 영상은 <b>4~30초</b>여야 합니다.</p>
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= imgMax)}
                   {(() => {
                     const existingVideo = assets.find(a => a.type === 'video_url');
@@ -1046,6 +1147,13 @@ export function SettingsPanel() {
                   <p className="text-[12px] text-gray-500 leading-tight">
                     비디오: {assets.filter(a => a.type === 'video_url').length}/3 (최대 3개 이어붙이기)
                   </p>
+                  {/* Seedance re-reads the task from the PROMPT after the task is queued, and
+                      disagreeing with the mode we declared costs a full async failure
+                      (InvalidParameter.TaskTypeMismatch) — the wait and the slot are already
+                      spent by then. BytePlus doc 2607688 lists the wording it looks for.
+                      Note this is the exact OPPOSITE of Gemini Omni, whose input filter
+                      REJECTS "연장/extend" — same word, two providers, opposite requirements. */}
+                  <p className="text-[10px] text-amber-600 leading-snug break-keep">프롬프트에 <b>이어붙인다는 뜻</b>이 드러나야 합니다 — "@Video 1 뒤를 이어서", "계속해서", "extend/continue". 없으면 모델이 다른 작업으로 분류해 전송 후 실패합니다.</p>
                   {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= 3)}
                 </div>
               )}
@@ -1057,7 +1165,7 @@ export function SettingsPanel() {
             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.15 }} className="overflow-hidden">
             <div className="space-y-3 pt-2 border-t border-gray-100 mt-4">
               <label className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={settings.use_asset_id} onChange={(e) => updateProjectSettings(project.id, { use_asset_id: e.target.checked })} className="rounded text-[#0071e3] focus:ring-[#0071e3]" />
+                <input type="checkbox" checked={settings.use_asset_id} onChange={(e) => updateProjectSettings(project.id, { use_asset_id: e.target.checked })} className="rounded text-[#0071e3] dark:text-[#4da3ff] focus:ring-[#0071e3]" />
                 <span className="text-[14px] text-gray-700">URL / Asset ID로 추가</span>
               </label>
 
@@ -1067,7 +1175,7 @@ export function SettingsPanel() {
                     <select
                       value={assetIdType}
                       onChange={(e) => setAssetIdType(e.target.value as any)}
-                      className="w-20 shrink-0 px-2 py-1.5 bg-[#fafafc] border-[3px] border-black/5 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
+                      className="w-20 shrink-0 px-2 py-1.5 bg-[#fafafc] dark:bg-[#242426] border-[3px] border-black/5 dark:border-white/10 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
                     >
                       {availableTypes.includes('image_url') && <option value="image_url">Image</option>}
                       {availableTypes.includes('video_url') && <option value="video_url">Video</option>}
@@ -1078,7 +1186,7 @@ export function SettingsPanel() {
                       value={assetIdInput}
                       onChange={(e) => setAssetIdInput(e.target.value)}
                       placeholder="URL or asset-12345..."
-                      className="min-w-0 flex-1 px-2 py-1.5 bg-[#fafafc] border-[3px] border-black/5 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
+                      className="min-w-0 flex-1 px-2 py-1.5 bg-[#fafafc] dark:bg-[#242426] border-[3px] border-black/5 dark:border-white/10 rounded-[8px] text-[12px] outline-none focus:border-[#0071e3]"
                     />
                   </div>
                   {assetIdType === 'video_url' && (

@@ -879,10 +879,22 @@ async function startServer() {
         }
       }
       // Edit derives duration/aspect from the source video — the API 400s if either is set.
-      if (body?.generation_config?.video_config?.task === 'edit' && body.response_format) {
-        delete body.response_format.duration;
+      // Extend derives geometry the same way but NOT length: its `duration` is how many
+      // seconds to APPEND (verified 2026-08-28 — 10s source + '3s' → 13.0s, omitted → 20.0s),
+      // so only aspect_ratio comes off. Sending it returns
+      //   "Aspect ratio cannot be set in response format for extend task."
+      // `resolution` is NOT in that group and must be passed through: both tasks accept and
+      // honour it (a 360p source with resolution:'1080p' returns 1920x1080). Dropping it here
+      // is what silently capped edit/extend output at 720p, so a 4K source came back 720p.
+      const _omniTask = body?.generation_config?.video_config?.task;
+      if ((_omniTask === 'edit' || _omniTask === 'extend') && body.response_format) {
+        if (_omniTask === 'edit') delete body.response_format.duration;
         delete body.response_format.aspect_ratio;
       }
+      // previous_interaction_id and video_config.task are MUTUALLY EXCLUSIVE — the API
+      // answers "previous_interaction_id is not allowed when video task is set." Every
+      // Omni path here sends an explicit task, so the id can never ride along.
+      if (_omniTask && body.previous_interaction_id) delete body.previous_interaction_id;
       // Synchronous unary generation (doc's recommended fast path). store MUST be true —
       // the API rejects delivery:"uri" (which we always use) unless store=true, so store=false
       // from the doc's perf tip is NOT usable here. background/stream=false = plain sync call.

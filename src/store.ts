@@ -688,6 +688,10 @@ export interface Project {
 
 interface AppState {
   _hasHydrated: boolean;
+  // 'light' | 'dark'. Persisted app-wide (not per project) and applied by toggling a
+  // `dark` class on <html>, which is what every dark: utility keys off.
+  theme: Theme;
+  setTheme: (t: Theme) => void;
   // Element library loads from its own IDB key AFTER main hydration. Until this is
   // true the library may still be empty — element-dependent UI (@mention list, send)
   // must wait on it rather than act on a half-loaded library.
@@ -790,6 +794,23 @@ export const defaultSettings: GenerationSettings = {
   output_format: undefined,
 };
 
+// ── Theme ───────────────────────────────────────────────────────────────────────────
+// Class-based, on <html>, so it is set once and every `dark:` utility in the tree follows.
+// Mirrored to localStorage as well as the persisted store: IndexedDB hydration is async,
+// so without a synchronous copy the app paints one light frame before flipping. The
+// inline script in index.html reads that copy before React mounts.
+export type Theme = 'light' | 'dark';
+export const THEME_KEY = 'seedance-theme';
+export function applyTheme(t: Theme) {
+  if (typeof document === 'undefined') return;
+  document.documentElement.classList.toggle('dark', t === 'dark');
+  // Tells the engine to render native widgets (scrollbars, form controls, the canvas
+  // behind the page) in the matching scheme — otherwise a white scrollbar track and a
+  // white flash on resize sit on top of an otherwise dark UI.
+  document.documentElement.style.colorScheme = t === 'dark' ? 'dark' : 'light';
+  try { localStorage.setItem(THEME_KEY, t); } catch { /* private mode — the store copy still works */ }
+}
+
 // ── Seedance 2.0 model catalog ──────────────────────────────────────────────
 // Only the flagship 2.0 supports 1080p and 4k; Fast and Mini cap lower (see
 // modelResolutions below for the measured matrix). Single source of truth shared by
@@ -836,6 +857,10 @@ const SEEDANCE_25 = {
   res: ['480p', '720p', '1080p'],
   dur: [4, 30] as [number, number],
   imgMax: 30, vidMax: 10, audMax: 10,
+  // BytePlus doc 2607688, video editing: "The reference video must be 4-30 seconds long."
+  // A hard constraint, and one that is only checked AFTER the task is queued
+  // (InvalidParameter.TaskTypeConstraint), so a 3s clip costs a full async failure.
+  editRefVideoMinSec: 4,
   refVideoSec: 30.2, refAudioSec: 30.2,
   // 2.5 can take reference audio with no image/video alongside it. 2.0 cannot.
   audioOnly: true,
@@ -890,13 +915,33 @@ const SEEDANCE_25 = {
   defaults: { resolution: '720p', ratio: '16:9', duration: 5 },
 };
 
+// The Omni video tasks every Gemini model has offered since the first Flash preview.
+// "Unspecified" (omit the task → the model infers one) is an API-valid 5th state that is
+// deliberately NOT here and must never be added: the task decides which assets the panel
+// accepts and which prompt tags get emitted, so inferring it would make the whole surface
+// guess. Task is always an explicit user choice.
+export const OMNI_DEFAULT_TASKS = ['text_to_video', 'image_to_video', 'reference_to_video', 'edit'];
+
 export const MODELS: {
   id: string; name: string; provider?: 'byteplus' | 'gemini';
   res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
   refVideoSec?: number; refAudioSec?: number;
+  // Shortest reference video the EDITING task accepts, when the model states one.
+  editRefVideoMinSec?: number;
   outputFormat?: string; outputFormats?: string[]; audioOnly?: boolean;
   adaptiveOnly?: GenerationMode[]; autoDurationOnly?: GenerationMode[];
   refTaskTypes?: Partial<Record<GenerationMode, string>>;
+  // Gemini Omni only — does this model do first+last frame interpolation as a documented
+  // feature? Absent → the older reference_to_video workaround, which is what the Flash
+  // preview has always used and must keep using.
+  firstLastFrame?: boolean;
+  // Gemini Omni only — longest SOURCE clip task:'extend' will accept, in seconds.
+  // Stated by the API itself: "Videos longer than 30s are not supported for extension."
+  extendMaxSrcSec?: number;
+  // Gemini Omni only — which `generation_config.video_config.task` values this model offers.
+  // Absent → OMNI_DEFAULT_TASKS (the 4 the original Flash preview shipped with), so adding
+  // this field cannot change any model that doesn't declare it.
+  omniTasks?: string[];
   defaults?: { resolution?: string; ratio?: string; duration?: number };
 }[] = [
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
@@ -906,7 +951,57 @@ export const MODELS: {
   // literal `>= 10` in the panel; declaring it here is what lets the counter and the upload
   // button read the same number (they briefly disagreed — 9 vs 10 — when the literal was
   // swapped for modelImageMax without giving Omni its own value).
-  { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10 },
+  // ── Measured 2026-08-28 against the live API, not taken from the model card ─────────
+  // The card's "Maximum video length: 10 seconds" does NOT hold on this endpoint: a 30.0s
+  // clip extended to 33.0s and 13.0s/20.0s clips were accepted as references. So no input
+  // length cap is declared — there is no observed value to declare.
+  //   audMax 0   Omni takes no audio input at all (generate_audio isn't even a parameter).
+  //   vidMax 3   Google's documented per-prompt ceiling; 3 verified working (4 was also
+  //              accepted, but undocumented and unverifiable in effect, so 3 stands).
+  // These were previously left to the Seedance defaults (3 / 3 / 15.2s) — all three false.
+  // The panel enforced the right thing with its own literals, so nothing broke; the
+  // DECLARATIONS were the copy that lied, and modelAudioMax() answering "3" is what the
+  // model-switch over-capacity warning reads.
+  //
+  // ★ This model has NO Extend: it answers "Video extension is currently not supported."
+  // Schema validation does not reveal that — it accepts task:'extend' for both models
+  // identically — which is the whole reason the two entries stay separate.
+  { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10,
+    vidMax: 3, audMax: 0 },
+  // ── Gemini Omni 1.1 Flash ───────────────────────────────────────────────────────────
+  // Deliberately does NOT share a capability object with the preview above. The API
+  // validates the request SCHEMA, not the model's abilities — probed 2026-08-28, both
+  // models return the identical "Supported values: 'text_to_video', 'image_to_video',
+  // 'reference_to_video', 'edit', 'extend'" for a bogus task. So the API will happily
+  // accept `extend` addressed to the preview and we would never find out from an error.
+  // Which model can do what has to live HERE, and the two entries must not be merged.
+  //
+  // The API's own enum, read back from a rejected value 2026-08-28:
+  //   "Supported values: '360p', '720p', '1080p', '4k'"  ← no 480p, no 1440p/2k, no 8k.
+  // Confirmed by generating each one and measuring the file (h264 yuv420p 24fps):
+  //   360p → 640x360 ($0.34) · 720p → 1280x720 ($1.01)
+  //   1080p → 1920x1080 ($1.52) · 4k → 3840x2160 ($3.04)   [per 10s clip]
+  // ★ The SAME enum comes back for the Flash preview, but the preview IGNORES the field —
+  // asked for 360p/1080p/4k it returned 1280x720 every time (measured, all four). That is
+  // why the preview declares no `res` and never sends `resolution`: the API would accept
+  // the request and the UI would claim 4K over a 720p file.
+  // dur [3,10] is the API's own hard range, stated verbatim when either end is crossed:
+  //   "Requested video duration 2s 0ns is less than the minimum allowed 3s 0ns"
+  //   "Requested video duration 12s 0ns exceeds the maximum allowed 10s 0ns"
+  // So there is no single-shot clip longer than 10s. Length past that comes only from
+  // chaining Extend, which appends `duration` seconds each time and has no source-length
+  // limit we could find (10.0→13.0, 13.0→16.0, 30.0→33.0, all exact).
+  // Ratios verified to render, not just validate: 16:9 → 640x360, 9:16 → 360x640.
+  // firstLastFrame: the model card lists "Videos from first and last frames — Supported".
+  // Verified 2026-08-28 with a measurable pair (red ball left → red ball right): sending
+  // both images under task:'image_to_video' with <FIRST_FRAME>/<LAST_FRAME> reproduced
+  // frame 0 and the final frame from the inputs. The old reference_to_video workaround
+  // also reproduced them, so this is not a bug fix — it is the documented path, and it
+  // drops the "don't treat these as literal frames" disclaimer that route has to carry.
+  { id: 'gemini-omni-1.1-flash', name: 'Gemini Omni 1.1 Flash', provider: 'gemini', imgMax: 10,
+    vidMax: 3, audMax: 0, dur: [3, 10], firstLastFrame: true, extendMaxSrcSec: 30,
+    res: ['360p', '720p', '1080p', '4k'],
+    omniTasks: [...OMNI_DEFAULT_TASKS, 'extend'] },
   // ── Seedance 2.5 (official, 2026-08-07) ─────────────────────────────────────────────
   // The demo endpoint that used to sit beside this row was retired 2026-08-14; projects
   // saved on it are moved here at hydration (LEGACY_MODEL_IDS in src/lib/model-access.ts),
@@ -935,9 +1030,53 @@ export function modelAudioMax(model: string): number {
 export function modelRefVideoSec(model: string): number {
   return MODELS.find(m => m.id === model)?.refVideoSec ?? API_LIMITS.video.maxDuration;
 }
+// Shortest reference video for THIS model in THIS mode. Only editing declares a floor, and
+// only on models that state one — every other combination keeps the API-wide 2s, so no
+// existing model/mode pair changes.
+export function refVideoMinSecFor(model: string, mode: GenerationMode): number {
+  const m = MODELS.find(x => x.id === model);
+  if (mode === 'edit_video' && m?.editRefVideoMinSec !== undefined) return m.editRefVideoMinSec;
+  return API_LIMITS.video.minDuration;
+}
 export function modelRefAudioSec(model: string): number {
   return MODELS.find(m => m.id === model)?.refAudioSec ?? API_LIMITS.audio.maxDuration;
 }
+// Extend's source-length ceiling, and the longest clip it can ever produce.
+// Measured 2026-08-28: a 30.016s source + duration:'10s' returned exactly 40.000s (960
+// frames); a 33.0s source was refused outright with "Videos longer than 30s are not
+// supported for extension." So the reachable maximum is source 30s + append 10s = 40s,
+// and past that the only way on is to re-generate rather than extend again.
+export function modelExtendMaxSrcSec(model: string): number | undefined {
+  return MODELS.find(m => m.id === model)?.extendMaxSrcSec;
+}
+export function modelExtendMaxOutSec(model: string): number | undefined {
+  const src = modelExtendMaxSrcSec(model);
+  return src === undefined ? undefined : src + modelDurationRange(model)[1];
+}
+// Does this model do first+last frame interpolation officially (task:'image_to_video' with
+// both frames) rather than through the reference_to_video workaround?
+export function modelHasFirstLastFrame(model: string): boolean {
+  return MODELS.find(m => m.id === model)?.firstLastFrame === true;
+}
+// Which Omni video tasks this model offers. The preview declares none and therefore keeps
+// exactly the 4 it shipped with — adding 1.1 cannot hand it `extend`.
+export function modelOmniTasks(model: string): string[] {
+  return MODELS.find(m => m.id === model)?.omniTasks ?? OMNI_DEFAULT_TASKS;
+}
+// Normalize a stored task against a model. Every read of settings.omniTask goes through
+// here, so a task that is merely *stored* (project saved on 1.1, then switched to the
+// preview) can never reach a payload, an asset rule, or a chip.
+export function resolveOmniTask(model?: string, task?: string): string {
+  const ok = modelOmniTasks(model);
+  return task && ok.includes(task) ? task : 'text_to_video';
+}
+// Tasks whose output FRAMING is inherited from the source clip. Verified 2026-08-28:
+// `edit` rejects both duration and aspect_ratio; `extend` rejects ONLY aspect_ratio and
+// uses duration as the number of seconds to APPEND (10s source + duration:'3s' → 13.0s,
+// duration omitted → 20.0s). `resolution` is NOT inherited — both tasks accept it, and
+// omitting it caps the output at 720p — so it is sent like any other task's. server.ts
+// strips the rejected fields again on the way out: the client is where the UI decides
+// what to show, the server is what guarantees the wire is clean.
 // Payload `output_format`. Omitted → the API default (mp4), which is what every 2.0 model
 // has always sent, so their requests are byte-for-byte unchanged.
 export function modelOutputFormat(model: string): string | undefined {
@@ -1161,9 +1300,12 @@ export function modelResolutions(model: string): string[] {
 }
 
 // Structural ∩ policy. 4k is gated on the billing project's "4K 허용" column in the
-// tracker sheet. Nothing else is affected: '4k' only exists in the flagship's structural
-// list, so Fast/Mini/Omni can never gain it no matter what allow4k says.
+// tracker sheet — but that column is a BYTEPLUS credit control, and Gemini Omni bills to
+// Google on a different key entirely, so the gate does not apply to it (owner's call,
+// 2026-08-28). Among BytePlus models only the flagship 2.0 has '4k' structurally, so
+// Fast/Mini still can't gain it no matter what allow4k says.
 export function allowedResolutions(model: string, allow4k: boolean): string[] {
+  if (modelProvider(model) === 'gemini') return modelResolutions(model);
   return modelResolutions(model).filter(r => r !== '4k' || allow4k);
 }
 
@@ -1173,12 +1315,24 @@ export function allowedResolutions(model: string, allow4k: boolean): string[] {
 export function clampResolution(model: string, res: string, allow4k: boolean): string {
   const ok = allowedResolutions(model, allow4k);
   if (ok.includes(res)) return res;
-  const ladder = ['4k', '1080p', '720p', '480p'];
+  // 360p exists only on Gemini Omni 1.1, 480p only on Seedance — neither model sees the
+  // other's rung, because every step is filtered through `ok` first.
+  const ladder = ['4k', '1080p', '720p', '480p', '360p'];
+  // Lowest tier this model offers. Every res list is written low→high, so it's ok[0] —
+  // but derive it from the ladder instead of trusting that ordering, because this is the
+  // value someone lands on by accident and it must never be the expensive one.
+  const lowest = [...ladder].reverse().find(r => ok.includes(r)) || '720p';
   const from = ladder.indexOf(res);
   // Unknown/legacy value → app default, never a silent promotion to a higher tier.
-  if (from < 0) return ok.includes('720p') ? '720p' : ok[ok.length - 1];
+  if (from < 0) return ok.includes('720p') ? '720p' : lowest;
   for (let i = from + 1; i < ladder.length; i++) if (ok.includes(ladder[i])) return ladder[i];
-  return ok[ok.length - 1] || '720p';
+  // Nothing BELOW the current value is available, i.e. the value sits under this model's
+  // whole range (480p → Omni 1.1, whose floor is 720p). Step UP to the floor, never to the
+  // top of the list — the old `ok[ok.length - 1]` returned the HIGHEST tier here, which
+  // turned a 480p → 1.1 model switch into a silent jump to 4K ($3.04 vs $1.01 per 10s).
+  // Unreachable before 2026-08-28: every model until then supported 480p, so `res` was
+  // always either in the list or matched by the loop above.
+  return lowest;
 }
 
 // Is 4k unlocked for the CURRENTLY selected billing project? Always derived, never
@@ -1218,6 +1372,8 @@ export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
       _hasHydrated: false,
+      theme: 'light',
+      setTheme: (t) => { applyTheme(t); set({ theme: t }); },
       _elementsHydrated: false,
       projects: [],
       currentProjectId: null,
@@ -1877,6 +2033,7 @@ export const useAppStore = create<AppState>()(
         // lets a launch survive a cold/slow/dead Apps Script. NOT billingProject — the
         // selection stays session-only on purpose (see the field's comment).
         billingProjects: state.billingProjects,
+        theme: state.theme,
       }),
       onRehydrateStorage: () => {
         return () => {
@@ -1907,10 +2064,29 @@ export const useAppStore = create<AppState>()(
             if (s.output_format && !modelOutputFormats(s.model).includes(s.output_format)) delete s.output_format;
             // Clamp resolution to what THIS model supports (Fast/Mini: no 1080p)
             if (!modelResolutions(s.model).includes(s.resolution)) s.resolution = '720p';
+            // Same rule for the Omni task. A project saved on 1.1 with 'extend' that is then
+            // switched to the Flash preview has a task the preview never offered, and the API
+            // would NOT reject it (it validates the schema, not the model) — it would just
+            // generate something the user didn't ask for. Structural, like the two above.
+            s.omniTask = resolveOmniTask(s.model, s.omniTask);
             // Clear in-progress draft prompts on app restart (session-only persistence)
             return { ...p, settings: s, draftPrompt: '' };
           });
-          useAppStore.setState({ projects: patched, _hasHydrated: true });
+          // Re-apply the saved theme. localStorage is the AUTHORITATIVE live copy — applyTheme
+          // writes it synchronously on every change, while this store's copy only reaches
+          // IndexedDB after the persist debounce. Reading the store here (which is what this
+          // did first) loses a theme change made shortly before a restart AND overwrites the
+          // correct localStorage value with the stale one — measured: toggle to dark, restart,
+          // back to light. The store copy still earns its place as the fallback: it rides
+          // along in the Documents backup, so it is what restores the theme on a fresh
+          // machine or after site data is cleared.
+          const savedTheme = (() => {
+            try { const v = localStorage.getItem(THEME_KEY); return v === 'dark' || v === 'light' ? v as Theme : null; }
+            catch { return null; }
+          })();
+          const theme: Theme = savedTheme ?? useAppStore.getState().theme;
+          applyTheme(theme);
+          useAppStore.setState({ projects: patched, theme, _hasHydrated: true });
 
           // Element library loads from its own key (and migrates out of the legacy
           // blob on first run). Async, so the UI gates element-dependent surfaces on

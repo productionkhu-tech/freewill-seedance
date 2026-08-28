@@ -115,7 +115,7 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8, hint }
       <span className="text-gray-500 shrink-0">{label}</span>
       <div className="relative">
         <button onClick={() => setOpen(v => !v)}
-          className={`flex items-center gap-1 bg-white border rounded-lg pl-2 pr-1.5 py-1 text-[12px] transition-colors max-w-[170px]
+          className={`flex items-center gap-1 bg-white dark:bg-[#1c1c1e] border rounded-lg pl-2 pr-1.5 py-1 text-[12px] transition-colors max-w-[170px]
             ${active ? 'border-indigo-300 text-indigo-700 font-medium' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>
           <span className="truncate">{current}</span>
           <ChevronDown size={13} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -123,7 +123,7 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8, hint }
         {open && (
           <>
             <div className="fixed inset-0 z-[91]" onClick={() => setOpen(false)} />
-            <div className="absolute z-[92] mt-1 min-w-full w-max max-w-[260px] bg-white border border-gray-200 rounded-lg shadow-xl overflow-hidden">
+            <div className="absolute z-[92] mt-1 min-w-full w-max max-w-[260px] bg-white dark:bg-[#1c1c1e] border border-gray-200 rounded-lg shadow-xl overflow-hidden">
               {searchable && (
                 <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="검색…"
                   className="w-full px-2.5 py-1.5 text-[12px] border-b border-gray-100 outline-none placeholder-gray-300" />
@@ -428,7 +428,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   return (
     <>
       {/* Header + filters */}
-      <div className="shrink-0 bg-white border-b border-gray-200">
+      <div className="shrink-0 bg-white dark:bg-[#1c1c1e] border-b border-gray-200">
         <div className="flex items-center gap-3 px-5 py-3">
           <LayoutGrid size={18} className="text-indigo-500 shrink-0" />
           <h2 className="text-[16px] font-semibold tracking-tight">전체 갤러리</h2>
@@ -458,7 +458,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
             {PERIODS.map(p => (
               <button key={p.id} onClick={() => setPeriod(p.id)}
                 className={`px-2 py-1 text-[12px] rounded-md transition-colors ${period === p.id
-                  ? 'bg-white text-indigo-600 font-medium shadow-sm'
+                  ? 'bg-white dark:bg-[#1c1c1e] text-indigo-600 font-medium shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'}`}>
                 {p.label}
               </button>
@@ -467,7 +467,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           <button onClick={() => setStarredOnly(v => !v)}
             className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1 rounded-lg border transition-colors ${starredOnly
               ? 'text-amber-700 bg-amber-50 border-amber-300'
-              : 'text-gray-500 bg-white border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
+              : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
             <Star size={13} className={starredOnly ? 'fill-amber-400 text-amber-500' : ''} /> 채택만
           </button>
           {anyFilter && (
@@ -482,11 +482,11 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
             <span className="text-gray-400 pl-[21px]">기간</span>
             <input type="date" value={fromDate} max={toDate || todayISO()}
               onChange={(e) => setFromDate(e.target.value)}
-              className="bg-white border border-gray-200 rounded-lg px-2 py-1 text-[12px] outline-none focus:border-indigo-300 tabular-nums" />
+              className="bg-white dark:bg-[#1c1c1e] border border-gray-200 rounded-lg px-2 py-1 text-[12px] outline-none focus:border-indigo-300 tabular-nums" />
             <span className="text-gray-400">~</span>
             <input type="date" value={toDate} min={fromDate} max={todayISO()}
               onChange={(e) => setToDate(e.target.value)}
-              className="bg-white border border-gray-200 rounded-lg px-2 py-1 text-[12px] outline-none focus:border-indigo-300 tabular-nums" />
+              className="bg-white dark:bg-[#1c1c1e] border border-gray-200 rounded-lg px-2 py-1 text-[12px] outline-none focus:border-indigo-300 tabular-nums" />
             {(fromDate || toDate) && (
               <button onClick={() => { setFromDate(''); setToDate(''); }}
                 className="text-[11px] text-gray-400 hover:text-indigo-600 underline underline-offset-2">
@@ -523,7 +523,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
                 // out of view; contain-intrinsic-size stops the scrollbar from jumping while
                 // they're skipped.
                 style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
-                className="bg-white rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all">
+                className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all">
                 <div className="aspect-video bg-black relative group">
                   <VideoPlayer src={r.videoUrl!} className="w-full h-full" is4k={r.usedSettings?.resolution === '4k'} />
                   <ClipStamp ms={r.timestamp} />
@@ -607,7 +607,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           <button
             onClick={() => scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}
             title="최상단으로"
-            className={`w-9 h-9 flex items-center justify-center rounded-full bg-white/95 border border-gray-200 text-gray-500 shadow-md backdrop-blur-sm transition-all hover:text-indigo-600 hover:border-indigo-200
+            className={`w-9 h-9 flex items-center justify-center rounded-full bg-white/95 dark:bg-[#1c1c1e]/95 border border-gray-200 text-gray-500 shadow-md backdrop-blur-sm transition-all hover:text-indigo-600 hover:border-indigo-200
               ${scrolled ? 'opacity-100' : 'opacity-0 pointer-events-none translate-y-1'}`}>
             <ChevronUp size={17} />
           </button>
@@ -634,7 +634,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
               }));
             }}
             title={hasMore ? `최하단으로 (남은 ${rows.length - shown}개까지 모두 표시)` : '최하단으로'}
-            className="w-9 h-9 flex items-center justify-center rounded-full bg-white/95 border border-gray-200 text-gray-500 shadow-md backdrop-blur-sm transition-colors hover:text-indigo-600 hover:border-indigo-200">
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-white/95 dark:bg-[#1c1c1e]/95 border border-gray-200 text-gray-500 shadow-md backdrop-blur-sm transition-colors hover:text-indigo-600 hover:border-indigo-200">
             <ChevronDown size={17} />
           </button>
         </div>
