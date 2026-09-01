@@ -943,7 +943,13 @@ async function startServer() {
       // cache id the client never learns, and the tokens are spent all the same. /api/download
       // has had this guard for the same reason; this route did not.
       const geminiCtrl = new AbortController();
-      req.on('close', () => { if (!res.writableEnded) { try { geminiCtrl.abort(); } catch { /* already settled */ } } });
+      // ★ res, not req. `req` (IncomingMessage) emits 'close' as soon as the request stream
+      // is consumed — for a POST that is right after body-parser reads the JSON, long before
+      // we answer — so listening there aborted our own upstream call on every single request
+      // and every Omni generation failed instantly with "요청이 취소되었습니다". The response
+      // stream is the one that closes when the CLIENT actually goes away, which is what
+      // /api/download has always used.
+      res.on('close', () => { if (!res.writableEnded) { try { geminiCtrl.abort(); } catch { /* already settled */ } } });
       const r = await postJsonNoDeadline(
         'https://generativelanguage.googleapis.com/v1beta/interactions',
         { 'Content-Type': 'application/json', 'x-goog-api-key': KEY },
