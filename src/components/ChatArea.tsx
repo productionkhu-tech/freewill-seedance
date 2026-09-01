@@ -40,6 +40,13 @@ function translateError(error: string): string {
   // filter reads the whole request, video included, and is not reproducible from the
   // text alone. Say both, or the message sends someone to rewrite a prompt that was
   // already fine.
+  // Gemini rejects the key itself. The raw string names no cause, and the cause here is
+  // almost never a bad key on disk: the server reads NANOBANANA_STUDIO_KEY from the
+  // process environment ONCE at launch, and an auto-updated app inherits its environment
+  // block from the process it replaced — so a key rotated at any point keeps travelling
+  // as the old value through every later update until someone starts the app fresh.
+  if (error.includes('API key not valid') || error.includes('API_KEY_INVALID'))
+    return 'Gemini API 키가 거부되었습니다.\n앱은 켤 때 환경변수(NANOBANANA_STUDIO_KEY)를 한 번만 읽고, 자동 업데이트는 이전 프로세스의 환경을 그대로 물려받습니다. 키를 바꾼 적이 있다면 앱이 옛 값을 계속 쓰고 있을 수 있습니다.\n→ 작업 관리자에서 앱을 완전히 종료한 뒤 다시 실행해보세요. 그래도 같으면 키가 만료·삭제된 것입니다.';
   if (error.includes('Input blocked') || error.includes('Prohibited Use'))
     return '프롬프트가 Google 정책 필터에 막혔습니다. (생성 전 단계라 과금은 없습니다.)\n"연장 / 늘려줘 / extend" 처럼 작업을 지시하면 거의 항상 막힙니다 — 이어질 장면을 묘사로 적어주세요.\n장면 묘사인데도 막혔다면 필터가 원본 영상까지 함께 본 경우입니다. 같은 문장이 다른 영상에서는 통과하니, 문장을 조금 바꾸거나 다시 시도해보세요.';
   if (error.includes('resource download failed')) return '리소스 다운로드 실패: 이미지에 접근할 수 없습니다. 파일을 다시 업로드해주세요.';
