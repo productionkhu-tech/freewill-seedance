@@ -848,8 +848,14 @@ async function startServer() {
   // frontend builds the full Omni payload; this only injects the key + normalizes
   // the response. Entirely independent of the BytePlus path.
   // Resumable upload of a media buffer to the Gemini Files API → returns the file uri
-  // once ACTIVE (used for the Edit task's source video, which must be a Files API ref).
-  async function uploadToFilesApi(buf: Buffer, mime: string, key: string): Promise<string | null> {
+  // once ACTIVE (used for the Edit/Extend source video, which must be a Files API ref).
+  //
+  // Returns the REASON on failure, not just null. This had four distinct failure paths —
+  // the start call, the byte upload, the file being rejected during processing, and simply
+  // running out of patience — and every one of them surfaced to the user as the same
+  // "소스 영상 업로드 실패 (Files API)". With four causes behind one sentence there is
+  // nothing to act on and nothing to debug.
+  async function uploadToFilesApi(buf: Buffer, mime: string, key: string): Promise<{ uri?: string; error?: string }> {
     const start = await fetch('https://generativelanguage.googleapis.com/upload/v1beta/files', {
       method: 'POST',
       headers: {
@@ -863,7 +869,12 @@ async function startServer() {
       body: JSON.stringify({ file: { display_name: 'omni-edit-src' } }),
     });
     const uploadUrl = start.headers.get('x-goog-upload-url');
-    if (!uploadUrl) { console.warn('[Gemini] Files start failed', start.status); return null; }
+    if (!uploadUrl) {
+      const t = await start.text().catch(() => '');
+      const m = (() => { try { return JSON.parse(t)?.error?.message; } catch { return null; } })();
+      console.warn('[Gemini] Files start failed', start.status, m || t.slice(0, 200));
+      return { error: `업로드를 시작하지 못했습니다 (Files API ${start.status})${m ? ': ' + m : ''}` };
+    }
     const up = await fetch(uploadUrl, {
       method: 'POST',
       headers: { 'x-goog-api-key': key, 'X-Goog-Upload-Command': 'upload, finalize', 'X-Goog-Upload-Offset': '0', 'Content-Length': String(buf.length) },
@@ -871,16 +882,36 @@ async function startServer() {
     });
     const upJson: any = await up.json().catch(() => ({}));
     const file = upJson.file || upJson;
-    if (!file?.name) { console.warn('[Gemini] Files upload failed', up.status); return null; }
+    if (!file?.name) {
+      const m = upJson?.error?.message;
+      console.warn('[Gemini] Files upload failed', up.status, m || '');
+      return { error: `영상 전송이 거부되었습니다 (Files API ${up.status})${m ? ': ' + m : ''} · 형식 ${mime}` };
+    }
+    // Google transcodes the upload before it can be referenced, and the wait scales with the
+    // clip. This was capped at 40 x 3s = 2 minutes, which is short enough that a perfectly
+    // good upload got reported as a failure while it was still PROCESSING (measured: a 9.4MB
+    // 1080p source failed at 215s total, which is start + upload + exactly this 120s). The
+    // client now waits 40 minutes, so there is no reason for this to be the impatient one.
+    const POLL_MS = 3000, POLL_BUDGET_MS = 10 * 60 * 1000;
     let state = file.state || '';
-    for (let i = 0; i < 40 && state !== 'ACTIVE'; i++) {
+    const t0 = Date.now();
+    while (state !== 'ACTIVE' && Date.now() - t0 < POLL_BUDGET_MS) {
       const fr = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}`, { headers: { 'x-goog-api-key': key } });
       const fd: any = await fr.json().catch(() => ({}));
       state = fd?.state || '';
-      if (state === 'FAILED') { console.warn('[Gemini] source file FAILED'); return null; }
-      if (state !== 'ACTIVE') await new Promise((r) => setTimeout(r, 3000));
+      if (state === 'FAILED') {
+        const m = fd?.error?.message;
+        console.warn('[Gemini] source file FAILED', m || '');
+        return { error: `Google이 이 영상을 처리하지 못했습니다${m ? ': ' + m : ''} · 형식 ${mime}
+지원 형식(mp4·mov·webm·mpeg·wmv·3gpp·flv)의 일반 코덱으로 변환한 뒤 다시 올려주세요.` };
+      }
+      if (state !== 'ACTIVE') await new Promise((r) => setTimeout(r, POLL_MS));
     }
-    return state === 'ACTIVE' ? file.uri : null;
+    if (state !== 'ACTIVE') {
+      console.warn('[Gemini] source file not ACTIVE within budget, last state:', state || '(없음)');
+      return { error: `영상 처리가 10분 안에 끝나지 않았습니다 (마지막 상태: ${state || '알 수 없음'}). 더 짧거나 가벼운 영상으로 다시 시도해주세요.` };
+    }
+    return { uri: file.uri };
   }
 
   app.post('/api/gemini/generate', async (req, res) => {
@@ -907,9 +938,9 @@ async function startServer() {
               buf = Buffer.from(dataRef, 'base64');
             }
             if (!buf) return res.status(502).json({ error: '소스 영상을 찾지 못했습니다 (캐시 유실 — 다시 올려주세요).' });
-            const uri = await uploadToFilesApi(buf, part.mime_type || 'video/mp4', KEY);
-            if (!uri) return res.status(502).json({ error: '소스 영상 업로드 실패 (Files API)' });
-            part.uri = uri;
+            const up = await uploadToFilesApi(buf, part.mime_type || 'video/mp4', KEY);
+            if (!up.uri) return res.status(502).json({ error: up.error || '소스 영상 업로드 실패 (Files API)' });
+            part.uri = up.uri;
           }
           // Always strip the private upload markers so they never reach the API.
           delete part._uploadData; delete part._uploadCacheId;
