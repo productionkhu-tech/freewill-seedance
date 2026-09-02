@@ -509,15 +509,24 @@ export async function dataUrlToFile(dataUrl: string, name: string): Promise<File
 // Upload an element asset-pack JSON bundle to R2 (via the server) and get back a
 // time-limited (7-day) download link to share. Content-Type octet-stream so the
 // server's route-level raw parser handles it (not the json parser).
-export async function createElementPackLink(bundleJson: string): Promise<string> {
+export async function createElementPackLink(bundleJson: string, onSize?: (mb: number) => void): Promise<string> {
   // Say the size before the server does. A pack holds every image at full resolution as
   // base64, so a large collection runs to hundreds of MB and used to come back as a bare
   // "Payload Too Large" — no size, no count, nothing to act on.
   const mb = new Blob([bundleJson]).size / (1024 * 1024);
+  onSize?.(mb);
   if (mb > 480) {
     throw new Error(`묶음이 ${mb.toFixed(0)}MB로 너무 큽니다 (최대 480MB).
 어셋을 나눠서 공유하거나, 컬렉션 대신 어셋 단위로 공유해주세요.`);
   }
+  // No byte-level progress here, deliberately. Two attempts measured the wrong leg:
+  //   - XMLHttpRequest.upload watches browser → localhost, which finishes at once (60MB
+  //     reported a single 100% event, then 7.6s of silence while the real work happened).
+  //   - Counting the stream the S3 client consumes fails too — SigV4 hashes the whole body
+  //     before sending, so the counter reaches 100% before a byte hits the network.
+  // Real progress needs the browser to PUT straight to R2 with a presigned URL (which would
+  // also stop the server buffering half a gigabyte), and that needs bucket CORS. Until then
+  // the caller shows size and elapsed time, which is true, rather than a percentage that is not.
   const res = await fetch('/api/element-pack', {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },

@@ -315,12 +315,13 @@ function DropIntake({ files, existing, collectionName, sendCap, modelName, onCan
 }
 
 /* ─── Asset create/edit form (local draft → committed on save) ─── */
-function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sendCap, modelName }: {
+function AssetEditor({ initial, onSave, onDelete, onShare, sharing, shareSec, onClose, sendCap, modelName }: {
   initial: ElementAsset | null;
   onSave: (data: { name: string; description: string; category: AssetCategory; images: ElementImage[] }) => void;
   onDelete: (() => void) | null;
   onShare?: (() => void) | null;
   sharing?: boolean;
+  shareSec?: number;
   onClose: () => void;
   // The CURRENT project's model decides how many images a request may carry (2.0 → 9,
   // 2.5 → 30). Passed in rather than read here so this editor stays a dumb form.
@@ -476,7 +477,7 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, onClose, sen
         <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-gray-100 bg-white dark:bg-[#1c1c1e] shrink-0">
           <div className="flex items-center gap-1">
             {onDelete && <button onClick={onDelete} className="flex items-center gap-1.5 text-[13px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-2 rounded-lg transition-colors"><Trash2 size={15} /> 삭제</button>}
-            {onShare && <button onClick={onShare} disabled={sharing} title="이 어셋을 공유 링크로" className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-[#0071e3] dark:hover:text-[#4da3ff] hover:bg-indigo-50 disabled:opacity-50 px-3 py-2 rounded-lg transition-colors">{sharing ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />} 공유</button>}
+            {onShare && <button onClick={onShare} disabled={sharing} title="이 어셋을 공유 링크로" className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-[#0071e3] dark:hover:text-[#4da3ff] hover:bg-indigo-50 disabled:opacity-50 px-3 py-2 rounded-lg transition-colors">{sharing ? <Loader2 size={15} className="animate-spin" /> : <Share2 size={15} />} {sharing ? `올리는 중${shareSec ? ` ${shareSec}초` : ''}` : '공유'}</button>}
           </div>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="text-[13px] font-medium text-gray-500 hover:text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100 transition-colors">취소</button>
@@ -673,6 +674,10 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   const [editing, setEditing] = useState<ElementAsset | 'new' | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   const [shareBusy, setShareBusy] = useState<string | null>(null); // key currently generating a link
+  // Size and elapsed seconds, not a percentage — see createElementPackLink for why a
+  // percentage here would be made up. 240MB takes ~26s, so the wait needs SOMETHING.
+  const [shareMB, setShareMB] = useState(0);
+  const [shareSec, setShareSec] = useState(0);
   const [shareLink, setShareLink] = useState<string | null>(null); // generated link banner
   const [importing, setImporting] = useState(false);              // import dialog open
   const [intake, setIntake] = useState<File[] | null>(null);      // dropped OS files awaiting category
@@ -797,14 +802,17 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   }, [deleteElementAsset]);
 
   const shareBundle = useCallback(async (bundle: Bundle, key: string) => {
-    setShareBusy(key);
+    setShareBusy(key); setShareMB(0); setShareSec(0);
+    const t0 = Date.now();
+    const tick = setInterval(() => setShareSec(Math.round((Date.now() - t0) / 1000)), 1000);
     try {
-      const url = await createElementPackLink(JSON.stringify(bundle));
+      const url = await createElementPackLink(JSON.stringify(bundle), setShareMB);
       try { await navigator.clipboard.writeText(url); } catch { /* banner shows the link for manual copy */ }
       setShareLink(url);
     } catch (e: any) {
       alert(`공유 링크 생성 실패: ${e?.message || ''}`);
     } finally {
+      clearInterval(tick);
       setShareBusy(null);
     }
   }, []);
@@ -912,7 +920,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                         : <button onClick={() => setProjectCollection(projectId, selectedCollectionId)} className="flex items-center gap-1 text-[11px] font-medium text-[#0071e3] dark:text-[#4da3ff] bg-indigo-50 hover:bg-indigo-100 px-2 py-0.5 rounded-full transition-colors shrink-0"><Link2 size={11} /> 이 채팅에 사용</button>}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <button onClick={() => shareCollection(selectedCollection)} disabled={shareBusy === 'col-' + selectedCollection.id} title="이 컬렉션 전체를 공유 링크로 (받는 사람은 ‘가져오기’로 추가)" className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600 hover:text-[#0071e3] dark:hover:text-[#4da3ff] bg-white dark:bg-[#1c1c1e] border border-gray-200 hover:border-indigo-300 disabled:opacity-50 px-2.5 py-1.5 rounded-lg transition-colors">{shareBusy === 'col-' + selectedCollection.id ? <Loader2 size={13} className="animate-spin" /> : <Share2 size={13} />} 공유 링크</button>
+                      <button onClick={() => shareCollection(selectedCollection)} disabled={shareBusy === 'col-' + selectedCollection.id} title="이 컬렉션 전체를 공유 링크로 (받는 사람은 ‘가져오기’로 추가)" className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600 hover:text-[#0071e3] dark:hover:text-[#4da3ff] bg-white dark:bg-[#1c1c1e] border border-gray-200 hover:border-indigo-300 disabled:opacity-50 px-2.5 py-1.5 rounded-lg transition-colors">{shareBusy === 'col-' + selectedCollection.id ? <Loader2 size={13} className="animate-spin" /> : <Share2 size={13} />} {shareBusy === 'col-' + selectedCollection.id ? `올리는 중${shareMB ? ` ${shareMB.toFixed(0)}MB` : ''}${shareSec ? ` · ${shareSec}초` : ''}` : '공유 링크'}</button>
                       <button onClick={() => setImporting(true)} title="공유 링크 또는 파일로 어셋/컬렉션 가져오기" className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600 hover:text-[#0071e3] dark:hover:text-[#4da3ff] bg-white dark:bg-[#1c1c1e] border border-gray-200 hover:border-indigo-300 px-2.5 py-1.5 rounded-lg transition-colors"><Upload size={13} /> 가져오기</button>
                       <button onClick={() => setEditing('new')} className="flex items-center gap-1.5 text-[13px] font-medium text-white bg-[#0071e3] hover:bg-[#0077ed] px-3 py-1.5 rounded-lg transition-colors active:scale-95"><Plus size={15} /> 어셋 추가</button>
                     </div>
@@ -1058,6 +1066,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
               onDelete={editing !== 'new' ? () => { if (confirm(`'${editing.name}' 어셋을 삭제할까요? (앱에 저장된 이미지도 함께 삭제)`)) { deleteElementAsset(editing.id); setEditing(null); } } : null}
               onShare={editing !== 'new' ? () => shareAsset(editing) : null}
               sharing={editing !== 'new' && shareBusy === 'asset-' + editing.id}
+              shareSec={shareSec}
               onClose={() => setEditing(null)}
               sendCap={sendCap}
               modelName={modelName}
