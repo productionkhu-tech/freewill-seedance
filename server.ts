@@ -427,7 +427,12 @@ async function startServer() {
       const r = await fetch(url);
       if (!r.ok) return res.status(502).json({ error: `링크를 불러올 수 없습니다 (${r.status}) — 만료됐거나 잘못된 링크` });
       const text = await r.text();
-      if (text.length > 120 * 1024 * 1024) return res.status(413).json({ error: 'pack too large' });
+      // Must match the UPLOAD ceiling. This was 120MB while the upload route allowed the
+      // same, so raising only one side would have let a pack be shared and then refused on
+      // import — the worse failure, because by then the sender believes it worked. And
+      // 'pack too large' told the receiver neither the size nor the limit.
+      const packMB = text.length / (1024 * 1024);
+      if (packMB > 500) return res.status(413).json({ error: `받은 묶음이 ${packMB.toFixed(0)}MB로 한도(500MB)를 넘습니다. 보낸 쪽에서 나눠서 공유해달라고 요청해주세요.` });
       res.type('application/json').send(text);
     } catch (e: any) {
       console.error('[element-pack/fetch] failed:', e?.message || e);
