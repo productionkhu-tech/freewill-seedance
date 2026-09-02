@@ -510,6 +510,14 @@ export async function dataUrlToFile(dataUrl: string, name: string): Promise<File
 // time-limited (7-day) download link to share. Content-Type octet-stream so the
 // server's route-level raw parser handles it (not the json parser).
 export async function createElementPackLink(bundleJson: string): Promise<string> {
+  // Say the size before the server does. A pack holds every image at full resolution as
+  // base64, so a large collection runs to hundreds of MB and used to come back as a bare
+  // "Payload Too Large" — no size, no count, nothing to act on.
+  const mb = new Blob([bundleJson]).size / (1024 * 1024);
+  if (mb > 480) {
+    throw new Error(`묶음이 ${mb.toFixed(0)}MB로 너무 큽니다 (최대 480MB).
+어셋을 나눠서 공유하거나, 컬렉션 대신 어셋 단위로 공유해주세요.`);
+  }
   const res = await fetch('/api/element-pack', {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
@@ -517,7 +525,8 @@ export async function createElementPackLink(bundleJson: string): Promise<string>
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || '공유 링크 생성 실패');
+    const detail = res.status === 413 ? ` (묶음 ${mb.toFixed(0)}MB — 서버 한도 초과)` : '';
+    throw new Error((err.error || '공유 링크 생성 실패') + detail);
   }
   const data = await res.json();
   return data.url as string;

@@ -387,7 +387,12 @@ async function startServer() {
   sweepExpiredPacks().catch(() => {});                                   // on boot
   setInterval(() => { sweepExpiredPacks().catch(() => {}); }, 60 * 60 * 1000); // hourly
 
-  app.post('/api/element-pack', express.raw({ type: '*/*', limit: '120mb' }), async (req, res) => {
+  // 500mb, not 120. An element pack carries every image at FULL resolution as base64
+  // (~12MB per asset, measured), so a 20-asset collection is ~240MB and was rejected with a
+  // bare "Payload Too Large" — under the cache route's own 220mb and the backup route's
+  // 400mb, which handle the same data. The client refuses anything larger before it builds
+  // the string, so this ceiling is the backstop, not the gate.
+  app.post('/api/element-pack', express.raw({ type: '*/*', limit: '500mb' }), async (req, res) => {
     try {
       const buf = Buffer.from(req.body as Buffer);
       if (!buf.length) return res.status(400).json({ error: 'empty body' });
