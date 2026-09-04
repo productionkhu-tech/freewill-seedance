@@ -19,7 +19,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
   S3Client,
@@ -288,9 +288,40 @@ export function drain(): Promise<void> {
   //   즉시 반환하고 보관이 통째로 죽는다 — 부팅 때 항상 빈 큐로 한 번 돌기 때문에
   //   모든 PC 에서 100% 재현되는 버그였다.
   //   .finally 콜백은 절대 동기로 실행되지 않으므로 대입이 항상 먼저 끝난다.
-  drainPromise = run().finally(() => { drainPromise = null; });
+  // archiveOne 은 스스로 잡아내지만, 예기치 못한 rejection 이 void drain() 을 타고
+  // unhandled rejection 이 되어 프로세스를 죽이는 일이 없도록 한 겹 더 받는다.
+  drainPromise = run()
+    .catch(e => console.warn('[NCP] 큐 처리 중 예외:', e?.message || e))
+    .finally(() => { drainPromise = null; });
   return drainPromise;
 }
+
+/**
+ * 전송이 멈추면 끊는 감시자.
+ *
+ * 총 시간이 아니라 "마지막 바이트 이후 경과"를 본다. 4K 200MB 를 느린 회선으로 받는
+ * 것과, 연결만 붙잡고 아무것도 안 보내는 것은 총 시간으로는 구분되지 않기 때문이다.
+ * 전자는 계속 진행시키고 후자만 끊어야 한다.
+ *
+ * ★ 이게 없으면 멈춘 소스 하나가 큐 전체를 세운다. drain 은 순차 실행이고, 멈춘 작업
+ *   뒤의 정상 작업은 영원히 대기한다. 더 나쁜 건 drainPromise 가 물린 채로 남아서
+ *   이후의 모든 drain() 호출이 그 promise 를 그대로 돌려주고 아무 일도 하지 않는다는
+ *   것이다 — 그 세션 동안 보관이 통째로 죽는다. 재현해서 확인한 동작이다.
+ *   (node 의 기본 headersTimeout 이 300초라 언젠가는 풀리지만, 소급 보관처럼 수백 건이
+ *    줄 서 있으면 그 사이 큐는 멈춰 있다.)
+ */
+function stallGuard(ms: number, what: string) {
+  const ac = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const kick = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => ac.abort(new Error(`${what}이(가) ${ms / 1000}초 동안 멈춰 중단했습니다`)), ms);
+  };
+  kick();
+  const tap = new Transform({ transform(chunk, _enc, cb) { kick(); cb(null, chunk); } });
+  return { signal: ac.signal, tap, done: () => clearTimeout(timer) };
+}
+const STALL_MS = 60 * 1000;
 
 async function archiveOne(job: Job) {
   const ncp = await ensureNcp();
@@ -312,12 +343,16 @@ async function archiveOne(job: Job) {
       const safeExt = /^\.[A-Za-z0-9]{1,5}$/.test(job.ext) ? job.ext : '.mp4';
       local = path.join(CACHE_DIR, `${safeName}${safeExt}`);
       if (!fs.existsSync(local)) {
-        const r = await fetch(job.sourceUrl);
-        if (!r.ok || !r.body) throw new Error(`원본 다운로드 실패 (HTTP ${r.status})`);
+        const g = stallGuard(STALL_MS, '원본 다운로드');
+        let r: Response;
+        try { r = await fetch(job.sourceUrl, { signal: g.signal }); }
+        catch (e) { g.done(); throw e; }
+        if (!r.ok || !r.body) { g.done(); throw new Error(`원본 다운로드 실패 (HTTP ${r.status})`); }
         // .part 로 받고 나서 rename 한다. 도중에 죽으면 잘린 파일이 남는데, 그게
         // 최종 이름을 갖고 있으면 다음에 "이미 있다"고 판단해 그대로 영상으로 쓰인다.
         const part = `${local}.part`;
-        await pipeline(Readable.fromWeb(r.body as any), fs.createWriteStream(part));
+        try { await pipeline(Readable.fromWeb(r.body as any), g.tap, fs.createWriteStream(part)); }
+        finally { g.done(); }
         const got = fs.statSync(part).size;
         if (got < 1024) { fs.rmSync(part, { force: true }); throw new Error(`받은 파일이 너무 작습니다 (${got}B)`); }
         fs.renameSync(part, local);
@@ -349,18 +384,25 @@ async function archiveOne(job: Job) {
       Bucket: ncp.bucket, Key: key, ContentType: contentType, Metadata: meta,
     }), { expiresIn: 900 }); // 시작만 창 안에 들어오면 완주한다 — 서명은 요청 도착 시 한 번만 검사한다
 
-    const put = await fetch(putUrl, {
-      method: 'PUT',
-      duplex: 'half',
-      headers: {
-        'Content-Type': contentType,
-        'Content-Length': String(size),
-        'x-amz-meta-project': meta.project,
-        'x-amz-meta-task': meta.task,
-        'x-amz-meta-model': meta.model,
-      },
-      body: Readable.toWeb(fs.createReadStream(local)) as any,
-    } as any);
+    const gu = stallGuard(STALL_MS, '업로드');
+    let put: Response;
+    try {
+      put = await fetch(putUrl, {
+        method: 'PUT',
+        duplex: 'half',
+        signal: gu.signal,
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(size),
+          'x-amz-meta-project': meta.project,
+          'x-amz-meta-task': meta.task,
+          'x-amz-meta-model': meta.model,
+        },
+        // tap 을 거치게 해서 실제로 바이트가 흐를 때마다 감시자 시계를 되돌린다.
+        // 파일을 다 읽을 때까지 시간이 얼마가 걸리든, 흐르고 있으면 끊지 않는다.
+        body: Readable.toWeb(fs.createReadStream(local).pipe(gu.tap)) as any,
+      } as any);
+    } finally { gu.done(); }
     if (!put.ok) throw new Error(`업로드 거부 (HTTP ${put.status})`);
 
     // 3. 올라갔는지 확인하고 나서만 성공으로 친다. 크기가 다르면 실패로 본다.
