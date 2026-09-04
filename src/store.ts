@@ -489,6 +489,12 @@ export interface ChatMessage {
   status?: 'queued' | 'running' | 'succeeded' | 'failed';
   videoUrl?: string;
   imageUrl?: string;
+  // NCP 보관 힌트. videoUrl 은 약 24시간 뒤 죽으므로 그 뒤의 재생은 /api/media/{taskId}
+  // 로 간다. 서버가 taskId→위치 색인을 들고 있어서 평소엔 이 값이 필요 없지만,
+  // 재설치 등으로 색인을 잃으면 이 두 값으로 객체를 되찾는다.
+  // ext 를 여기 굽는 이유: 확장자는 생성 API 가 준 URL 에서만 확정되고(2.5 는 .mov),
+  // 그 URL 은 24시간 뒤 없다 — 나중에는 계산할 방법이 없다.
+  videoStorage?: { project?: string; ext?: string };
   error?: string;
   timestamp: number;
   startTime?: number;
@@ -1887,6 +1893,11 @@ export const useAppStore = create<AppState>()(
               status: 'succeeded',
               videoUrl: contentData?.video_url,
               imageUrl: contentData?.last_frame_url,
+              // 확장자는 지금만 확정할 수 있다 — 이 URL 은 24시간 뒤 사라진다.
+              videoStorage: {
+                ...(message as any).videoStorage,
+                ext: videoExtFor(contentData?.video_url, message.usedSettings?.model || ''),
+              },
               endTime: Date.now(),
             });
             // Persist the succeeded status to disk IMMEDIATELY (skip the 1.5s

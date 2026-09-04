@@ -6,6 +6,7 @@ import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
 import https from 'https';
+import { Readable } from 'node:stream';
 import {
   S3Client,
   PutObjectCommand,
@@ -16,6 +17,12 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // Shared with the client store — see src/lib/model-access.ts for why these two facts
 // live outside both files.
 import { MODEL_GRANTS } from './src/lib/model-access';
+// 생성 결과물의 장기 보관소. R2(입력 임시 저장)와 역할이 겹치지 않는다 — ncp.ts 참고.
+import {
+  ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
+  presignArchived, recoverFromHints, lookupArchived, archiveStats,
+  lastNcpError, resetNcpBackoff,
+} from './ncp';
 
 dotenv.config();
 
@@ -274,6 +281,56 @@ async function startServer() {
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
   console.log(`[Cache] Using ${CACHE_DIR}`);
 
+  // ★ media-cache 에는 캐시 파일만 있는 게 아니다. 앱의 작은 원장 네 개가 같이 산다.
+  //   30일 프루너와 "캐시 비우기" 버튼은 디렉터리를 통째로 훑어 지우기 때문에, 막아두지
+  //   않으면 이것들까지 함께 사라진다. 각각 잃었을 때 실제로 일어나는 일:
+  //     task-project.json       크레딧 사용량이 어느 프로젝트 것인지 몰라진다
+  //     element-pack-index.json 만료된 R2 공유 팩을 영영 못 지운다 (용량 누수)
+  //     media-index.json        taskId → NCP 객체 위치를 잃는다
+  //     ncp-archive-queue.json  아직 못 올린 영상을 잊는다 → 24시간 뒤 조용히 유실
+  //     ncp-archive-dead.json   만료된 링크를 매 실행마다 다시 두드린다
+  //   캐시 파일(영상·이미지 사본)은 지워도 NCP 가 받쳐주지만, 이 원장들은 대체물이 없다.
+  const CONTROL_FILES = new Set([
+    'task-project.json',
+    'element-pack-index.json',
+    'media-index.json',
+    'ncp-archive-queue.json',
+    'ncp-archive-dead.json',
+  ]);
+
+  initNcpIndex(CACHE_DIR);
+  initNcpQueue(CACHE_DIR);
+
+  // ★ NCP 는 R2 와 같은 급의 필수 의존성으로 취급한다 — 없으면 앱이 켜지지 않는다.
+  //
+  // 없어도 "생성"은 멀쩡히 되기 때문에 게이트가 없으면 위험하다. R2.bat 을 안 돌린 PC,
+  // 옛 R2 키가 남은 PC, 시계가 틀어진 PC 는 아무 경고 없이 잘 돌아가는 것처럼 보이다가
+  // 24시간 뒤에 그날 만든 영상이 통째로 사라진다. 그때는 손쓸 방법이 없다.
+  // 켜지지 않는 쪽이 조용히 유실되는 쪽보다 낫다.
+  //
+  // 대신 한 번 실패로 막지는 않는다. R2 검사와 달리 이건 네트워크를 타므로 순간적인
+  // 실패가 있을 수 있어, 3초 간격으로 세 번 더 시도한 뒤에 포기한다.
+  {
+    let ncpOk = await ensureNcp();
+    for (let i = 1; i <= 3 && !ncpOk; i++) {
+      console.log(`  [NCP] 보관소 연결 재시도 ${i}/3...`);
+      await new Promise(r => setTimeout(r, 3000));
+      resetNcpBackoff();
+      ncpOk = await ensureNcp();
+    }
+    if (!ncpOk) {
+      console.error('\n  [ERROR] NCP 보관소에 연결하지 못했습니다.');
+      console.error(`  ${lastNcpError()}`);
+      console.error('\n  이 연결이 없으면 만든 영상이 24시간 뒤 사라집니다.');
+      console.error('  그래서 앱을 켜지 않고 멈춥니다.\n');
+      process.exit(1);
+    }
+    void drainArchive();
+  }
+  // 실패한 보관은 큐에 남는다. 다음 생성이 없어도 스스로 다시 시도하도록 주기적으로 깨운다.
+  // 로컬 사본이 이미 있으면 원본 URL 이 죽은 뒤에도 성공할 수 있으므로 포기시키지 않는다.
+  setInterval(() => { void drainArchive(); }, 10 * 60 * 1000).unref?.();
+
   // Cleanup files older than 30 days — mtime-based. Every cache READ/dedup-hit
   // refreshes mtime (touchCache below), so actively reused references never
   // age out; only genuinely unused files get pruned here.
@@ -292,6 +349,7 @@ async function startServer() {
   try {
     const now = Date.now();
     for (const f of fs.readdirSync(CACHE_DIR)) {
+      if (CONTROL_FILES.has(f)) continue;
       const fp = path.join(CACHE_DIR, f);
       const age = now - fs.statSync(fp).mtimeMs;
       if (age > CACHE_MAX_AGE_MS) { fs.unlinkSync(fp); console.log(`[Cache] Deleted old file: ${f}`); }
@@ -641,6 +699,7 @@ async function startServer() {
     try {
       let deleted = 0, bytes = 0;
       for (const f of fs.readdirSync(CACHE_DIR)) {
+        if (CONTROL_FILES.has(f)) continue; // 원장은 캐시가 아니다 — CONTROL_FILES 주석 참고
         const fp = path.join(CACHE_DIR, f);
         const st = fs.statSync(fp);
         if (st.isFile()) { bytes += st.size; fs.unlinkSync(fp); deleted++; }
@@ -656,6 +715,101 @@ async function startServer() {
     if (!fs.existsSync(cachePath)) return res.status(404).json({ error: 'File not found in cache' });
     touchCache(cachePath); // 읽기도 사용 → 30일 시계 리셋
     res.sendFile(cachePath);
+  });
+
+  // 보관 상태. :taskId 와 겹치지 않도록 경로를 따로 뒀다.
+  app.get('/api/archive/status', (_req, res) => res.json(archiveStats()));
+
+  // 소급 보관 — 이 패치 이전에 만든 영상 중 원본 링크가 아직 살아있는 것들을 올린다.
+  //
+  // 왜 필요한가: 이 기능은 "앞으로" 만들 영상을 지키지, 이미 만든 것을 되살리지는
+  // 못한다. 다만 최근 24시간 안에 만든 것은 링크가 아직 살아 있어서 지금 올리면
+  // 건질 수 있다 — 자동 다운로드가 기본 꺼짐이라 그 영상들은 다른 사본이 없다.
+  // 링크가 죽은 것들은 세 번 실패하고 큐에서 빠진다(ncp.ts).
+  //
+  // 히스토리는 클라이언트(IndexedDB)에만 있으므로 목록을 받아온다. /api/cache/keep 과
+  // 같은 구조다. 실행할 때마다 한 번, 이미 보관된 것은 여기서 걸러진다.
+  app.post('/api/archive/backfill', (req, res) => {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    let queued = 0, already = 0;
+    for (const it of items.slice(0, 300)) {
+      if (!it?.taskId || typeof it.videoUrl !== 'string' || !/^https?:/.test(it.videoUrl)) continue;
+      if (lookupArchived(String(it.taskId))) { already++; continue; }
+      enqueueArchive({
+        taskId: String(it.taskId),
+        // http 소스만 여기 오므로 사실상 전부 seedance 지만, 판단은 클라이언트가 보낸 값을 따른다.
+        provider: it.provider === 'google' ? 'google' : 'seedance',
+        project: typeof it.project === 'string' ? it.project : '',
+        ext: typeof it.ext === 'string' ? it.ext : '.mp4',
+        model: typeof it.model === 'string' ? it.model : '',
+        sourceUrl: it.videoUrl,
+      });
+      queued++;
+    }
+    if (queued) console.log(`[NCP] 소급 보관 ${queued}건 예약 (이미 보관됨 ${already}건)`);
+    res.json({ queued, already });
+  });
+
+  // 생성 결과물 재생. 클라이언트는 이 경로 하나만 보고, 서명 URL 은 절대 넘기지 않는다.
+  // 이유가 셋이고 전부 측정된 것이다:
+  //   (1) blob 캐시가 URL 을 키로 쓴다 — 매번 새 서명이면 적중률이 0 이 되어 볼 때마다
+  //       전체를 다시 받는다.
+  //   (2) NCP 는 아웃바운드가 과금이다. R2 는 무료였으므로 이 가정이 코드에 깔려 있다.
+  //   (3) 서명은 1시간 뒤 죽는다. 시작한 요청은 완주하지만 새 Range(=시킹)는 403 이다.
+  // 여기서 서버가 요청마다 새로 서명하면(로컬 연산 0.15ms) 셋 다 사라진다.
+  app.get('/api/media/:taskId', async (req, res) => {
+    // 색인은 벤더가 준 id 를 그대로 키로 쓰고, 파일 경로에는 정제한 값만 쓴다(경로 탈출 방지).
+    // 두 값이 다를 수 있으므로 조회는 둘 다 해본다 — 한쪽만 보면 색인이 있는데도 못 찾는다.
+    const rawId = String(req.params.taskId);
+    const taskId = rawId.replace(/[^A-Za-z0-9._-]/g, '');
+    if (!taskId) return res.status(400).json({ error: 'bad task id' });
+
+    // 색인에 실제로 들어있는 키로 통일한다. 아래 presignArchived 도 이 값을 써야
+    // 한다 — 한쪽은 원본, 한쪽은 정제된 값을 쓰면 색인이 있는데도 404 가 난다.
+    let indexId = rawId;
+    let row = lookupArchived(indexId);
+    if (!row) { indexId = taskId; row = lookupArchived(indexId); }
+    const qExt = String(req.query.ext || '');
+    const ext = row
+      ? path.extname(row.key)
+      : (/^\.[A-Za-z0-9]{1,5}$/.test(qExt) ? qExt : '.mp4');
+
+    // 1. 로컬 사본 우선. 트래픽 0, 디스크에서 바로 — 프리뷰가 즉시 뜨는 경로다.
+    //    Omni 는 캐시 파일 이름이 내용 해시라 taskId 로 유추할 수 없으므로 색인에 적힌
+    //    실제 경로를 먼저 본다. 30일 프루너가 지워갔으면 아래 NCP 경로로 내려간다.
+    const local = row?.local && fs.existsSync(row.local)
+      ? row.local
+      : path.join(CACHE_DIR, `${taskId}${ext}`);
+    if (fs.existsSync(local)) {
+      touchCache(local);
+      return res.sendFile(local); // Range 는 express 가 처리한다
+    }
+
+    // 2. 로컬에 없으면 NCP 에서. 색인이 없으면(재설치 등) 클라이언트가 들고 있던
+    //    project/ext 로 되찾아본다.
+    let url = await presignArchived(indexId);
+    if (!url && typeof req.query.project === 'string' && req.query.project) {
+      const prov = req.query.provider === 'google' ? 'google' : 'seedance';
+      url = await recoverFromHints(taskId, prov, String(req.query.project), ext);
+    }
+    if (!url) return res.status(404).json({ error: 'not archived' });
+
+    try {
+      const range = req.headers.range;
+      const upstream = await fetch(url, { headers: range ? { Range: range } : {} });
+      if (!upstream.ok && upstream.status !== 206) {
+        return res.status(502).json({ error: `NCP ${upstream.status}` });
+      }
+      res.status(upstream.status);
+      for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+        const v = upstream.headers.get(h);
+        if (v) res.setHeader(h, v);
+      }
+      if (!upstream.body) return res.end();
+      Readable.fromWeb(upstream.body as any).pipe(res);
+    } catch (e: any) {
+      res.status(502).json({ error: `NCP 재생 실패: ${e?.message || e}` });
+    }
   });
 
   // NOTE: There is intentionally no "upload + R2 in one step" endpoint anymore.
@@ -930,6 +1084,11 @@ async function startServer() {
     console.log('[Gemini] Omni generate...');
     try {
       const body: any = req.body && typeof req.body === 'object' ? req.body : {};
+      // 앱 전용 필드. NCP 폴더 이름으로만 쓰고 구글로는 절대 보내지 않는다 —
+      // Interactions API 는 모르는 필드에 400 을 낸다(BytePlus 쪽 `project` 와 같은 취급).
+      const _archiveProject = typeof body.project === 'string' ? body.project : '';
+      const _archiveModel = typeof body.model === 'string' ? body.model : '';
+      delete body.project;
       // Resolve inline-uploaded media (Edit source video) → Files API uri, since the
       // resumable upload needs the server-held key. The client marks the video part
       // with `_uploadCacheId` (preferred — server reads the bytes straight off the
@@ -1035,6 +1194,10 @@ async function startServer() {
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, buf);
       console.log(`[Gemini] ok — interaction ${data.id}, ${(buf.length / 1048576).toFixed(2)}MB → ${cacheId}`);
+      // Omni 도 같은 보관소로 보낸다. 24시간 만료 문제는 없지만 media-cache 는 30일
+      // 프루너에 지워지고 그 PC 에서만 유효하다 — 결과물이 사라지는 건 마찬가지다.
+      // 파일이 이미 로컬에 있으므로 다운로드 단계를 건너뛴다.
+      enqueueArchive({ taskId: data.id, provider: 'google', project: _archiveProject, ext: '.mp4', model: _archiveModel, localPath: cachePath });
       res.json({ id: data.id, status: data.status || 'completed', videoUrl: `/api/cache/${cacheId}`, usage: data.usage });
     } catch (error: any) {
       // node's fetch reports every transport failure as the bare string "fetch failed",
@@ -1164,6 +1327,24 @@ async function startServer() {
             timestamp: Date.now(),
           }),
         }).catch(() => {});
+      }
+
+      // 성공 → NCP 보관 예약. 반드시 아래 taskToProject.delete 보다 먼저 읽어야 한다.
+      // 폴더 이름이 프로젝트라서 그 값이 사라진 뒤엔 어디에 넣을지 알 수 없다.
+      // 큐잉만 하고 즉시 넘어간다 — 폴링 응답은 8초 안에 끝나야 한다.
+      if (data?.status === 'succeeded' && data?.content?.video_url) {
+        const srcUrl = String(data.content.video_url);
+        // 확장자는 URL 에서 뽑는다. 2.5 는 .mov 를 준다. 이 URL 은 24시간 뒤 없어지므로
+        // 지금 결정해 두지 않으면 나중에는 확정할 방법이 없다.
+        const ext = (srcUrl.split('?')[0].match(/\.(mp4|mov|m4v|webm)$/i) || ['.mp4'])[0].toLowerCase();
+        enqueueArchive({
+          taskId: req.params.id,
+          provider: 'seedance',
+          project: taskToProject.get(req.params.id) || '',
+          ext,
+          model: typeof data.model === 'string' ? data.model : '',
+          sourceUrl: srcUrl,
+        });
       }
 
       // Terminal status → clean up R2 inputs we tracked at submit time.

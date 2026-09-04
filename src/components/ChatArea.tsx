@@ -97,7 +97,7 @@ const CAN_PLAY_HEVC = (() => {
 
 // Exported for the all-projects gallery (GlobalGallery). Lazy-mounts on intersection,
 // so a grid of hundreds of clips only ever fetches the handful actually on screen.
-export function VideoPlayer({ src, className, eager, is4k }: { src: string; className?: string; eager?: boolean; is4k?: boolean }) {
+export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src: string; fallbackSrc?: string; className?: string; eager?: boolean; is4k?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(eager === true);
@@ -105,6 +105,20 @@ export function VideoPlayer({ src, className, eager, is4k }: { src: string; clas
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const blobUrlRef = useRef<string | null>(null);
+
+  // 재생 소스는 두 단이다. 1순위는 NCP 보관본(/api/media/{taskId} — 로컬 사본이 있으면
+  // 디스크에서 바로 나오고, 없으면 서버가 NCP 에서 흘려준다), 2순위는 생성 API 가 준
+  // 원본 URL 이다. 갓 만든 영상은 아직 보관 전이라 1순위가 404 인 게 정상이므로,
+  // 실패를 오류로 취급하지 않고 조용히 2순위로 내려간다.
+  const [activeSrc, setActiveSrc] = useState(src);
+  const fellBack = useRef(false);
+  useEffect(() => { setActiveSrc(src); fellBack.current = false; }, [src]);
+  const goFallback = () => {
+    if (fellBack.current || !fallbackSrc || fallbackSrc === activeSrc) return false;
+    fellBack.current = true;
+    setActiveSrc(fallbackSrc);
+    return true;
+  };
 
   useEffect(() => {
     if (eager) return; // eager mode: skip observer, mount immediately
@@ -190,7 +204,8 @@ export function VideoPlayer({ src, className, eager, is4k }: { src: string; clas
   // anything. (moov sits at the end of these files, but Chromium's range requests
   // handle that fine — measured, not assumed.)
   useEffect(() => {
-    if (!mounted || !src || is4k) return;
+    if (!mounted || !activeSrc || is4k) return;
+    const src = activeSrc;
     const cached = getCachedBlob(src);
     if (cached) {
       const url = URL.createObjectURL(cached);
@@ -218,6 +233,8 @@ export function VideoPlayer({ src, className, eager, is4k }: { src: string; clas
       })
       .catch(() => {
         if (cancelled) return;
+        // 보관 전이라 /api/media 가 404 인 경우가 대부분이다 — 원본으로 내려가면 된다.
+        if (goFallback()) return;
         setLoading(false);
         setFailed(true);
       });
@@ -229,7 +246,7 @@ export function VideoPlayer({ src, className, eager, is4k }: { src: string; clas
       }
       setBlobSrc(null);
     };
-  }, [src, mounted]);
+  }, [activeSrc, mounted]);
 
   return (
     <div
@@ -262,7 +279,9 @@ export function VideoPlayer({ src, className, eager, is4k }: { src: string; clas
       ) : mounted && (blobSrc || failed || is4k) && (
         <video
           ref={videoRef}
-          src={blobSrc || src}
+          src={blobSrc || activeSrc}
+          // 4k 는 blob 을 거치지 않고 직접 스트리밍하므로, 보관 전 404 는 여기서 잡힌다.
+          onError={() => { goFallback(); }}
           controls
           playsInline
           // 4k streams straight from the CDN, so only ask for metadata up-front instead
@@ -383,6 +402,30 @@ const OMNI_TASK_LABELS: Record<string, string> = {
 };
 // Settings chips for a message / preview card. Omni shows its task + fixed 720p (its
 // `mode` field is a stale Seedance leftover); Seedance shows mode / resolution as before.
+/**
+ * 재생 소스 1순위 — NCP 보관본. 서버가 로컬 사본을 갖고 있으면 디스크에서 바로 나오고,
+ * 없으면 NCP 에서 흘려준다. 아직 보관 전이면 404 가 나고 VideoPlayer 가 fallbackSrc
+ * (생성 API 가 준 원본 URL)로 조용히 내려간다. 그래서 호출부는 항상 둘 다 넘긴다.
+ *
+ * project/ext 를 쿼리로 함께 보내는 것은 서버가 색인을 잃었을 때(재설치 등)의 복구용이다.
+ * 평소에는 서버 색인만으로 충분하다.
+ */
+export function mediaSrcFor(m: { taskId?: string; videoUrl?: string; usedSettings?: any; videoStorage?: { project?: string; ext?: string } }): string {
+  if (!m.taskId || !m.videoUrl) return m.videoUrl || '';
+  const q = new URLSearchParams();
+  if (m.videoStorage?.ext) q.set('ext', m.videoStorage.ext);
+  if (m.videoStorage?.project) q.set('project', m.videoStorage.project);
+  // 보관 경로의 최상위 폴더. 모델에서 유도하므로 따로 저장할 필요가 없다.
+  q.set('provider', archiveProviderOf(m.usedSettings?.model));
+  const s = q.toString();
+  return `/api/media/${encodeURIComponent(m.taskId)}${s ? `?${s}` : ''}`;
+}
+
+/** NCP 최상위 폴더 이름. store 의 provider('byteplus'|'gemini')를 보관소 용어로 옮긴다. */
+export function archiveProviderOf(model?: string): 'seedance' | 'google' {
+  return modelProvider(model || '') === 'gemini' ? 'google' : 'seedance';
+}
+
 const settingsTagList = (us: any, videoUrl?: string): string[] => {
   if (!us) return [];
   // Two Omni models now ship side by side, so the chip has to tell them apart in ~90px:
@@ -2043,7 +2086,9 @@ export function ChatArea() {
     for (let i = 0; i < outputCount; i++) {
       const id = crypto.randomUUID();
       systemMessageIds.push(id);
-      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages } as any);
+      // 보낼 때의 프로젝트를 메시지에 굽는다. billingProject 는 세션 전용이라 앱을 껐다
+      // 켜면 비어 있고, 시트에서 이름이 바뀔 수도 있다 — NCP 폴더를 되찾는 힌트다.
+      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, videoStorage: { project: useAppStore.getState().billingProject } } as any);
     }
     setTimeout(() => scrollToBottom(), 150);
 
@@ -2366,7 +2411,7 @@ export function ChatArea() {
       const ids: string[] = [];
       for (let i = 0; i < count; i++) {
         const id = crypto.randomUUID(); ids.push(id);
-        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages } as any);
+        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, videoStorage: { project: useAppStore.getState().billingProject } } as any);
       }
       setTimeout(() => scrollToBottom(), 150);
 
@@ -2389,12 +2434,14 @@ export function ChatArea() {
         // fetch is fired unawaited, so a long wait holds one card open and nothing else.
         const timer = window.setTimeout(() => ctrl.abort(), 2400000);
         try {
-          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: ctrl.signal });
+          // project 는 앱 전용 필드다 — 서버가 NCP 폴더 이름으로만 쓰고 구글로 보내기 전에 지운다.
+          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, project: useAppStore.getState().billingProject }), signal: ctrl.signal });
           const t = await r.text();
           let d: any; try { d = JSON.parse(t); } catch { throw new Error(`서버 응답 오류 (${r.status})`); }
           if (!r.ok) throw new Error(d.error || `생성 오류 (${r.status})`);
           if (!d.videoUrl) throw new Error('영상 URL을 받지 못했습니다.');
-          updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', endTime: Date.now() });
+          // Omni 는 서버가 항상 .mp4 로 캐시에 쓴다.
+          updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', videoStorage: { project: useAppStore.getState().billingProject, ext: '.mp4' }, endTime: Date.now() });
         } catch (error: any) {
           const msg = error.name === 'AbortError'
             ? '응답 없이 40분이 지나 중단했습니다.\n4K 이어붙이기는 20분 이상 걸리는 게 정상이지만 여기까지는 아닙니다 — 요청이 중간에 끊겼거나 앱이 재시작된 경우입니다.'
@@ -2568,7 +2615,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer src={previewItem.videoUrl} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
+              <VideoPlayer src={mediaSrcFor(previewItem)} fallbackSrc={previewItem.videoUrl} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -2704,7 +2751,7 @@ export function ChatArea() {
                   style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                   className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200" >
                   <div className="aspect-video bg-black relative group">
-                    <VideoPlayer src={item.videoUrl!} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    <VideoPlayer src={mediaSrcFor(item)} fallbackSrc={item.videoUrl} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
                     <ClipStamp ms={item.timestamp} />
                     {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
                     <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}
@@ -2893,7 +2940,7 @@ export function ChatArea() {
                         <div className="space-y-3">
                           {msg.videoUrl && (
                             <div className="relative">
-                              <VideoPlayer src={msg.videoUrl} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                              <VideoPlayer src={mediaSrcFor(msg)} fallbackSrc={msg.videoUrl} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
                               <ClipStamp ms={msg.timestamp} />
                             </div>
                           )}

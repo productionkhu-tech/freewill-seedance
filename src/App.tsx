@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
-import { ChatArea } from './components/ChatArea';
+import { ChatArea, archiveProviderOf } from './components/ChatArea';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useAppStore } from './store';
 
@@ -56,6 +56,40 @@ export default function App() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: [...ids] }),
     }).catch(() => { /* 캐시 수명 연장 실패는 조용히 넘어간다 */ });
+  }, [_hasHydrated]);
+
+  // 소급 보관 — 이 패치 전에 만든 영상 중 원본 링크가 아직 살아있는 것을 NCP 로 옮긴다.
+  //
+  // 이 기능은 원래 "앞으로 만들 영상"만 지킨다. 하지만 최근 24시간 안에 만든 것은
+  // 링크가 아직 유효해서 지금 올리면 건질 수 있고, 자동 다운로드가 기본 꺼짐이라
+  // 그 영상들에는 다른 사본이 없다 — 놓치면 그냥 사라진다.
+  // 링크가 죽은 옛 영상은 서버가 세 번 시도하고 큐에서 버린다.
+  //
+  // 최신순 300건만 보낸다. 그보다 오래된 것은 어차피 링크가 죽어 있다.
+  useEffect(() => {
+    if (!_hasHydrated) return;
+    const items: { taskId: string; provider: string; project: string; ext: string; model: string; videoUrl: string; at: number }[] = [];
+    for (const p of useAppStore.getState().projects) {
+      for (const m of p.messages) {
+        // http 로 시작하는 것만. Omni 결과는 /api/cache/... 로컬 경로라 서버가 이미 갖고 있다.
+        if (m.status !== 'succeeded' || !m.taskId || !m.videoUrl?.startsWith('http')) continue;
+        items.push({
+          taskId: m.taskId,
+          provider: archiveProviderOf(m.usedSettings?.model),
+          project: m.videoStorage?.project || '',
+          ext: m.videoStorage?.ext || '.mp4',
+          model: m.usedSettings?.model || '',
+          videoUrl: m.videoUrl,
+          at: m.endTime || m.timestamp || 0,
+        });
+      }
+    }
+    if (!items.length) return;
+    items.sort((a, b) => b.at - a.at);
+    fetch('/api/archive/backfill', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: items.slice(0, 300) }),
+    }).catch(() => { /* 소급 보관 실패는 조용히 — 다음 실행에 다시 시도한다 */ });
   }, [_hasHydrated]);
 
   // Ask the browser not to throw our storage away. Without this an origin's IndexedDB is
