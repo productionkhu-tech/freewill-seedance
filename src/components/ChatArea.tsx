@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor } from '../store';
 import { resolveModelId } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -517,15 +517,13 @@ export async function downloadClip(msgId: string, videoUrl: string, taskId: stri
     const st = useAppStore.getState();
     const owner = st.projects.find(p => p.messages.some(m => m.id === msgId));
     if (!owner) return;
-    // Omni's taskId is a huge Gemini interaction id (v1_Ch…) and "dreamina" is the wrong
-    // brand for it — name Omni downloads "omni-<date>-<short cache id>" from the served URL.
+    // 이름 규칙은 자동 다운로드와 같은 함수를 쓴다 (store.ts / downloadFilenameFor).
+    // 규칙이 두 벌이면 반드시 갈라진다 — 실제로 Omni 의 짧은 이름 규칙은 여기에만
+    // 있었고 자동 다운로드 쪽에는 규칙 자체가 없었다.
+    // 확장자는 이 클립이 실제로 가진 URL 에서 뽑는다(2.5 → .mov). 프로젝트의 현재
+    // 모델이 아니라 이 클립을 만든 모델을 쓴다 — 그 사이 바뀌었을 수 있다.
     const msgModel = owner.messages.find(m => m.id === msgId)?.usedSettings?.model || '';
-    const isOmniMsg = modelProvider(msgModel) === 'gemini';
-    // Extension comes off the URL this clip actually has (2.5 → .mov), with the model that
-    // made it as fallback — not the project's CURRENT model, which may have changed since.
-    const filename = isOmniMsg
-      ? buildDownloadFilename((videoUrl.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId), '.mp4', 'omni')
-      : buildDownloadFilename(taskId, videoExtFor(videoUrl, msgModel));
+    const filename = downloadFilenameFor({ videoUrl, taskId, usedSettings: { model: msgModel } as any });
     // Remember which message this filename belongs to. The Electron download path only
     // learns the save path once 'download-done' fires, long after this call returns.
     pendingReveal.set(filename, msgId);
@@ -2471,17 +2469,6 @@ export function ChatArea() {
           if (!d.videoUrl) throw new Error('영상 URL을 받지 못했습니다.');
           // Omni 는 서버가 항상 .mp4 로 캐시에 쓴다.
           updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', videoStorage: { project: useAppStore.getState().billingProject, ext: '.mp4' }, endTime: Date.now() });
-          // 자동 다운로드. Seedance 는 폴링 핸들러(store.ts)에서 처리하는데 Omni 는 폴링을
-          // 타지 않아(동기 응답) 여기 배선이 아예 없었다 — 켜두어도 구글 결과만 조용히
-          // 안 받아졌다. 이름 규칙은 수동 다운로드(downloadClip)와 같게 맞춘다: Omni 의
-          // taskId 는 거대한 Gemini interaction id 라 그대로 쓰면 파일명이 못 쓸 만큼 길다.
-          // downloadedAt 은 일부러 안 남긴다 — 그 표시는 수동 클릭 전용이다(Seedance 와 동일).
-          if (useAppStore.getState().autoDownload && d.videoUrl) {
-            downloadViaProxy(
-              d.videoUrl,
-              buildDownloadFilename((String(d.videoUrl).match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || d.id), '.mp4', 'omni'),
-            ).catch(err => console.warn('[AutoDownload] Omni 실패:', err?.message || err));
-          }
         } catch (error: any) {
           const msg = error.name === 'AbortError'
             ? '응답 없이 40분이 지나 중단했습니다.\n4K 이어붙이기는 20분 이상 걸리는 게 정상이지만 여기까지는 아닙니다 — 요청이 중간에 끊겼거나 앱이 재시작된 경우입니다.'

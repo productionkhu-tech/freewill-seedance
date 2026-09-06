@@ -1113,6 +1113,40 @@ export function modelAllowsAudioOnly(model: string): boolean {
   return MODELS.find(m => m.id === model)?.audioOnly === true;
 }
 
+/**
+ * 저장 파일 이름. 자동 다운로드와 수동 다운로드가 이 함수 하나만 쓴다.
+ *
+ * 규칙이 두 벌이면 반드시 갈라진다 — 실제로 Omni 는 수동 쪽에만 짧은 이름 규칙이
+ * 있었고 자동 쪽에는 규칙 자체가 없었다.
+ *   Seedance : dreamina-<날짜>-<taskId>.mp4|.mov   (2.5 는 .mov)
+ *   Omni     : omni-<날짜>-<캐시id>.mp4
+ * Omni 의 taskId 는 거대한 Gemini interaction id(v1_Ch…)라 그대로 쓰면 파일명이
+ * 못 쓸 만큼 길어진다. 그래서 /api/cache/<id>.mp4 의 짧은 id 를 쓴다.
+ */
+export function downloadFilenameFor(m: Pick<ChatMessage, 'videoUrl' | 'taskId' | 'usedSettings'>): string {
+  const url = m.videoUrl || '';
+  const model = m.usedSettings?.model || '';
+  const taskId = m.taskId || 'unknown';
+  return modelProvider(model) === 'gemini'
+    ? buildDownloadFilename(url.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId, '.mp4', 'omni')
+    : buildDownloadFilename(taskId, videoExtFor(url, model));
+}
+
+// 결과물 하나당 정확히 한 번만 받는다. updateMessage 가 "이번에 처음 성공"일 때만
+// 부르지만, 그 판정이 어긋나는 날을 대비해 메시지 id 로 한 겹 더 막는다. 이 Set 은
+// 프로세스 수명 동안만 산다 — 앱을 다시 켜면 이미 succeeded 라 애초에 안 걸린다.
+const autoDownloaded = new Set<string>();
+function fireAutoDownload(m: ChatMessage) {
+  if (!useAppStore.getState().autoDownload) return;
+  if (!m.videoUrl || autoDownloaded.has(m.id)) return;
+  autoDownloaded.add(m.id);
+  // downloadedAt 은 남기지 않는다 — 그 표시는 수동 클릭("다시 다운로드") 전용이다.
+  // 저장 폴더는 여기서 정하지 않는다. 폴더 지정(sessionDownloadDir)은 electron 쪽
+  // will-download / saveBlob 이 공통으로 처리하므로 레인과 무관하게 따라온다.
+  downloadViaProxy(m.videoUrl, downloadFilenameFor(m))
+    .catch(err => console.warn('[AutoDownload] 실패:', err?.message || err));
+}
+
 // The key an @mention actually resolves on. Paste-to-mention matches a typed name against
 // element names case-insensitively and ignoring spaces, so "Don Moretti", "don moretti"
 // and "donmoretti" are ONE name as far as the prompt is concerned.
@@ -1820,19 +1854,37 @@ export const useAppStore = create<AppState>()(
         }));
       },
       updateMessage: (projectId, messageId, updates) => {
+        // 자동 다운로드를 여기서 건다 — 레인마다 따로 배선하지 않는다.
+        //
+        // ★ 예전에는 레인별로 붙였다. Seedance 는 폴링 핸들러에, Omni 는 아무 데도.
+        //   Omni 가 폴링을 타지 않는다는 이유로 통째로 빠졌고, 스위치는 켜져 있는데
+        //   구글 결과만 조용히 저장 안 되는 상태가 오래 갔다. 오류도 로그도 없었다.
+        //   결과물이 생기는 길은 앞으로도 늘어난다(모델·모드·새 벤더). 그때마다
+        //   기억해서 배선해야 한다면 언젠가 또 빠뜨린다.
+        //   성공은 무엇이 만들었든 반드시 이 함수를 지나가므로, 여기 한 곳에 두면
+        //   새 레인은 아무것도 안 해도 자동으로 딸려 온다.
+        let justSucceeded: ChatMessage | null = null;
         set((state) => ({
           projects: state.projects.map((p) =>
             p.id === projectId
               ? {
                   ...p,
-                  messages: p.messages.map((m) =>
-                    m.id === messageId ? { ...m, ...updates } : m
-                  ),
+                  messages: p.messages.map((m) => {
+                    if (m.id !== messageId) return m;
+                    const next = { ...m, ...updates };
+                    // "이번에 처음 성공했는가" — 이미 succeeded 인 것에 별표를 달거나
+                    // 다운로드 경로를 적는 등의 후속 update 에는 걸리지 않는다.
+                    if (m.status !== 'succeeded' && next.status === 'succeeded' && next.videoUrl) {
+                      justSucceeded = next;
+                    }
+                    return next;
+                  }),
                   updatedAt: Date.now(),
                 }
               : p
           ),
         }));
+        if (justSucceeded) fireAutoDownload(justSucceeded);
       },
       deleteMessage: (projectId, messageId) => {
         set((state) => ({
@@ -1908,15 +1960,8 @@ export const useAppStore = create<AppState>()(
             // means completed videos are NEVER re-polled, so auto-download can't
             // fire twice for the same video.
             void flushPersist();
-            // Auto-download: this succeeded block runs exactly once per task
-            // (line ~343 early-returns once succeeded, and App.tsx only polls
-            // running/queued), so no per-message guard is needed. Does NOT set
-            // downloadedAt — that marker is manual-click only ("다시 다운로드").
-            if (get().autoDownload && contentData?.video_url) {
-              // Extension comes off the returned URL (2.5 → .mov), model only as fallback.
-              downloadViaProxy(contentData.video_url, buildDownloadFilename(taskId, videoExtFor(contentData.video_url, message.usedSettings?.model || '')))
-                .catch(err => console.warn('[AutoDownload] failed:', err?.message || err));
-            }
+            // 자동 다운로드는 updateMessage 한 곳에서 건다(fireAutoDownload). 레인마다
+            // 배선하던 것을 걷어낸 자리다 — Omni 가 빠졌던 이유가 그 구조였다.
             // Full pre-fetch into memory cache → subsequent download saves from RAM (zero CDN round-trip).
             // Validate response before caching: a 404/500 body would otherwise be served as a "video"
             // resulting in blank playback and broken downloads.
