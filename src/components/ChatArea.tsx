@@ -2471,6 +2471,17 @@ export function ChatArea() {
           if (!d.videoUrl) throw new Error('영상 URL을 받지 못했습니다.');
           // Omni 는 서버가 항상 .mp4 로 캐시에 쓴다.
           updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', videoStorage: { project: useAppStore.getState().billingProject, ext: '.mp4' }, endTime: Date.now() });
+          // 자동 다운로드. Seedance 는 폴링 핸들러(store.ts)에서 처리하는데 Omni 는 폴링을
+          // 타지 않아(동기 응답) 여기 배선이 아예 없었다 — 켜두어도 구글 결과만 조용히
+          // 안 받아졌다. 이름 규칙은 수동 다운로드(downloadClip)와 같게 맞춘다: Omni 의
+          // taskId 는 거대한 Gemini interaction id 라 그대로 쓰면 파일명이 못 쓸 만큼 길다.
+          // downloadedAt 은 일부러 안 남긴다 — 그 표시는 수동 클릭 전용이다(Seedance 와 동일).
+          if (useAppStore.getState().autoDownload && d.videoUrl) {
+            downloadViaProxy(
+              d.videoUrl,
+              buildDownloadFilename((String(d.videoUrl).match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || d.id), '.mp4', 'omni'),
+            ).catch(err => console.warn('[AutoDownload] Omni 실패:', err?.message || err));
+          }
         } catch (error: any) {
           const msg = error.name === 'AbortError'
             ? '응답 없이 40분이 지나 중단했습니다.\n4K 이어붙이기는 20분 이상 걸리는 게 정상이지만 여기까지는 아닙니다 — 요청이 중간에 끊겼거나 앱이 재시작된 경우입니다.'
