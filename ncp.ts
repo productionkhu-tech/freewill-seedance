@@ -164,7 +164,9 @@ export function objectKeyFor(provider: Provider, project: string, taskId: string
 // 확장자(.mp4 / 2.5 는 .mov)는 API 가 돌려준 URL 에서 뽑는데 그 URL 은 24시간 뒤 없다.
 // local: 로컬 사본의 실제 경로. Omni 는 파일 이름이 내용 해시라 taskId 로 유추할 수 없어서
 // 여기 적어 둔다 — 프리뷰가 NCP 를 안 타고 디스크에서 바로 나오는 경로다.
-type IndexRow = { key: string; bucket: string; size: number; at: number; project: string; local?: string };
+type IndexRow = { key: string; bucket: string; size: number; at: number; project: string; local?: string;
+  /** 목록 썸네일이 NCP 에 있는가. 없으면 카드가 볼 때 만들어 올린다. */
+  poster?: boolean };
 let INDEX_FILE = '';
 const mediaIndex = new Map<string, IndexRow>();
 
@@ -482,4 +484,78 @@ export function archiveStats() {
     failing: [...queue.values()].filter(j => j.tries > 0).length,
     gaveUp: gaveUp.size, // 링크가 만료돼 되살릴 수 없다고 판단한 건수
   };
+}
+
+// ── 포스터(목록 썸네일) ──────────────────────────────────────────────────────
+//
+// 왜 필요한가: 갤러리 카드가 <video> 를 마운트하면서 영상을 통째로 받는다. 실측으로
+// 464장을 훑으면 2.2GB 다. 포스터는 같은 장면을 1280x720 WebP 로 16~34KB 에 담는다
+// (실측: 13MB 4K → 34KB, 3.9MB 1080p → 16KB). 카드 폭이 350~400px 이므로 2배 밀도
+// 화면에서도 남는 해상도다 — 화질을 깎는 게 아니라, 목록에 원본을 내려받던 게 낭비였다.
+//
+// ★ 포스터를 NCP 에 두는 이유. 브라우저 캔버스로 뜨는데, 4K HEVC 는 코덱이 없는 PC 에서
+//   디코딩이 안 돼 캡처도 안 된다. 로컬에만 두면 그 PC 는 영영 썸네일이 없다. 공유
+//   저장소에 두면 코덱이 있는 팀원 PC 가 한 번만 만들어도 전원이 본다. 코덱을 나중에
+//   깔아도 마찬가지다 — 실패는 영구적이지 않고, 다음에 볼 때 다시 시도한다.
+//
+// 키는 영상과 나란히 둔다: {brand}/{프로젝트}/{taskId}.webp
+
+/** 이 영상의 포스터가 이미 있는가 (색인 기준). */
+export function hasPoster(taskId: string): boolean {
+  return mediaIndex.get(taskId)?.poster === true;
+}
+
+/**
+ * 포스터 저장. 영상 보관과 달리 실패해도 조용히 넘어간다 — 썸네일은 없으면 불편할 뿐
+ * 데이터가 사라지는 게 아니고, 다음에 볼 때 다시 만들면 된다.
+ */
+export async function putPoster(
+  taskId: string, provider: Provider, project: string, body: Buffer,
+): Promise<boolean> {
+  const ncp = await ensureNcp();
+  if (!ncp) return false;
+  const key = objectKeyFor(provider, project, taskId, '.webp');
+  try {
+    // 작아서(수십 KB) 스트리밍이 필요 없다 — Buffer 로 바로 올린다.
+    await ncp.client.send(new PutObjectCommand({
+      Bucket: ncp.bucket, Key: key, Body: body, ContentType: 'image/webp',
+    }));
+    const row = mediaIndex.get(taskId);
+    if (row) { row.poster = true; saveIndex(); }
+    else {
+      // 영상 보관이 아직/영영 안 된 경우에도 포스터는 남을 수 있다. 그 자리를 만들어 둔다.
+      mediaIndex.set(taskId, {
+        key: objectKeyFor(provider, project, taskId, '.mp4'),
+        bucket: ncp.bucket, size: 0, at: Date.now(), project, poster: true,
+      });
+      saveIndex();
+    }
+    console.log(`[NCP] 포스터 저장 ${key} — ${(body.length / 1024).toFixed(0)}KB`);
+    return true;
+  } catch (e: any) {
+    console.warn(`[NCP] 포스터 저장 실패 ${key}: ${e?.message || e}`);
+    return false;
+  }
+}
+
+/** 포스터 서명 URL. 색인에 없으면 힌트(provider/project)로 직접 찾아본다. */
+export async function presignPoster(
+  taskId: string, provider?: Provider, project?: string,
+): Promise<string | null> {
+  const ncp = await ensureNcp();
+  if (!ncp) return null;
+  const row = mediaIndex.get(taskId);
+  const key = row
+    ? row.key.replace(/\.[A-Za-z0-9]+$/, '.webp')
+    : (provider && project ? objectKeyFor(provider, project, taskId, '.webp') : null);
+  if (!key) return null;
+  if (!row?.poster) {
+    // 색인이 모르는 경우(재설치 등) 실제로 있는지 확인하고 색인을 되살린다.
+    try { await ncp.client.send(new HeadObjectCommand({ Bucket: ncp.bucket, Key: key })); }
+    catch { return null; }
+    if (row) { row.poster = true; saveIndex(); }
+  }
+  return getSignedUrl(ncp.client, new GetObjectCommand({ Bucket: ncp.bucket, Key: key }), {
+    expiresIn: ncp.presignExpires,
+  });
 }

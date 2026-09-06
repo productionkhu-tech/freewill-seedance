@@ -97,9 +97,24 @@ const CAN_PLAY_HEVC = (() => {
 
 // Exported for the all-projects gallery (GlobalGallery). Lazy-mounts on intersection,
 // so a grid of hundreds of clips only ever fetches the handful actually on screen.
-export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src: string; fallbackSrc?: string; className?: string; eager?: boolean; is4k?: boolean }) {
+export function VideoPlayer({ src, fallbackSrc, className, eager, is4k, poster, posterOf }: {
+  src: string; fallbackSrc?: string; className?: string; eager?: boolean; is4k?: boolean;
+  /** 목록 썸네일 주소. 주면 카드가 이 이미지로 뜨고, 영상은 마우스를 올릴 때 붙는다. */
+  poster?: string;
+  /** 포스터가 아직 없을 때 만들어 올리기 위한 메시지 정보. */
+  posterOf?: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } };
+}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // 포스터 모드: 목록에서는 <img> 만 띄우고 <video> 는 아예 만들지 않는다.
+  // content-visibility 는 그리기만 건너뛸 뿐 네트워크와 비디오 디코더는 못 막는다 —
+  // 갤러리가 무거웠던 진짜 이유가 그것이고, 여기서 끊는다.
+  // posterState: 'checking' 아직 모름 · 'ok' 이미지 있음 · 'none' 없음(영상으로 대체)
+  const [posterState, setPosterState] = useState<'checking' | 'ok' | 'none'>(poster ? 'checking' : 'none');
+  const [wantVideo, setWantVideo] = useState(!poster);
+  const showPoster = posterState === 'ok' && !wantVideo;
+
   const [mounted, setMounted] = useState(eager === true);
   const [blobSrc, setBlobSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -180,6 +195,8 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src:
   // Hover-to-play with sound. Leaving the card just pauses — we keep the current
   // playback position so the next hover resumes from where the user was watching.
   const handleMouseEnter = () => {
+    // 포스터가 떠 있으면 여기서 영상으로 바꾼다 — 목록을 훑는 동안에는 이미지만 산다.
+    if (showPoster) { setWantVideo(true); return; }
     const v = videoRef.current;
     if (!v) return;
     v.muted = false;
@@ -204,6 +221,9 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src:
   // anything. (moov sits at the end of these files, but Chromium's range requests
   // handle that fine — measured, not assumed.)
   useEffect(() => {
+    // ★ 포스터가 떠 있으면 영상을 아예 받지 않는다. 그리기만 막고 이 fetch 를 놔두면
+    //   목록이 여전히 카드마다 4.8MB 를 내려받아서, 포스터를 넣은 의미가 없어진다.
+    if (showPoster) return;
     if (!mounted || !activeSrc || is4k) return;
     const src = activeSrc;
     const cached = getCachedBlob(src);
@@ -246,7 +266,7 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src:
       }
       setBlobSrc(null);
     };
-  }, [activeSrc, mounted]);
+  }, [activeSrc, mounted, showPoster]);
 
   return (
     <div
@@ -258,8 +278,26 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src:
       onPointerDownCapture={rememberScroll}
       className={`${className} aspect-video bg-black flex items-center justify-center relative`}
     >
-      {!mounted && <Play size={40} className="text-white/30" />}
-      {mounted && loading && !blobSrc && !is4k && (
+      {/* 목록 썸네일. 마우스를 올리거나 누르면 영상으로 바뀐다. */}
+      {showPoster && (
+        <img
+          src={poster}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onLoad={() => setPosterState('ok')}
+          onError={() => { setPosterState('none'); setWantVideo(true); }}
+          className="w-full h-full object-contain"
+        />
+      )}
+      {/* 포스터가 있는지 확인하는 동안에는 아무것도 받지 않는다. 없으면(404) 영상으로 간다. */}
+      {posterState === 'checking' && (
+        <img src={poster} alt="" className="hidden"
+          onLoad={() => setPosterState('ok')}
+          onError={() => { setPosterState('none'); setWantVideo(true); }} />
+      )}
+      {!showPoster && !mounted && <Play size={40} className="text-white/30" />}
+      {!showPoster && mounted && loading && !blobSrc && !is4k && (
         <Loader2 size={32} className="text-white/60 animate-spin" />
       )}
       {/* 4k is HEVC — a machine without the platform decoder renders a black frame and
@@ -285,12 +323,16 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src:
             생성 결과 보관은 이 버전부터 적용됩니다.<br />자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.
           </p>
         </div>
-      ) : mounted && (blobSrc || failed || is4k) && (
+      ) : !showPoster && mounted && (blobSrc || failed || is4k) && (
         <video
           ref={videoRef}
           src={blobSrc || activeSrc}
           // 4k 는 blob 을 거치지 않고 직접 스트리밍하므로, 보관 전 404 는 여기서 잡힌다.
           onError={() => { goFallback(); }}
+          // 포스터가 없어서 영상을 띄운 경우, 첫 프레임을 떠서 올려둔다. 다음부터는
+          // 이 카드도 16~34KB 이미지로 뜬다. 코덱이 없어 디코딩이 안 되면 여기까지
+          // 오지 않으므로(onError 로 빠진다) 아무 기록도 남기지 않고, 다음 기회에 다시 한다.
+          onLoadedData={(e) => { if (posterOf && posterState === 'none') void capturePoster(e.currentTarget, posterOf); }}
           controls
           playsInline
           // 4k streams straight from the CDN, so only ask for metadata up-front instead
@@ -438,6 +480,48 @@ export function mediaSrcFor(m: { taskId?: string; videoUrl?: string; usedSetting
  */
 export function archiveProviderOf(model?: string): string {
   return brandOf(model);
+}
+
+/** 목록 썸네일 주소. 없으면 서버가 404 를 주고, 카드가 그때 만들어 올린다. */
+export function posterSrcFor(m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } }): string {
+  if (!m.taskId) return '';
+  const q = new URLSearchParams();
+  q.set('provider', archiveProviderOf(m.usedSettings?.model));
+  if (m.videoStorage?.project) q.set('project', m.videoStorage.project);
+  return `/api/media/${encodeURIComponent(m.taskId)}/poster?${q.toString()}`;
+}
+
+// 이번 실행에서 이미 캡처를 시도한 taskId. 실패(4K HEVC 등)를 영구 기록으로 남기지
+// 않는 것이 핵심이다 — 코덱을 나중에 깔거나, 코덱이 있는 다른 팀원 PC 가 열면 그때
+// 만들어진다. 포스터는 NCP 에 있으므로 한 번 만들어지면 전원이 본다.
+const posterTried = new Set<string>();
+
+/**
+ * <video> 의 현재 프레임을 떠서 서버로 보낸다. 목록이 4.8MB 짜리 영상을 통째로 받던
+ * 자리를 16~34KB 로 바꾸는 것이 목적이다(실측: 13MB 4K → 34KB, 3.9MB 1080p → 16KB).
+ * 1280 폭이면 카드(350~400px)의 2배 밀도에도 여유가 있다.
+ *
+ * 실패는 조용히 넘어간다. 썸네일이 없으면 지금처럼 영상을 띄우면 될 뿐, 잃는 데이터가 없다.
+ */
+async function capturePoster(video: HTMLVideoElement, m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } }) {
+  const id = m.taskId;
+  if (!id || posterTried.has(id) || !video.videoWidth) return;
+  posterTried.add(id);
+  try {
+    const w = Math.min(1280, video.videoWidth);
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = Math.round(w * video.videoHeight / video.videoWidth);
+    c.getContext('2d')!.drawImage(video, 0, 0, c.width, c.height);
+    const blob: Blob | null = await new Promise(r => c.toBlob(r, 'image/webp', 0.8));
+    if (!blob || blob.size < 256) return;
+    const q = new URLSearchParams();
+    q.set('provider', archiveProviderOf(m.usedSettings?.model));
+    if (m.videoStorage?.project) q.set('project', m.videoStorage.project);
+    await fetch(`/api/media/${encodeURIComponent(id)}/poster?${q.toString()}`, {
+      method: 'POST', headers: { 'Content-Type': 'image/webp' }, body: blob,
+    });
+  } catch { /* 캡처 실패(코덱 없음 등)는 다음 기회에 */ }
 }
 
 /**
@@ -2780,7 +2864,7 @@ export function ChatArea() {
                   style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                   className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200" >
                   <div className="aspect-video bg-black relative group">
-                    <VideoPlayer src={mediaSrcFor(item)} fallbackSrc={originMaybeAlive(item) ? item.videoUrl : undefined} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    <VideoPlayer src={mediaSrcFor(item)} fallbackSrc={originMaybeAlive(item) ? item.videoUrl : undefined} poster={posterSrcFor(item)} posterOf={item} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
                     <ClipStamp ms={item.timestamp} />
                     {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
                     <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}

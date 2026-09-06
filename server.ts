@@ -21,6 +21,7 @@ import { MODEL_GRANTS, brandOf } from './src/lib/model-access';
 import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
   presignArchived, recoverFromHints, lookupArchived, archiveStats,
+  putPoster, presignPoster, hasPoster,
   lastNcpError, resetNcpBackoff,
 } from './ncp';
 
@@ -719,6 +720,45 @@ async function startServer() {
 
   // 보관 상태. :taskId 와 겹치지 않도록 경로를 따로 뒀다.
   app.get('/api/archive/status', (_req, res) => res.json(archiveStats()));
+
+  // ── 목록 썸네일(포스터) ───────────────────────────────────────────────────
+  // ★ /api/media/:taskId 보다 먼저 등록한다. 뒤에 두면 '{taskId}/poster' 가 통째로
+  //   :taskId 로 잡히지 않고 4-세그먼트라 아예 매칭이 안 된다.
+  //
+  // 포스터가 없으면 404 다. 클라이언트는 그걸 신호로 삼아 <video> 를 띄우고, 첫 프레임을
+  // 캔버스로 떠서 아래 POST 로 올린다. 실패해도(4K HEVC 는 코덱 없는 PC 에서 디코딩이
+  // 안 되므로 캡처도 안 된다) 아무 표시를 남기지 않는다 — 다음에 볼 때, 혹은 코덱이 있는
+  // 다른 팀원 PC 가 열 때 만들어진다. 포스터는 NCP 에 있으므로 한 번 만들어지면 전원이 본다.
+  app.get('/api/media/:taskId/poster', async (req, res) => {
+    const taskId = String(req.params.taskId).replace(/[^A-Za-z0-9._-]/g, '');
+    if (!taskId) return res.status(400).end();
+    const prov = typeof req.query.provider === 'string' ? req.query.provider : undefined;
+    const proj = typeof req.query.project === 'string' ? req.query.project : undefined;
+    const url = await presignPoster(taskId, prov, proj);
+    if (!url) return res.status(404).json({ error: 'no poster' });
+    try {
+      const up = await fetch(url);
+      if (!up.ok || !up.body) return res.status(502).end();
+      res.status(200);
+      res.setHeader('Content-Type', 'image/webp');
+      const len = up.headers.get('content-length'); if (len) res.setHeader('Content-Length', len);
+      // 포스터는 내용이 바뀌지 않는다(같은 영상의 같은 프레임). 오래 캐시해도 안전하고,
+      // 그래야 갤러리를 다시 열 때 NCP 를 또 치지 않는다 — 아웃바운드가 과금이다.
+      res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+      Readable.fromWeb(up.body as any).pipe(res);
+    } catch { res.status(502).end(); }
+  });
+
+  app.post('/api/media/:taskId/poster', express.raw({ type: 'image/webp', limit: '2mb' }), async (req, res) => {
+    const taskId = String(req.params.taskId).replace(/[^A-Za-z0-9._-]/g, '');
+    const prov = typeof req.query.provider === 'string' && req.query.provider ? req.query.provider : 'seedance';
+    const proj = typeof req.query.project === 'string' ? req.query.project : '';
+    const buf = req.body as Buffer;
+    if (!taskId || !Buffer.isBuffer(buf) || buf.length < 256) return res.status(400).json({ ok: false });
+    if (hasPoster(taskId)) return res.json({ ok: true, already: true });
+    const ok = await putPoster(taskId, prov, proj, buf);
+    res.json({ ok });
+  });
 
   // 생성 결과물 재생. 클라이언트는 이 경로 하나만 보고, 서명 URL 은 절대 넘기지 않는다.
   // 이유가 셋이고 전부 측정된 것이다:
