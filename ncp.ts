@@ -450,6 +450,16 @@ async function archiveOne(job: Job) {
 
 // ── 재생 ────────────────────────────────────────────────────────────────────
 /** 저장된 객체의 서명 URL. 서명은 로컬 연산이라 매번 새로 만들어도 0.15ms 다. */
+/**
+ * 아직 보관 큐에 남아 있는 작업의 원본 위치. 보관이 끝나기 전에 다운로드를 누르면
+ * 색인에도 NCP 에도 없어 404 였다 — 4K 마스터를 올리는 중이면 그 창이 분 단위로
+ * 벌어진다. 큐가 원본 주소를 이미 들고 있으니, 그동안은 그쪽에서 내보낸다.
+ * ★ 프록시가 아니다. 이 경로로 나가는 것도 언제나 원본이다.
+ */
+export function pendingSource(taskId: string): { localPath?: string; sourceUrl?: string } | null {
+  const j = queue.get(taskId);
+  return j ? { localPath: j.localPath, sourceUrl: j.sourceUrl } : null;
+}
 export async function presignArchived(taskId: string): Promise<string | null> {
   const row = mediaIndex.get(taskId);
   if (!row) return null;

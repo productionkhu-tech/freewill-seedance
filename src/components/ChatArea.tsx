@@ -334,6 +334,16 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k, poster, 
           // 오지 않으므로(onError 로 빠진다) 아무 기록도 남기지 않고, 다음 기회에 다시 한다.
           onLoadedData={(e) => { if (posterOf && posterState === 'none') void capturePoster(e.currentTarget, posterOf); }}
           controls
+          // ★ 브라우저가 <video> 에 얹어주는 저장 기능을 전부 끈다.
+          //   여기 물린 src 는 재생용 H.264 프록시다(playbackSrcFor). 컨트롤 막대의
+          //   다운로드 버튼이나 우클릭 "동영상을 다른 이름으로 저장" 으로 받으면
+          //   원본 대신 재인코딩본이 저장된다 — 그걸 원본인 줄 알고 납품하면 사고다.
+          //   원본이 나가는 문은 하나뿐이어야 한다: 카드의 다운로드 버튼
+          //   (downloadClip → mediaSrcFor → 마스터. 해시까지 원본과 같음을 확인했다).
+          //   nodownload 가 막대의 버튼을, onContextMenu 가 우클릭 메뉴를 없앤다 —
+          //   우클릭 메뉴는 controlsList 를 항상 따르지는 않아 둘 다 건다.
+          controlsList="nodownload"
+          onContextMenu={(e) => e.preventDefault()}
           playsInline
           // 4k streams straight from the CDN, so only ask for metadata up-front instead
           // of eagerly buffering ~8MB per card that scrolls near the viewport.

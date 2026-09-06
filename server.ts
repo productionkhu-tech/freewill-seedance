@@ -20,7 +20,7 @@ import { MODEL_GRANTS, brandOf } from './src/lib/model-access';
 // 생성 결과물의 장기 보관소. R2(입력 임시 저장)와 역할이 겹치지 않는다 — ncp.ts 참고.
 import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
-  presignArchived, recoverFromHints, lookupArchived, archiveStats,
+  presignArchived, recoverFromHints, lookupArchived, archiveStats, pendingSource,
   putPoster, presignPoster, hasPoster,
   presignPreview, previewState,
   lastNcpError, resetNcpBackoff,
@@ -823,6 +823,14 @@ async function startServer() {
     if (!url && typeof req.query.project === 'string' && req.query.project) {
       const prov = typeof req.query.provider === 'string' && req.query.provider ? req.query.provider : 'seedance';
       url = await recoverFromHints(taskId, prov, String(req.query.project), ext);
+    }
+    // 3. 아직 보관 중이라면(큐에 남아 있다면) 그동안은 원본에서 내보낸다. 생성 직후
+    //    다운로드를 누르면 보관 전이라 404 였고, 다운로드는 조용히 실패했다.
+    //    ★ 프록시로 내려가지 않는다 — 여기서도 받는 건 원본이다.
+    if (!url) {
+      const p = pendingSource(indexId) || pendingSource(taskId);
+      if (p?.localPath && fs.existsSync(p.localPath)) { touchCache(p.localPath); return res.sendFile(p.localPath); }
+      if (p?.sourceUrl) url = p.sourceUrl;
     }
     if (!url) return res.status(404).json({ error: 'not archived' });
 
