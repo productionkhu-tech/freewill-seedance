@@ -178,9 +178,42 @@ function showOrCreateWindow() {
 }
 
 // ─── Auto Updater ───
+
+// 업데이트 로그를 파일로 남긴다. 예전에는 console 로만 나갔는데, 패키지된 앱의
+// console 은 아무 데도 보이지 않는다 — "업데이트가 안 된다" 는 제보가 와도 확인할
+// 방법이 없어서 업데이터 캐시 폴더를 뒤져야 했다. electron-log 를 새로 넣지 않는
+// 것은 electron-builder.yml 의 files 가 명시 목록이라 의존성을 하나 더 붙이면
+// 거기까지 같이 손봐야 하기 때문이다. 이 정도는 여기서 끝난다.
+const UPDATER_LOG_MAX = 256 * 1024;
+function updaterLog(level, ...args) {
+  const line = `[${new Date().toISOString()}] ${level} ${args.map(a => (a && a.stack) || String(a)).join(' ')}\n`;
+  try {
+    const p = path.join(app.getPath('userData'), 'updater.log');
+    // 무한히 자라지 않게. 넘치면 통째로 새로 시작한다 — 최근 것만 있으면 충분하다.
+    try { if (fs.statSync(p).size > UPDATER_LOG_MAX) fs.unlinkSync(p); } catch {}
+    fs.appendFileSync(p, line);
+  } catch {}
+  console.log('[Updater]', ...args);
+}
+
 function setupAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = {
+    info: (...a) => updaterLog('INFO', ...a),
+    warn: (...a) => updaterLog('WARN', ...a),
+    error: (...a) => updaterLog('ERROR', ...a),
+    debug: () => {},
+  };
+
+  // ★ 차등 다운로드를 끈다. 바뀐 블록만 받는 방식인데, 이 앱에서는 손해다.
+  //   릴리스마다 app.asar(프론트엔드 + server.cjs)이 바뀌고 NSIS 가 전체를 압축하므로,
+  //   소스 한 줄만 고쳐도 압축된 블록은 거의 다 달라진다. 맞는 블록이 없으니 조각내는
+  //   비용만 낸다.
+  //   측정(2026-09-07): 통짜 다운로드 10초(11MB/s) + 설치 21초 + 재기동 15초 = 46초인데
+  //   실제 업데이트는 100초가 걸렸다. 111MB ÷ 64KB = 1,777 블록이고 range 요청 왕복이
+  //   0.05초라, 조각내는 데만 수십 초가 든다. 끄면 그 시간이 사라진다.
+  autoUpdater.disableDifferentialDownload = true;
 
   autoUpdater.on('update-available', (info) => {
     dialog.showMessageBox(mainWindow, {
