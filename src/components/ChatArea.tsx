@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
 import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor } from '../store';
-import { resolveModelId } from '../lib/model-access';
+import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -430,9 +430,14 @@ export function mediaSrcFor(m: { taskId?: string; videoUrl?: string; usedSetting
   return `/api/media/${encodeURIComponent(m.taskId)}${s ? `?${s}` : ''}`;
 }
 
-/** NCP 최상위 폴더 이름. store 의 provider('byteplus'|'gemini')를 보관소 용어로 옮긴다. */
-export function archiveProviderOf(model?: string): 'seedance' | 'google' {
-  return modelProvider(model || '') === 'gemini' ? 'google' : 'seedance';
+/**
+ * NCP 최상위 폴더 이름 = 모델 상징 id. 다운로드 파일 이름의 접두어와 같은 값이다.
+ * 삼항으로 두 회사를 가르던 자리 — 세 번째 회사가 들어오면 이런 삼항을 전부 찾아
+ * 고쳐야 했고 하나만 놓쳐도 조용히 남의 폴더에 쌓였다. 이제 규칙은 한 곳뿐이다
+ * (model-access.ts / BRAND_RULES).
+ */
+export function archiveProviderOf(model?: string): string {
+  return brandOf(model);
 }
 
 /**

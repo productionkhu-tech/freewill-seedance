@@ -3,7 +3,7 @@ import { persist, type PersistStorage, type StorageValue } from 'zustand/middlew
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS } from './lib/utils';
-import { MODEL_GRANTS, resolveModelId } from './lib/model-access';
+import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1114,22 +1114,22 @@ export function modelAllowsAudioOnly(model: string): boolean {
 }
 
 /**
- * 저장 파일 이름. 자동 다운로드와 수동 다운로드가 이 함수 하나만 쓴다.
+ * 저장 파일 이름 — 항상 `{모델 상징 id}-{날짜}-{taskId}.{확장자}`.
  *
- * 규칙이 두 벌이면 반드시 갈라진다 — 실제로 Omni 는 수동 쪽에만 짧은 이름 규칙이
- * 있었고 자동 쪽에는 규칙 자체가 없었다.
- *   Seedance : dreamina-<날짜>-<taskId>.mp4|.mov   (2.5 는 .mov)
- *   Omni     : omni-<날짜>-<캐시id>.mp4
- * Omni 의 taskId 는 거대한 Gemini interaction id(v1_Ch…)라 그대로 쓰면 파일명이
- * 못 쓸 만큼 길어진다. 그래서 /api/cache/<id>.mp4 의 짧은 id 를 쓴다.
+ * 자동 다운로드와 수동 다운로드가 이 함수 하나만 쓴다. 규칙이 두 벌이면 반드시
+ * 갈라진다 — 실제로 Omni 의 이름 규칙은 수동 쪽에만 있었고 자동 쪽에는 없었다.
+ *
+ * 상징 id 는 NCP 폴더 이름과 같은 값이다(model-access.ts / brandOf). 그래서 받아둔
+ * 파일 이름만 보고 NCP 어디에 있는지 알 수 있다:
+ *   seedance-2026-09-06-cgt-20260906160839-q26vf.mov
+ *      → seedance/{프로젝트}/cgt-20260906160839-q26vf.mov
+ *
+ * 확장자는 그 클립이 실제로 받은 URL 에서 뽑는다(2.5 는 .mov). 회사가 늘어도
+ * 여기는 손댈 것이 없다 — brandOf 규칙 한 줄이면 이름이 알아서 따라온다.
  */
 export function downloadFilenameFor(m: Pick<ChatMessage, 'videoUrl' | 'taskId' | 'usedSettings'>): string {
-  const url = m.videoUrl || '';
   const model = m.usedSettings?.model || '';
-  const taskId = m.taskId || 'unknown';
-  return modelProvider(model) === 'gemini'
-    ? buildDownloadFilename(url.match(/\/([^/]+?)(?:\.\w+)?$/)?.[1] || taskId, '.mp4', 'omni')
-    : buildDownloadFilename(taskId, videoExtFor(url, model));
+  return buildDownloadFilename(m.taskId || 'unknown', videoExtFor(m.videoUrl || '', model), brandOf(model));
 }
 
 // 결과물 하나당 정확히 한 번만 받는다. updateMessage 가 "이번에 처음 성공"일 때만

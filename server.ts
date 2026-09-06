@@ -16,7 +16,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // Shared with the client store — see src/lib/model-access.ts for why these two facts
 // live outside both files.
-import { MODEL_GRANTS } from './src/lib/model-access';
+import { MODEL_GRANTS, brandOf } from './src/lib/model-access';
 // 생성 결과물의 장기 보관소. R2(입력 임시 저장)와 역할이 겹치지 않는다 — ncp.ts 참고.
 import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
@@ -737,8 +737,9 @@ async function startServer() {
       if (lookupArchived(String(it.taskId))) { already++; continue; }
       enqueueArchive({
         taskId: String(it.taskId),
-        // http 소스만 여기 오므로 사실상 전부 seedance 지만, 판단은 클라이언트가 보낸 값을 따른다.
-        provider: it.provider === 'google' ? 'google' : 'seedance',
+        // 값을 열거해서 거르지 않는다 — 새 회사가 들어와도 그대로 통과해야 한다.
+        // 경로 안전성은 objectKeyFor 가, 값의 정당성은 클라이언트의 brandOf 가 책임진다.
+        provider: typeof it.provider === 'string' && it.provider ? it.provider : brandOf(it.model),
         project: typeof it.project === 'string' ? it.project : '',
         ext: typeof it.ext === 'string' ? it.ext : '.mp4',
         model: typeof it.model === 'string' ? it.model : '',
@@ -789,7 +790,7 @@ async function startServer() {
     //    project/ext 로 되찾아본다.
     let url = await presignArchived(indexId);
     if (!url && typeof req.query.project === 'string' && req.query.project) {
-      const prov = req.query.provider === 'google' ? 'google' : 'seedance';
+      const prov = typeof req.query.provider === 'string' && req.query.provider ? req.query.provider : 'seedance';
       url = await recoverFromHints(taskId, prov, String(req.query.project), ext);
     }
     if (!url) return res.status(404).json({ error: 'not archived' });
@@ -1197,7 +1198,7 @@ async function startServer() {
       // Omni 도 같은 보관소로 보낸다. 24시간 만료 문제는 없지만 media-cache 는 30일
       // 프루너에 지워지고 그 PC 에서만 유효하다 — 결과물이 사라지는 건 마찬가지다.
       // 파일이 이미 로컬에 있으므로 다운로드 단계를 건너뛴다.
-      enqueueArchive({ taskId: data.id, provider: 'google', project: _archiveProject, ext: '.mp4', model: _archiveModel, localPath: cachePath });
+      enqueueArchive({ taskId: data.id, provider: brandOf(_archiveModel), project: _archiveProject, ext: '.mp4', model: _archiveModel, localPath: cachePath });
       res.json({ id: data.id, status: data.status || 'completed', videoUrl: `/api/cache/${cacheId}`, usage: data.usage });
     } catch (error: any) {
       // node's fetch reports every transport failure as the bare string "fetch failed",
@@ -1339,7 +1340,8 @@ async function startServer() {
         const ext = (srcUrl.split('?')[0].match(/\.(mp4|mov|m4v|webm)$/i) || ['.mp4'])[0].toLowerCase();
         enqueueArchive({
           taskId: req.params.id,
-          provider: 'seedance',
+          // 폴더는 모델이 정한다 — 레인마다 상수를 박아두면 회사가 늘 때 또 갈라진다.
+          provider: brandOf(data.model),
           project: taskToProject.get(req.params.id) || '',
           ext,
           model: typeof data.model === 'string' ? data.model : '',

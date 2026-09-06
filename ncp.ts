@@ -124,8 +124,12 @@ export async function ensureNcp(): Promise<NcpReady | null> {
 }
 
 // ── object key ──────────────────────────────────────────────────────────────
-/** 결과물을 만든 곳. 최상위 폴더가 되므로 값이 늘어나도 두 글자 이상 겹치지 않게 둘 것. */
-export type Provider = 'seedance' | 'google';
+/**
+ * 결과물을 만든 곳 = 모델 상징 id (model-access.ts / brandOf).
+ * 값을 여기 열거하지 않는다 — 회사가 늘 때마다 이 타입까지 고쳐야 하면 결국 빠뜨린다.
+ * 폴더 이름이 되므로 objectKeyFor 에서 경로에 안전한 문자만 남긴다.
+ */
+export type Provider = string;
 
 /**
  * `{provider}/{프로젝트}/{taskId}{ext}`
@@ -141,7 +145,10 @@ export type Provider = 'seedance' | 'google';
  * 그리고 URL 은 절대 손으로 붙이지 말 것. `&` 때문에 깨진다. 항상 SDK 에 Key 로 넘긴다.
  */
 export function objectKeyFor(provider: Provider, project: string, taskId: string, ext: string): string {
-  const prov: Provider = provider === 'google' ? 'google' : 'seedance';
+  // 값을 열거해서 거르지 않는다. 예전엔 `provider === 'google' ? 'google' : 'seedance'`
+  // 였는데, 그러면 새 회사가 들어오는 순간 조용히 seedance 폴더로 뭉개진다.
+  // 경로에 안전한 문자만 남기고 나머지는 그대로 믿는다 — 값은 brandOf 가 정한다.
+  const prov = String(provider || '').toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40) || 'unknown';
   const p = String(project || '_없음')
     .replace(/[\/\\]/g, '_')
     .replace(/[\x00-\x1f\x7f]/g, '')
