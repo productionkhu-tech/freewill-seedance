@@ -2,7 +2,7 @@ import { useMemo, useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, MessageSquare, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAppStore, MODELS, groupTree, type ChatMessage } from '../store';
-import { VideoPlayer, ClipStamp, downloadClip, revealClipFile, mediaSrcFor } from './ChatArea';
+import { VideoPlayer, ClipStamp, downloadClip, revealClipFile, mediaSrcFor , originMaybeAlive } from './ChatArea';
 import { formatStamp, formatStampFull } from '../lib/utils';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -525,7 +525,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
                 style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                 className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all">
                 <div className="aspect-video bg-black relative group">
-                  <VideoPlayer src={mediaSrcFor(r)} fallbackSrc={r.videoUrl} className="w-full h-full" is4k={r.usedSettings?.resolution === '4k'} />
+                  <VideoPlayer src={mediaSrcFor(r)} fallbackSrc={originMaybeAlive(r) ? r.videoUrl : undefined} className="w-full h-full" is4k={r.usedSettings?.resolution === '4k'} />
                   <ClipStamp ms={r.timestamp} />
                   <button
                     onClick={(e) => { e.stopPropagation(); updateMessage(r.projectId, r.id, { starred: !r.starred }); }}
@@ -585,8 +585,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           </div>
           {hasMore && (
             <div ref={sentinelRef} className="py-6 flex items-center justify-center gap-2 text-[12px] text-gray-400">
-              <span className="w-3.5 h-3.5 border-2 border-gray-300 border-t-transparent rounded-full animate-spin" />
-              {rows.length - shown}개 더 불러오는 중…
+              아래로 스크롤하면 {rows.length - shown}개 더
             </div>
           )}
           {/* End marker for the "최하단" button — an element to aim at, so the target

@@ -276,6 +276,15 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k }: { src:
             (Microsoft Store의 무료 &ldquo;HEVC Video Extensions&rdquo; 설치 시 재생 가능)
           </p>
         </div>
+      ) : mounted && failed && !fallbackSrc ? (
+        // 보관본도 없고 되돌아갈 원본도 없다. 죽은 src 를 <video> 에 물려 검은 상자를
+        // 남기는 대신, 왜 못 보는지 말해준다. 이 패치 이전 영상들이 여기 해당한다.
+        <div className="w-full h-full flex flex-col items-center justify-center gap-1.5 px-4 text-center">
+          <p className="text-[12px] text-white/75 leading-snug">보관 전에 원본 링크가 만료된 영상입니다</p>
+          <p className="text-[11px] text-white/40 leading-snug">
+            생성 결과 보관은 이 버전부터 적용됩니다.<br />자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.
+          </p>
+        </div>
       ) : mounted && (blobSrc || failed || is4k) && (
         <video
           ref={videoRef}
@@ -424,6 +433,19 @@ export function mediaSrcFor(m: { taskId?: string; videoUrl?: string; usedSetting
 /** NCP 최상위 폴더 이름. store 의 provider('byteplus'|'gemini')를 보관소 용어로 옮긴다. */
 export function archiveProviderOf(model?: string): 'seedance' | 'google' {
   return modelProvider(model || '') === 'gemini' ? 'google' : 'seedance';
+}
+
+/**
+ * 생성 API 가 준 원본 URL 이 아직 살아있을 가능성이 있는가.
+ *
+ * BytePlus 의 결과 URL 은 약 24시간이면 죽는다. 그보다 오래된 것에 폴백을 걸어봐야
+ * 403 을 받고(측정 0.86초) 결국 깨진 플레이어가 남는다 — 갤러리 한 페이지가 24장이니
+ * 카드마다 1초씩 헛돈다. 확실히 만료된 것은 시도조차 하지 않고 안내를 띄운다.
+ * 여유를 두고 20시간으로 잡는다: 경계 근처의 것은 한 번 시도해 보는 편이 낫다.
+ */
+export function originMaybeAlive(m: { endTime?: number; timestamp?: number }): boolean {
+  const at = m.endTime || m.timestamp || 0;
+  return at > 0 && Date.now() - at < 20 * 60 * 60 * 1000;
 }
 
 const settingsTagList = (us: any, videoUrl?: string): string[] => {
@@ -1062,7 +1084,14 @@ export function ChatArea() {
     }, { rootMargin: '400px' });
     io.observe(el);
     return () => io.disconnect();
-  }, [showGallery, galleryVideos.length, gallShown]);
+    // ★ gallShown 을 의존성에 넣으면 안 된다. 넣으면 한 페이지 늘 때마다 옵저버를 새로
+    //   만드는데, 새 IntersectionObserver 는 생성 즉시 현재 교차 상태를 콜백으로 보낸다.
+    //   센티널이 아직 400px 안에 있으면 그 자리에서 또 +24 → 의존성 변경 → 또 새 옵저버
+    //   → 또 즉시 발화. 센티널이 마진 밖으로 밀려날 때까지 폭주하고, 그 사이 카드 수백
+    //   개가 한꺼번에 마운트되면서 "N개 더 불러오는 중"이 멈춘 것처럼 보인다.
+    //   전체 갤러리(GlobalGallery)는 애초에 shown 을 의존성에 두지 않아 멀쩡했다 —
+    //   두 갤러리가 갈린 지점이 정확히 여기다.
+  }, [showGallery, galleryVideos.length]);
 
   const revealDownloaded = (filePath?: string) => revealClipFile(filePath, warn);
 
@@ -2615,7 +2644,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer src={mediaSrcFor(previewItem)} fallbackSrc={previewItem.videoUrl} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
+              <VideoPlayer src={mediaSrcFor(previewItem)} fallbackSrc={originMaybeAlive(previewItem) ? previewItem.videoUrl : undefined} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -2708,18 +2737,15 @@ export function ChatArea() {
         </div>
       )}
 
-      {/* Gallery ⇄ chat cross-fade.
-          mode="wait" so one fades fully out before the other fades in — they can't overlap,
-          which means no layout coexistence and no absolutely-positioned overlay to get wrong.
-          initial={false} so a cold app launch doesn't fade the chat in; only real switches animate.
-          Both branches need a stable `key` — without it AnimatePresence can't track the exit. */}
-      <AnimatePresence mode="wait" initial={false}>
+      {/* 갤러리 ⇄ 채팅 전환.
+          ★ 예전엔 AnimatePresence mode="wait" 로 0.15초 크로스페이드를 했는데, 메시지가 많은
+          프로젝트에서 갤러리가 영영 안 뜨는 문제가 있었다. mode="wait" 는 나가는 쪽의 exit 이
+          끝나야 들어오는 쪽을 마운트하는데, 채팅 서브트리(카드 48개 · DOM 15,000개)의 exit 이
+          완료 신호를 못 내고 멈추었다 — 화면에는 opacity 0 인 채팅만 남고 갤러리는
+          DOM 에 아예 들어오지 않는다(15초 관찰, 복구 안 됨).
+          0.15초짜리 장식 때문에 기능이 멈추는 거래라 애니메이션을 뜼고 그냥 즉시 교체한다. */}
       {showGallery ? (
-        <motion.div
-          key="gallery"
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          transition={{ duration: 0.15, ease: 'easeOut' }}
-          className="flex-1 overflow-y-auto p-6 bg-[#f5f5f7] dark:bg-[#242426]">
+        <div className="flex-1 overflow-y-auto p-6 bg-[#f5f5f7] dark:bg-[#242426]">
           {/* 채택만 보기 — 채택된 컷이 하나도 없으면 굳이 노출하지 않는다 */}
           {starredCount > 0 && (
             <div className="flex items-center gap-2 mb-4">
@@ -2751,7 +2777,7 @@ export function ChatArea() {
                   style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                   className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200" >
                   <div className="aspect-video bg-black relative group">
-                    <VideoPlayer src={mediaSrcFor(item)} fallbackSrc={item.videoUrl} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    <VideoPlayer src={mediaSrcFor(item)} fallbackSrc={originMaybeAlive(item) ? item.videoUrl : undefined} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
                     <ClipStamp ms={item.timestamp} />
                     {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
                     <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}
@@ -2795,22 +2821,17 @@ export function ChatArea() {
             </div>
             {galleryVideos.length > gallShown && (
               <div ref={gallSentinelRef} className="py-6 flex items-center justify-center gap-2 text-[12px] text-gray-400">
-                <Loader2 size={14} className="animate-spin" />
-                {galleryVideos.length - gallShown}개 더 불러오는 중…
+                아래로 스크롤하면 {galleryVideos.length - gallShown}개 더
               </div>
             )}
             </>
           )}
-        </motion.div>
+        </div>
       ) : (
         // Wrapper reproduces what the bare fragment used to contribute to the parent flex
         // column: the messages pane stays the flexible child, the composer stays pinned.
         // min-h-0 is load-bearing — without it the overflow-y-auto child refuses to shrink.
-        <motion.div
-          key="chat"
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          transition={{ duration: 0.15, ease: 'easeOut' }}
-          className="flex-1 flex flex-col min-h-0">
+        <div className="flex-1 flex flex-col min-h-0">
           {/* Messages */}
           <div ref={messagesScrollRef} onScroll={handleMessagesScroll} className="flex-1 overflow-y-auto p-6 space-y-5 bg-[#f5f5f7] dark:bg-[#242426]">
             {displayMessages.length === 0 ? (
@@ -2940,7 +2961,7 @@ export function ChatArea() {
                         <div className="space-y-3">
                           {msg.videoUrl && (
                             <div className="relative">
-                              <VideoPlayer src={mediaSrcFor(msg)} fallbackSrc={msg.videoUrl} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                              <VideoPlayer src={mediaSrcFor(msg)} fallbackSrc={originMaybeAlive(msg) ? msg.videoUrl : undefined} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
                               <ClipStamp ms={msg.timestamp} />
                             </div>
                           )}
@@ -3133,9 +3154,8 @@ export function ChatArea() {
               </div>
             </div>
           </div>
-        </motion.div>
+        </div>
       )}
-      </AnimatePresence>
 
     </div>
   );
