@@ -38,6 +38,12 @@ files:
   - "!temp-repo"
 
 extraResources:
+  # ★ ffmpeg 은 asar 밖에 둔다 — asar 안의 실행 파일은 돌릴 수 없다. server.cjs 와 같은
+  #   resources/ 에 놓아, transcode.ts 가 __dirname 기준으로 찾게 한다.
+  #   포스터와 H.264 프록시를 만드는 데 쓴다: 결과물이 전부 HEVC 라 코덱 없는 PC 에서는
+  #   1080p 조차 재생되지 않는다(2026-09-07 측정).
+  - from: "node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe"
+    to: "ffmpeg.exe"
   - from: "dist-server/"
     to: "."
     filter:

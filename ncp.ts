@@ -28,6 +28,7 @@ import {
   HeadObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { makePoster, makePreview } from './transcode';
 
 const GATEWAY_URL = process.env.SEEDANCE_GATEWAY_URL || 'https://seedance-gateway.production-khu.workers.dev';
 
@@ -166,7 +167,9 @@ export function objectKeyFor(provider: Provider, project: string, taskId: string
 // 여기 적어 둔다 — 프리뷰가 NCP 를 안 타고 디스크에서 바로 나오는 경로다.
 type IndexRow = { key: string; bucket: string; size: number; at: number; project: string; local?: string;
   /** 목록 썸네일이 NCP 에 있는가. 없으면 카드가 볼 때 만들어 올린다. */
-  poster?: boolean };
+  poster?: boolean;
+  /** 재생용 H.264 프록시가 있는가. 원본이 이미 H.264 면 'skipped' — 원본을 그대로 쓴다. */
+  preview?: boolean | 'skipped' };
 let INDEX_FILE = '';
 const mediaIndex = new Map<string, IndexRow>();
 
@@ -425,6 +428,9 @@ async function archiveOne(job: Job) {
     queue.delete(job.taskId);
     saveQueue();
     console.log(`[NCP] 보관 완료 ${key} — ${(size / 1048576).toFixed(1)}MB, ${((Date.now() - t0) / 1000).toFixed(1)}초`);
+
+    // 파생물은 마스터가 안전해진 뒤에 만든다. 실패해도 원본은 이미 올라가 있다.
+    await makeDerivatives(job.taskId, local, key);
   } catch (e: any) {
     job.tries++;
     console.warn(`[NCP] 보관 실패 ${key} (${job.tries}회): ${e?.message || e}`);
@@ -558,4 +564,69 @@ export async function presignPoster(
   return getSignedUrl(ncp.client, new GetObjectCommand({ Bucket: ncp.bucket, Key: key }), {
     expiresIn: ncp.presignExpires,
   });
+}
+
+/** 재생용 프록시가 준비돼 있는가. 'skipped' 는 원본이 이미 H.264 라 만들 필요가 없던 경우. */
+export function previewState(taskId: string): boolean | 'skipped' | undefined {
+  return mediaIndex.get(taskId)?.preview;
+}
+
+/** 프록시 서명 URL. 없으면 null — 호출부는 마스터로 넘어간다. */
+export async function presignPreview(taskId: string): Promise<string | null> {
+  const row = mediaIndex.get(taskId);
+  if (!row || row.preview !== true) return null;
+  const ncp = await ensureNcp();
+  if (!ncp) return null;
+  const key = row.key.replace(/\.[A-Za-z0-9]+$/, '.preview.mp4');
+  return getSignedUrl(ncp.client, new GetObjectCommand({ Bucket: ncp.bucket, Key: key }), {
+    expiresIn: ncp.presignExpires,
+  });
+}
+
+/**
+ * 마스터를 올린 뒤 파생물(포스터·프록시)을 만들어 함께 올린다.
+ *
+ * 마스터 보관과 분리해서 실패를 격리한다 — 파생물이 안 만들어져도 원본은 이미 안전하고,
+ * 다음에 다시 시도하면 된다. 그래서 여기서 던지지 않는다.
+ */
+async function makeDerivatives(taskId: string, local: string, key: string) {
+  const ncp = await ensureNcp();
+  if (!ncp) return;
+  const row = mediaIndex.get(taskId);
+  const base = local.replace(/\.[A-Za-z0-9]+$/, '');
+
+  if (!row?.poster) {
+    const out = `${base}.poster.webp`;
+    try {
+      if (await makePoster(local, out)) {
+        await ncp.client.send(new PutObjectCommand({
+          Bucket: ncp.bucket, Key: key.replace(/\.[A-Za-z0-9]+$/, '.webp'),
+          Body: fs.readFileSync(out), ContentType: 'image/webp',
+        }));
+        const r = mediaIndex.get(taskId); if (r) { r.poster = true; saveIndex(); }
+        console.log(`[NCP] 포스터 ${(fs.statSync(out).size / 1024).toFixed(0)}KB`);
+      }
+    } catch (e: any) { console.warn('[NCP] 포스터 업로드 실패:', e?.message); }
+    finally { try { fs.rmSync(out, { force: true }); } catch {} }
+  }
+
+  if (row?.preview === undefined) {
+    const out = `${base}.preview.mp4`;
+    try {
+      const r0 = await makePreview(local, out);
+      if (r0 === 'skipped') {
+        const r = mediaIndex.get(taskId); if (r) { r.preview = 'skipped'; saveIndex(); }
+        console.log('[NCP] 프록시 불필요 (원본이 이미 H.264)');
+      } else if (r0 === 'made') {
+        const size = fs.statSync(out).size;
+        await ncp.client.send(new PutObjectCommand({
+          Bucket: ncp.bucket, Key: key.replace(/\.[A-Za-z0-9]+$/, '.preview.mp4'),
+          Body: fs.readFileSync(out), ContentType: 'video/mp4',
+        }));
+        const r = mediaIndex.get(taskId); if (r) { r.preview = true; saveIndex(); }
+        console.log(`[NCP] 프록시 ${(size / 1048576).toFixed(1)}MB (H.264 · 어디서나 재생)`);
+      }
+    } catch (e: any) { console.warn('[NCP] 프록시 업로드 실패:', e?.message); }
+    finally { try { fs.rmSync(out, { force: true }); } catch {} }
+  }
 }

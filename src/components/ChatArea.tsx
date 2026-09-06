@@ -482,6 +482,17 @@ export function archiveProviderOf(model?: string): string {
   return brandOf(model);
 }
 
+/**
+ * 재생 소스. 프록시(H.264)를 먼저 본다 — 결과물이 전부 HEVC 라 코덱 없는 PC 에서는
+ * 4K 는 물론 1080p 도 재생되지 않기 때문이다. 프록시가 없으면(404) VideoPlayer 가
+ * fallbackSrc 인 마스터로 내려가고, 그것도 없으면 원본 URL 로 간다.
+ * ★ 다운로드는 이 주소를 쓰지 않는다 — 언제나 마스터(mediaSrcFor)를 받는다.
+ */
+export function playbackSrcFor(m: { taskId?: string; videoUrl?: string }): string {
+  if (!m.taskId || !m.videoUrl) return m.videoUrl || '';
+  return `/api/media/${encodeURIComponent(m.taskId)}/preview`;
+}
+
 /** 목록 썸네일 주소. 없으면 서버가 404 를 주고, 카드가 그때 만들어 올린다. */
 export function posterSrcFor(m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } }): string {
   if (!m.taskId) return '';
@@ -616,7 +627,11 @@ export async function downloadClip(msgId: string, videoUrl: string, taskId: stri
     // Remember which message this filename belongs to. The Electron download path only
     // learns the save path once 'download-done' fires, long after this call returns.
     pendingReveal.set(filename, msgId);
-    const savedPath = await downloadViaProxy(videoUrl, filename);
+    // ★ 마스터를 받는다. 예전에는 생성 API 가 준 원본 URL 을 그대로 썼는데, 그 링크는
+    //   약 24시간 뒤 죽어서 보관된 영상조차 다운로드가 403 으로 실패했다. 서버가
+    //   로컬 사본 → NCP → 원본 순으로 내려가며 언제나 원본 화질을 준다(프록시가 아니다).
+    const masterSrc = mediaSrcFor({ videoUrl, taskId, usedSettings: { model: msgModel } as any });
+    const savedPath = await downloadViaProxy(masterSrc || videoUrl, filename);
     useAppStore.getState().updateMessage(owner.id, msgId, {
       downloadedAt: Date.now(),
       // Blob fast path knows the path immediately; otherwise the done-listener fills it.
@@ -2731,7 +2746,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer src={mediaSrcFor(previewItem)} fallbackSrc={originMaybeAlive(previewItem) ? previewItem.videoUrl : undefined} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
+              <VideoPlayer src={playbackSrcFor(previewItem)} fallbackSrc={mediaSrcFor(previewItem)} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -2864,7 +2879,7 @@ export function ChatArea() {
                   style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                   className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200" >
                   <div className="aspect-video bg-black relative group">
-                    <VideoPlayer src={mediaSrcFor(item)} fallbackSrc={originMaybeAlive(item) ? item.videoUrl : undefined} poster={posterSrcFor(item)} posterOf={item} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    <VideoPlayer src={playbackSrcFor(item)} fallbackSrc={mediaSrcFor(item)} poster={posterSrcFor(item)} posterOf={item} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
                     <ClipStamp ms={item.timestamp} />
                     {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
                     <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}
@@ -3048,7 +3063,7 @@ export function ChatArea() {
                         <div className="space-y-3">
                           {msg.videoUrl && (
                             <div className="relative">
-                              <VideoPlayer src={mediaSrcFor(msg)} fallbackSrc={originMaybeAlive(msg) ? msg.videoUrl : undefined} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                              <VideoPlayer src={playbackSrcFor(msg)} fallbackSrc={mediaSrcFor(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
                               <ClipStamp ms={msg.timestamp} />
                             </div>
                           )}

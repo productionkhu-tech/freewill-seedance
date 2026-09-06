@@ -22,6 +22,7 @@ import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
   presignArchived, recoverFromHints, lookupArchived, archiveStats,
   putPoster, presignPoster, hasPoster,
+  presignPreview, previewState,
   lastNcpError, resetNcpBackoff,
 } from './ncp';
 
@@ -745,6 +746,27 @@ async function startServer() {
       // 포스터는 내용이 바뀌지 않는다(같은 영상의 같은 프레임). 오래 캐시해도 안전하고,
       // 그래야 갤러리를 다시 열 때 NCP 를 또 치지 않는다 — 아웃바운드가 과금이다.
       res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+      Readable.fromWeb(up.body as any).pipe(res);
+    } catch { res.status(502).end(); }
+  });
+
+  // 재생용 H.264 프록시. 생성 결과물이 전부 HEVC 라, 코덱 없는 PC 에서는 4K 는 물론
+  // 1080p 도 재생되지 않는다 — 프록시가 있으면 코덱과 무관하게 어디서나 나온다.
+  // 없으면 404 를 주고 클라이언트가 마스터로 넘어간다(원본이 이미 H.264 인 경우 포함).
+  app.get('/api/media/:taskId/preview', async (req, res) => {
+    const taskId = String(req.params.taskId).replace(/[^A-Za-z0-9._-]/g, '');
+    if (!taskId) return res.status(400).end();
+    const url = await presignPreview(taskId);
+    if (!url) return res.status(404).json({ error: 'no preview', state: previewState(taskId) ?? null });
+    try {
+      const range = req.headers.range;
+      const up = await fetch(url, { headers: range ? { Range: range } : {} });
+      if (!up.ok && up.status !== 206) return res.status(502).end();
+      res.status(up.status);
+      for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+        const v = up.headers.get(h); if (v) res.setHeader(h, v);
+      }
+      if (!up.body) return res.end();
       Readable.fromWeb(up.body as any).pipe(res);
     } catch { res.status(502).end(); }
   });
