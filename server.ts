@@ -720,37 +720,6 @@ async function startServer() {
   // 보관 상태. :taskId 와 겹치지 않도록 경로를 따로 뒀다.
   app.get('/api/archive/status', (_req, res) => res.json(archiveStats()));
 
-  // 소급 보관 — 이 패치 이전에 만든 영상 중 원본 링크가 아직 살아있는 것들을 올린다.
-  //
-  // 왜 필요한가: 이 기능은 "앞으로" 만들 영상을 지키지, 이미 만든 것을 되살리지는
-  // 못한다. 다만 최근 24시간 안에 만든 것은 링크가 아직 살아 있어서 지금 올리면
-  // 건질 수 있다 — 자동 다운로드가 기본 꺼짐이라 그 영상들은 다른 사본이 없다.
-  // 링크가 죽은 것들은 세 번 실패하고 큐에서 빠진다(ncp.ts).
-  //
-  // 히스토리는 클라이언트(IndexedDB)에만 있으므로 목록을 받아온다. /api/cache/keep 과
-  // 같은 구조다. 실행할 때마다 한 번, 이미 보관된 것은 여기서 걸러진다.
-  app.post('/api/archive/backfill', (req, res) => {
-    const items = Array.isArray(req.body?.items) ? req.body.items : [];
-    let queued = 0, already = 0;
-    for (const it of items.slice(0, 300)) {
-      if (!it?.taskId || typeof it.videoUrl !== 'string' || !/^https?:/.test(it.videoUrl)) continue;
-      if (lookupArchived(String(it.taskId))) { already++; continue; }
-      enqueueArchive({
-        taskId: String(it.taskId),
-        // 값을 열거해서 거르지 않는다 — 새 회사가 들어와도 그대로 통과해야 한다.
-        // 경로 안전성은 objectKeyFor 가, 값의 정당성은 클라이언트의 brandOf 가 책임진다.
-        provider: typeof it.provider === 'string' && it.provider ? it.provider : brandOf(it.model),
-        project: typeof it.project === 'string' ? it.project : '',
-        ext: typeof it.ext === 'string' ? it.ext : '.mp4',
-        model: typeof it.model === 'string' ? it.model : '',
-        sourceUrl: it.videoUrl,
-      });
-      queued++;
-    }
-    if (queued) console.log(`[NCP] 소급 보관 ${queued}건 예약 (이미 보관됨 ${already}건)`);
-    res.json({ queued, already });
-  });
-
   // 생성 결과물 재생. 클라이언트는 이 경로 하나만 보고, 서명 URL 은 절대 넘기지 않는다.
   // 이유가 셋이고 전부 측정된 것이다:
   //   (1) blob 캐시가 URL 을 키로 쓴다 — 매번 새 서명이면 적중률이 0 이 되어 볼 때마다
