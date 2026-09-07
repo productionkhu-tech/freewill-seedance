@@ -290,6 +290,22 @@ export function SettingsPanel() {
   // (multimodal_reference can ALSO get re-classified by prompt wording, but that we can't
   // predict from the mode — translateError handles that case instead.)
   const ratioLockedToSource = ratioLockedFor(settings.model, settings.mode);
+  // 비율이 잠겼을 때 "무엇을" 따라가는지. 문구가 한 벌뿐이라 모드 넷이 나눠 쓰고 있었고,
+  // 이미지를 받는 두 모드까지 "원본 영상" 이라고 말했다.
+  // 잠기는 모드 목록은 store.ts(adaptiveOnly)가 갖고 있으므로 여기 또 만들지 않는다 —
+  // 이미지냐 영상이냐는 모드 이름이 이미 답하고 있다. adaptiveOnly 에 새 모드가
+  // 들어와도 이름만 규칙에 맞으면 문구가 따라온다.
+  // Omni 는 mode 필드가 무의미하므로(옛 Seedance 잔재) omniTask 로 판단한다 —
+  // edit/extend 둘 다 영상을 받는다.
+  const ratioLockLabel = omniRatioFromSource ? '원본 영상 따라감'
+    : /^image_to_video/.test(settings.mode) ? '원본 이미지 따라감'
+    : '원본 영상 따라감';
+  // 비율을 못 고르는 이유만 말하면 "그래서 뭘 어쩌라고" 가 남는다. 실제로 5504x3072(1.79:1)
+  // 이미지를 넣어 1926x1076 이 나온 일이 있었다 — 1080p 픽셀 수는 그대로고 모양만 소스를
+  // 따라간 것인데, 화질이 깎인 것으로 읽힌다. 손댈 수 있는 곳이 어디인지 여기서 말해준다.
+  const ratioLockHint = ratioLockLabel === '원본 이미지 따라감'
+    ? '비율을 첨부 이미지에서 그대로 따옵니다. 해상도 설정은 픽셀 수만 정하므로, 16:9 가 아닌 이미지를 넣으면 1920x1080 이 아닌 크기로 나옵니다.'
+    : '비율을 첨부 영상에서 그대로 따옵니다. 해상도 설정은 픽셀 수만 정합니다.';
   const durationLockedToSource = durationLockedFor(settings.model, settings.mode);
   // ★ These are DISPLAY flags. They must never write to the project.
   // A constraint is a function of (model, mode) — it is not a property of the project, so
@@ -817,7 +833,7 @@ export function SettingsPanel() {
             <div className="space-y-2">
               <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Ratio</label>
               {omniRatioFromSource || ratioLockedToSource
-                ? <div className="text-[12px] text-gray-400 py-1.5 px-1">원본 영상 따라감</div>
+                ? <div title={ratioLockHint} className="text-[12px] text-gray-400 py-1.5 px-1 cursor-help">{ratioLockLabel}</div>
                 : <CustomSelect value={settings.ratio} onChange={(val) => updateProjectSettings(project.id, { ratio: val })} options={isOmni ? OMNI_RATIOS : RATIOS.map(r => ({ id: r, name: r }))} />}
             </div>
           </div>
