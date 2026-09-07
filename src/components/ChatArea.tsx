@@ -97,8 +97,11 @@ const CAN_PLAY_HEVC = (() => {
 
 // Exported for the all-projects gallery (GlobalGallery). Lazy-mounts on intersection,
 // so a grid of hundreds of clips only ever fetches the handful actually on screen.
-export function VideoPlayer({ src, fallbackSrc, className, eager, is4k, poster, posterOf }: {
-  src: string; fallbackSrc?: string; className?: string; eager?: boolean; is4k?: boolean;
+export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf }: {
+  /** 재생 소스를 우선순위 순으로. 앞에서부터 쓰고, 실패하면 다음 단으로 내려간다.
+   *  목록은 playbackChain() 한 곳에서만 만든다 — 단이 늘어도 호출부는 안 건드린다. */
+  sources: string[];
+  className?: string; eager?: boolean; is4k?: boolean;
   /** 목록 썸네일 주소. 주면 카드가 이 이미지로 뜨고, 영상은 마우스를 올릴 때 붙는다. */
   poster?: string;
   /** 포스터가 아직 없을 때 만들어 올리기 위한 메시지 정보. */
@@ -121,18 +124,40 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k, poster, 
   const [failed, setFailed] = useState(false);
   const blobUrlRef = useRef<string | null>(null);
 
-  // 재생 소스는 두 단이다. 1순위는 NCP 보관본(/api/media/{taskId} — 로컬 사본이 있으면
-  // 디스크에서 바로 나오고, 없으면 서버가 NCP 에서 흘려준다), 2순위는 생성 API 가 준
-  // 원본 URL 이다. 갓 만든 영상은 아직 보관 전이라 1순위가 404 인 게 정상이므로,
-  // 실패를 오류로 취급하지 않고 조용히 2순위로 내려간다.
-  const [activeSrc, setActiveSrc] = useState(src);
-  const fellBack = useRef(false);
-  useEffect(() => { setActiveSrc(src); fellBack.current = false; }, [src]);
+  // 재생 소스는 여러 단이고, 한 단이 죽으면 다음 단으로 내려간다. 갓 만든 영상은
+  // 프록시도 보관본도 아직 없어 앞 단이 404 인 게 정상이므로, 실패를 오류로 보지 않는다.
+  //
+  // ★ 예전엔 단이 둘로 고정이었고 내려가는 것도 한 번뿐이었다. 26.9.709 에서 맨 앞에
+  //   프록시를 끼우면서 맨 뒤의 원본 URL 이 조용히 목록 밖으로 밀려났다. 그래서 갓
+  //   만든 영상이 프록시 404 → 마스터 404 에서 멈춰 검은 상자가 됐다 — 프로젝트를
+  //   옮겼다 돌아오면 그 사이 보관이 끝나 있어 재생됐고, 그게 왔다갔다하면 된다 의
+  //   정체였다. 원본 바이트는 그동안에도 blobCache 에 들어 있었다(store.ts 가 생성
+  //   성공 시 prefetch 한다). 목록 끝까지 갔으면 fetch 없이 즉시 떴을 것이다.
+  //   이제 끝까지 걷는다. 단을 늘려도 이 코드는 그대로다.
+  const chain = useMemo(
+    () => sources.filter((v, i) => v && sources.indexOf(v) === i),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sources.join(String.fromCharCode(0))],
+  );
+  const [srcIdx, setSrcIdx] = useState(0);
+  const idxRef = useRef(0);
+  const activeSrc = chain[srcIdx] || '';
+  useEffect(() => { idxRef.current = 0; setSrcIdx(0); setFailed(false); }, [chain]);
+  // 다음 단으로. ref 로 세는 이유는 onError 와 fetch 의 catch 가 같은 렌더의 낡은
+  // srcIdx 를 함께 보면 한 단을 건너뛰거나 같은 단을 두 번 쓰기 때문이다.
   const goFallback = () => {
-    if (fellBack.current || !fallbackSrc || fallbackSrc === activeSrc) return false;
-    fellBack.current = true;
-    setActiveSrc(fallbackSrc);
+    if (idxRef.current >= chain.length - 1) return false;
+    idxRef.current += 1;
+    setSrcIdx(idxRef.current);
     return true;
+  };
+  // 목록을 처음부터 다시 걷는다. 마지막 단까지 실패하는 경우는 두 가지인데 —
+  // 링크가 정말 만료됐거나, 그냥 잠깐 네트워크가 끊겼거나 — 화면에서는 구분되지
+  // 않는다. 후자를 영구 실패로 굳혀 버리면 방금 만든 영상이 사라진 것처럼 보인다.
+  // srcIdx 를 0 으로 되돌리는 것만으로는 activeSrc 가 그대로라 effect 가 안 돈다.
+  const [retryTick, setRetryTick] = useState(0);
+  const retry = () => {
+    idxRef.current = 0; setSrcIdx(0); setFailed(false); setRetryTick(t => t + 1);
   };
 
   useEffect(() => {
@@ -266,7 +291,7 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k, poster, 
       }
       setBlobSrc(null);
     };
-  }, [activeSrc, mounted, showPoster]);
+  }, [activeSrc, mounted, showPoster, retryTick]);
 
   return (
     <div
@@ -314,21 +339,30 @@ export function VideoPlayer({ src, fallbackSrc, className, eager, is4k, poster, 
             (Microsoft Store의 무료 &ldquo;HEVC Video Extensions&rdquo; 설치 시 재생 가능)
           </p>
         </div>
-      ) : mounted && failed && !fallbackSrc ? (
-        // 보관본도 없고 되돌아갈 원본도 없다. 죽은 src 를 <video> 에 물려 검은 상자를
-        // 남기는 대신, 왜 못 보는지 말해준다. 이 패치 이전 영상들이 여기 해당한다.
-        <div className="w-full h-full flex flex-col items-center justify-center gap-1.5 px-4 text-center">
-          <p className="text-[12px] text-white/75 leading-snug">보관 전에 원본 링크가 만료된 영상입니다</p>
+      ) : mounted && failed ? (
+        // 목록의 마지막 단까지 죽었다. 죽은 src 를 <video> 에 물려 검은 상자를 남기는
+        // 대신, 왜 못 보는지 말해준다.
+        // 예전 조건은 !fallbackSrc 였는데 709 이후로 fallbackSrc 가 항상 채워져 있어
+        // 이 안내가 영영 뜨지 않았다 — 그 자리가 전부 검은 상자로 나갔다.
+        <div className="w-full h-full flex flex-col items-center justify-center gap-2 px-4 text-center">
+          <p className="text-[12px] text-white/75 leading-snug">영상을 불러오지 못했습니다</p>
           <p className="text-[11px] text-white/40 leading-snug">
-            생성 결과 보관은 이 버전부터 적용됩니다.<br />자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.
+            보관 전에 원본 링크가 만료됐거나, 잠시 연결이 끊겼을 수 있습니다.<br />
+            자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.
           </p>
+          <button
+            onClick={retry}
+            className="mt-0.5 text-[11px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 border border-white/20 rounded-md px-2.5 py-1 transition-colors">
+            다시 시도
+          </button>
         </div>
-      ) : !showPoster && mounted && (blobSrc || failed || is4k) && (
+      ) : !showPoster && mounted && (blobSrc || is4k) && (
         <video
           ref={videoRef}
           src={blobSrc || activeSrc}
           // 4k 는 blob 을 거치지 않고 직접 스트리밍하므로, 보관 전 404 는 여기서 잡힌다.
-          onError={() => { goFallback(); }}
+          // 더 내려갈 단이 없으면 failed 를 세운다 — 안 그러면 검은 상자로 남는다.
+          onError={() => { if (!goFallback()) setFailed(true); }}
           // 포스터가 없어서 영상을 띄운 경우, 첫 프레임을 떠서 올려둔다. 다음부터는
           // 이 카드도 16~34KB 이미지로 뜬다. 코덱이 없어 디코딩이 안 되면 여기까지
           // 오지 않으므로(onError 로 빠진다) 아무 기록도 남기지 않고, 다음 기회에 다시 한다.
@@ -464,9 +498,9 @@ const OMNI_TASK_LABELS: Record<string, string> = {
 // Settings chips for a message / preview card. Omni shows its task + fixed 720p (its
 // `mode` field is a stale Seedance leftover); Seedance shows mode / resolution as before.
 /**
- * 재생 소스 1순위 — NCP 보관본. 서버가 로컬 사본을 갖고 있으면 디스크에서 바로 나오고,
- * 없으면 NCP 에서 흘려준다. 아직 보관 전이면 404 가 나고 VideoPlayer 가 fallbackSrc
- * (생성 API 가 준 원본 URL)로 조용히 내려간다. 그래서 호출부는 항상 둘 다 넘긴다.
+ * 마스터 주소 — NCP 보관본. 서버가 로컬 사본을 갖고 있으면 디스크에서 바로 나오고,
+ * 없으면 NCP 에서 흘려준다. 아직 보관 전이면 404 다 — 재생은 playbackChain 의 다음
+ * 단으로 내려가고, 다운로드는 이 주소만 쓴다(언제나 원본).
  *
  * project/ext 를 쿼리로 함께 보내는 것은 서버가 색인을 잃었을 때(재설치 등)의 복구용이다.
  * 평소에는 서버 색인만으로 충분하다.
@@ -493,9 +527,8 @@ export function archiveProviderOf(model?: string): string {
 }
 
 /**
- * 재생 소스. 프록시(H.264)를 먼저 본다 — 결과물이 전부 HEVC 라 코덱 없는 PC 에서는
- * 4K 는 물론 1080p 도 재생되지 않기 때문이다. 프록시가 없으면(404) VideoPlayer 가
- * fallbackSrc 인 마스터로 내려가고, 그것도 없으면 원본 URL 로 간다.
+ * 재생 체인의 첫 단 — H.264 프록시. 결과물이 전부 HEVC 라, 코덱 없는 PC 에서는 4K 는
+ * 물론 1080p 도 재생되지 않기 때문이다. 없으면(404) playbackChain 의 다음 단으로 간다.
  * ★ 다운로드는 이 주소를 쓰지 않는다 — 언제나 마스터(mediaSrcFor)를 받는다.
  */
 export function playbackSrcFor(m: { taskId?: string; videoUrl?: string }): string {
@@ -503,6 +536,29 @@ export function playbackSrcFor(m: { taskId?: string; videoUrl?: string }): strin
   return `/api/media/${encodeURIComponent(m.taskId)}/preview`;
 }
 
+/**
+ * 재생 소스의 우선순위. VideoPlayer 는 이 목록을 앞에서부터 쓰고, 한 단이 죽으면
+ * 다음 단으로 내려간다.
+ *
+ *   1. 프록시  — H.264. 코덱 없는 PC 에서도 나오는 유일한 단이다. 아직 안 만들었거나
+ *                원본이 이미 H.264 라 만들 필요가 없었으면 404 다.
+ *   2. 마스터  — NCP 보관 원본(로컬 사본이 있으면 디스크에서 바로). 보관 전이면 404.
+ *   3. 원본URL — 생성 API 가 준 주소. 약 24시간이면 죽으므로 그 안쪽만 시도한다.
+ *                갓 만든 영상은 여기 바이트가 이미 blobCache 에 있어 즉시 뜬다.
+ *
+ * ★ 순서를 정하는 곳은 여기 하나뿐이다. 단을 늘리거나 바꿀 때 호출부 네 군데를
+ *   따라다니지 않게 하려는 것 — 예전에 그러다 원본 단을 통째로 잃었다.
+ */
+export function playbackChain(m: {
+  taskId?: string; videoUrl?: string; usedSettings?: any; endTime?: number; timestamp?: number;
+  videoStorage?: { project?: string; ext?: string };
+}): string[] {
+  return [
+    playbackSrcFor(m),
+    mediaSrcFor(m),
+    originMaybeAlive(m) ? (m.videoUrl || '') : '',
+  ];
+}
 /** 목록 썸네일 주소. 없으면 서버가 404 를 주고, 카드가 그때 만들어 올린다. */
 export function posterSrcFor(m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } }): string {
   if (!m.taskId) return '';
@@ -2756,7 +2812,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer src={playbackSrcFor(previewItem)} fallbackSrc={mediaSrcFor(previewItem)} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
+              <VideoPlayer sources={playbackChain(previewItem)} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -2889,7 +2945,7 @@ export function ChatArea() {
                   style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                   className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200" >
                   <div className="aspect-video bg-black relative group">
-                    <VideoPlayer src={playbackSrcFor(item)} fallbackSrc={mediaSrcFor(item)} poster={posterSrcFor(item)} posterOf={item} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    <VideoPlayer sources={playbackChain(item)} poster={posterSrcFor(item)} posterOf={item} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
                     <ClipStamp ms={item.timestamp} />
                     {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
                     <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}
@@ -3073,7 +3129,7 @@ export function ChatArea() {
                         <div className="space-y-3">
                           {msg.videoUrl && (
                             <div className="relative">
-                              <VideoPlayer src={playbackSrcFor(msg)} fallbackSrc={mediaSrcFor(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                              <VideoPlayer sources={playbackChain(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
                               <ClipStamp ms={msg.timestamp} />
                             </div>
                           )}
