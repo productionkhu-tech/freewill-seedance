@@ -61,6 +61,13 @@ const TEAM_KEY_HASHES: Record<string, string> = {
   'a363ada0a1c1d39f02ebd47a8e0364ab0de46e127a643dc305d9de3b1701170b': '9팀',
   'a4eccba638ecf60e0bab44575e0ff433938d3290d913b3ad13b2cc0fceccae17': '10팀',
   'a0f79d7874f2e5aabe1db15fc93acdb80512a30326f2fcb9914ae1ee2e9319bb': 'AFX팀',
+  // AFX 를 3분야로 쪼개면서 발급한 키들(2026-09-09). 형식이 다르다 — 기존 13개는 맨
+  // UUID 인데 이쪽은 'ark-' 접두어가 붙은 신형이다. 해시로만 대조하므로 형식은 상관없다.
+  // 구 AFX 키는 남겨둔다: 그 bat 을 이미 돌려둔 PC 가 있고, 지우면 그 PC 들이 조용히
+  // UNKNOWN 으로 넘어간다. 안 쓰기로 한 것과 못 쓰게 만드는 것은 다르다.
+  '96c54e01db364d162ae628faaad0f5fc1a1dc8933b0b84defcd63bc910612a82': 'AFX_1팀',
+  'be80455a50e2aeb7ecd5cab99a48fc68e2d248530b84ddf766531e2876af850e': 'AFX_2팀',
+  'c66699dfb03aad9ec1de1f1d2feb315c379f8ec275bce43627aa26a3a3ba0973': 'AFX_3팀',
   'bd0900883cc308becf0fe4e8d629130acea5a59e26b4667bef6f9a861a0e6bbb': 'TA팀',
   '724cf3b6d22b122d01b371eb8e550ffe4053b5eef4731becd3684f5c72bf4d4d': 'Special팀',
   '0e43bc6b870b1d889724d6abe19cf23bda010114b780efcf0635e94964f1e117': 'AIP팀',
