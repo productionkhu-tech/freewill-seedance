@@ -10,6 +10,11 @@ export default function App() {
   // Non-blocking notice when a selected project is auto-cleared on 종료 (a native alert()
   // here would de-activate the window and drop the prompt caret mid-typing).
   const [projectEndedNote, setProjectEndedNote] = useState<string | null>(null);
+  // 이 PC 의 사용량이 어느 팀에도 안 잡히는 상태. 서버가 SEEDANCE_API_KEY 의 해시로
+  // 팀을 찾지 못하면(팀 bat 미실행, 새로 발급된 키 등) UNKNOWN 으로 집계된다.
+  // 키가 없는 경우는 서버가 아예 안 뜨므로(startServer 의 게이트) 여기 오는 경우는
+  // '키는 있는데 어느 팀 것인지 모른다' 하나뿐이다.
+  const [teamWarn, setTeamWarn] = useState<string | null>(null);
 
   useEffect(() => {
     if (_hasHydrated && projects.length === 0) createProject();
@@ -56,6 +61,16 @@ export default function App() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: [...ids] }),
     }).catch(() => { /* 캐시 수명 연장 실패는 조용히 넘어간다 */ });
+  }, [_hasHydrated]);
+
+  // 팀 판별 결과를 한 번 확인한다. 실패는 조용히 넘어간다 — 확인 자체가 안 되는 것을
+  // 팀을 모른다고 단정하면, 서버가 잠깐 늦게 뜬 것만으로 거짓 경고가 뜬다.
+  useEffect(() => {
+    if (!_hasHydrated) return;
+    fetch('/api/team')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (j && j.known === false) setTeamWarn('이 PC 의 API 키가 등록된 팀 목록에 없습니다.'); })
+      .catch(() => { /* 확인 실패는 경고하지 않는다 */ });
   }, [_hasHydrated]);
 
   // Ask the browser not to throw our storage away. Without this an origin's IndexedDB is
@@ -218,6 +233,17 @@ export default function App() {
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[80] w-[min(92%,30rem)] flex items-start gap-2.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl shadow-lg px-3.5 py-2.5">
           <span className="text-[13px] leading-snug flex-1">{projectEndedNote}</span>
           <button onClick={() => setProjectEndedNote(null)} className="shrink-0 text-amber-500 hover:text-amber-800 text-sm font-bold leading-none mt-0.5">✕</button>
+        </div>
+      )}
+      {/* 닫기 버튼이 없다. 이 경고는 '알림' 이 아니라 잘못된 상태의 표시라서,
+          치우면 그 상태가 그대로 남은 채 보이지만 않게 된다. bat 을 돌리고 앱을
+          다시 켜면 사라진다. */}
+      {teamWarn && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] w-[min(92%,34rem)] flex items-start gap-2.5 bg-red-50 border border-red-300 text-red-900 rounded-xl shadow-lg px-3.5 py-2.5">
+          <span className="text-[13px] leading-snug flex-1">
+            <b>사용량이 어느 팀에도 집계되지 않습니다.</b><br />
+            {teamWarn} 팀 bat 파일을 실행한 뒤, 트레이 아이콘까지 완전히 종료하고 앱을 다시 켜주세요.
+          </span>
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">

@@ -729,6 +729,20 @@ async function startServer() {
   // 보관 상태. :taskId 와 겹치지 않도록 경로를 따로 뒀다.
   app.get('/api/archive/status', (_req, res) => res.json(archiveStats()));
 
+  // 이 PC 가 어느 팀으로 집계되는지. 화면에 띄우기 위한 것이다.
+  // R2·NCP 키가 없으면 앱이 아예 안 뜨는데, 팀 키를 모르는 경우만 조용히 넘어가고
+  // 있었다 — 앱은 멀쩡히 돌고 리포트도 나가지만 사용량이 전부 UNKNOWN 으로 쌓인다.
+  // 콘솔 한 줄이 유일한 신호라 아무도 못 본다. 한 달치 집계가 남의 것이 된 뒤에야
+  // 알게 되는 종류의 실패다.
+  // 부팅을 막지는 않는다. 새 팀 키가 발급될 때마다 그 팀이 앱을 못 쓰게 되는 쪽이
+  // 더 나쁘다 — 집계는 나중에 고칠 수 있어도 멈춘 작업은 못 되돌린다.
+  // 키가 아예 없는 경우는 여기까지 오지 않는다 — startServer() 첫 줄에서 이미
+  // process.exit(1) 이다. 그래서 known:false 는 '키는 있는데 모르는 키' 하나뿐이다.
+  app.get('/api/team', (_req, res) => res.json({
+    team: TEAM_NAME,
+    known: TEAM_NAME !== 'UNKNOWN',
+  }));
+
   // ── 목록 썸네일(포스터) ───────────────────────────────────────────────────
   // ★ /api/media/:taskId 보다 먼저 등록한다. 뒤에 두면 '{taskId}/poster' 가 통째로
   //   :taskId 로 잡히지 않고 4-세그먼트라 아예 매칭이 안 된다.
