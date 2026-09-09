@@ -80,6 +80,32 @@ const TEAM_NAME = (() => {
 console.log(`[Tracker] Resolved team: ${TEAM_NAME}`);
 const reportedTasks = new Set<string>();
 
+// 트래커에 "우리 앱이 맞다" 고 증명하는 서명.
+//
+// 왜 필요한가: 이 URL 은 공개 저장소에 적혀 있고 익명 공개였다. 아무나 열면 고객사
+// 21곳 이름과 누적 사용량이 보였고(2026-09-09 확인), 가짜 사용량도 넣을 수 있었다.
+//
+// 비밀은 R2 키에서 한 번 더 유도한 값이다. R2 키 원본을 GAS 스크립트 속성에 두면
+// 그쪽이 새는 순간 R2 까지 열린다 — 유도값은 되돌릴 수 없으니 GAS 가 털려도 R2 는
+// 안전하다. 그리고 이 값은 모든 PC 가 이미 가진 R2 키에서 스스로 만들 수 있어서,
+// 14개 팀에 새로 뿌릴 비밀이 없다(bat 을 안 고쳐도 된다).
+//
+// 키 자체는 절대 나가지 않는다. 나가는 것은 타임스탬프와 그 서명뿐이고, GAS 는
+// 5분 창 안의 서명만 받는다 — 하나를 주워도 오래 못 쓴다.
+const TRACKER_SECRET = R2_SECRET_ACCESS_KEY
+  ? crypto.createHmac('sha256', R2_SECRET_ACCESS_KEY).update('seedance-tracker-v1').digest('hex')
+  : '';
+function trackerAuth(): { ts: string; proof: string } | null {
+  if (!TRACKER_SECRET) return null;
+  const ts = String(Math.floor(Date.now() / 1000));
+  return { ts, proof: crypto.createHmac('sha256', TRACKER_SECRET).update('tracker:' + ts).digest('hex') };
+}
+// GET 은 쿼리로, POST 는 본문으로 같은 값을 싣는다.
+function signedTrackerUrl(base: string): string {
+  const a = trackerAuth();
+  return a ? `${base}&ts=${a.ts}&proof=${a.proof}` : base;
+}
+
 // Map: BytePlus task id → billing/tracking project name (from the app's dropdown).
 // Captured at task-create time (stripped from the BytePlus payload), read at
 // report time so the credit tracker can attribute usage to the project.
@@ -998,7 +1024,7 @@ async function startServer() {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 15000);
     try {
-      const r = await fetch(`${TRACKER_URL}?action=projects`, { redirect: 'follow', signal: ac.signal });
+      const r = await fetch(signedTrackerUrl(`${TRACKER_URL}?action=projects`), { redirect: 'follow', signal: ac.signal });
       const data: any = JSON.parse(await r.text());
       if (data?.ok === true && Array.isArray(data.projects)) rememberRoster(data.projects);
     } catch { /* fall through to whatever we already hold */ } finally { clearTimeout(timer); }
@@ -1013,7 +1039,7 @@ async function startServer() {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 25000);
     try {
-      const r = await fetch(`${TRACKER_URL}?action=projects`, { redirect: 'follow', signal: ac.signal });
+      const r = await fetch(signedTrackerUrl(`${TRACKER_URL}?action=projects`), { redirect: 'follow', signal: ac.signal });
       const text = await r.text();
       let data: any;
       // A non-JSON body is the tracker failing, not an empty roster — keep them distinct.
@@ -1372,6 +1398,7 @@ async function startServer() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            ...(trackerAuth() || {}),   // ts + proof
             team: TEAM_NAME,
             project: taskToProject.get(req.params.id) || '', // billing project (may be '')
             task_id: req.params.id,
