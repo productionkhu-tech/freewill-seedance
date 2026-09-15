@@ -513,6 +513,47 @@ export async function recoverFromHints(taskId: string, provider: Provider, proje
   } catch { return null; }
 }
 
+/**
+ * 이미 보관된 영상들의 썸네일을 로컬로 미리 받아둔다.
+ *
+ * 왜 미리 받나 — 로컬 썸네일은 그 PC 가 한 번이라도 '본' 것만 쌓인다. 그런데 썸네일이
+ * 실제로 필요해지는 시점은 영상이 NCP 에서 사라진 뒤다. 그때 처음 열면 받아올 곳이
+ * 없다. 살아 있는 동안 미리 받아두는 것이 유일한 방법이고, 그래서 '이제부터 만드는
+ * 것' 이 아니라 '지금 살아 있는 전부' 가 대상이다.
+ *
+ * 앱 기동을 막지 않는다. 한 번에 하나씩, 사이를 띄우고 받는다 — 급할 것이 없고,
+ * 켜자마자 수백 건을 동시에 당기면 정작 사용자가 보려는 영상이 밀린다.
+ * 이미 있는 것은 건너뛰므로 두 번째 실행부터는 사실상 공짜다.
+ */
+export async function backfillPosters(): Promise<{ had: number; got: number; failed: number }> {
+  const out = { had: 0, got: 0, failed: 0 };
+  const todo: string[] = [];
+  for (const [taskId, row] of mediaIndex) {
+    if (!row?.poster) continue;                       // 애초에 썸네일이 없는 건 건너뛴다
+    if (fs.existsSync(localPosterPath(taskId))) { out.had++; continue; }
+    todo.push(taskId);
+  }
+  if (!todo.length) {
+    console.log(`[NCP] 썸네일 로컬 보관 ${out.had}건 — 받을 것 없음`);
+    return out;
+  }
+  console.log(`[NCP] 썸네일 ${todo.length}건을 로컬로 받아둡니다 (이미 있음 ${out.had}건)`);
+  for (const taskId of todo) {
+    try {
+      const url = await presignPoster(taskId);
+      if (!url) { out.failed++; continue; }
+      const r = await fetch(url);
+      if (!r.ok) { out.failed++; continue; }
+      const body = Buffer.from(await r.arrayBuffer());
+      if (body.length < 256) { out.failed++; continue; }   // 빈 응답을 썸네일로 굳히지 않는다
+      savePosterLocal(taskId, body) ? out.got++ : out.failed++;
+    } catch { out.failed++; }
+    await new Promise(r => setTimeout(r, 120));
+  }
+  console.log(`[NCP] 썸네일 로컬 보관 완료 — 새로 받음 ${out.got}, 이미 있음 ${out.had}, 실패 ${out.failed}`);
+  return out;
+}
+
 export function archiveStats() {
   return {
     ready: Boolean(ready),

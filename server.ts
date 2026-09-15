@@ -21,6 +21,7 @@ import { MODEL_GRANTS, brandOf } from './src/lib/model-access';
 import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
   presignArchived, recoverFromHints, lookupArchived, archiveStats, pendingSource,
+  backfillPosters,
   posterDir, localPosterPath, savePosterLocal,
   putPoster, presignPoster, hasPoster,
   presignPreview, previewState,
@@ -366,6 +367,11 @@ async function startServer() {
   // 실패한 보관은 큐에 남는다. 다음 생성이 없어도 스스로 다시 시도하도록 주기적으로 깨운다.
   // 로컬 사본이 이미 있으면 원본 URL 이 죽은 뒤에도 성공할 수 있으므로 포기시키지 않는다.
   setInterval(() => { void drainArchive(); }, 10 * 60 * 1000).unref?.();
+
+  // 이미 보관된 것들의 썸네일을 로컬로 확보한다. 영상이 NCP 에서 사라진 뒤에도
+  // 무엇이었는지는 남아야 하는데, 사라진 뒤에는 받아올 곳이 없기 때문이다.
+  // 기동을 막지 않도록 조금 늦춰 시작하고, 실패해도 조용히 넘어간다.
+  setTimeout(() => { void backfillPosters().catch(() => {}); }, 20000).unref?.();
 
   // Cleanup files older than 30 days — mtime-based. Every cache READ/dedup-hit
   // refreshes mtime (touchCache below), so actively reused references never

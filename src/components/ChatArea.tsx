@@ -136,6 +136,15 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
   // 그러면 '만료' 가 아니라 '지금 잠깐 못 가져온 것' 이다. 두 경우를 같은 문구로
   // 덮으면, 멀쩡히 남아 있는 영상을 사라진 줄 알고 다시 만들게 된다.
   const [failPosterOk, setFailPosterOk] = useState(false);
+  // 썸네일 내려받기. 영상이 사라진 뒤 남는 것이 이 한 장뿐이라, 앱 밖으로 꺼낼
+  // 길이 있어야 한다. taskId 는 주소에서 뽑는다 — 이 컴포넌트는 메시지를 모른다.
+  // 다시 굽지 않고 있는 파일을 그대로 준다(.webp) — 원본을 손대지 않는다는 규칙은
+  // 영상에만 적용되는 것이 아니다.
+  const saveFailPoster = () => {
+    const m = failBg.match(/\/api\/media\/([^/?]+)\/poster/);
+    const id = m ? decodeURIComponent(m[1]) : 'thumbnail';
+    void downloadViaProxy(failBg, `${id}.webp`);
+  };
   const blobUrlRef = useRef<string | null>(null);
 
   // 재생 소스는 여러 단이고, 한 단이 죽으면 다음 단으로 내려간다. 갓 만든 영상은
@@ -382,11 +391,21 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
               <>보관 전에 원본 링크가 만료됐거나, 잠시 연결이 끊겼을 수 있습니다.<br />자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.</>
             )}
           </p>
-          <button
-            onClick={retry}
-            className="mt-0.5 text-[11px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 border border-white/20 rounded-md px-2.5 py-1 transition-colors">
-            다시 시도
-          </button>
+          <div className="mt-0.5 flex items-center gap-1.5">
+            <button
+              onClick={retry}
+              className="text-[11px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 border border-white/20 rounded-md px-2.5 py-1 transition-colors">
+              다시 시도
+            </button>
+            {failPosterOk && (
+              <button
+                onClick={saveFailPoster}
+                title="이 썸네일을 파일로 저장합니다 (1280x720)"
+                className="text-[11px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 border border-white/20 rounded-md px-2.5 py-1 transition-colors">
+                썸네일 저장
+              </button>
+            )}
+          </div>
         </div>
         </>
       ) : !showPoster && mounted && (blobSrc || is4k) && (
