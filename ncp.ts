@@ -190,6 +190,28 @@ function saveIndex() {
   } catch (e: any) { console.warn('[NCP] 색인 저장 실패:', e?.message); }
 }
 
+/**
+ * 로컬 썸네일 보관 위치. media-cache 아래의 별도 폴더다.
+ *
+ * 왜 하위 폴더인가 — 두 청소가 서로 다르게 굴어야 하기 때문이다.
+ *   · 30일 프루너: media-cache 의 파일만 훑고 폴더는 건너뛴다. 그래서 여기는 안 지운다.
+ *     썸네일은 영상보다 오래 살아남아야 한다 — 영상이 사라진 뒤에 그게 뭐였는지
+ *     보여주는 것이 존재 이유라서, 30일에 같이 지워지면 아무 의미가 없다.
+ *   · 캐시 비우기 버튼: 이 폴더를 통째로 비운다. 사용자가 비우겠다면 비워야 한다.
+ */
+export function posterDir(): string { return path.join(CACHE_DIR, 'posters'); }
+export function localPosterPath(taskId: string): string {
+  return path.join(posterDir(), taskId.replace(/[^A-Za-z0-9._-]/g, '') + '.webp');
+}
+/** 실패는 조용히 넘어간다 — 썸네일은 없으면 없는 대로 돌아간다. */
+export function savePosterLocal(taskId: string, body: Buffer): boolean {
+  try {
+    fs.mkdirSync(posterDir(), { recursive: true });
+    fs.writeFileSync(localPosterPath(taskId), body);
+    return true;
+  } catch { return false; }
+}
+
 export function lookupArchived(taskId: string): IndexRow | undefined {
   return mediaIndex.get(taskId);
 }
@@ -616,6 +638,9 @@ async function makeDerivatives(taskId: string, local: string, key: string) {
         const r = mediaIndex.get(taskId); if (r) { r.poster = true; saveIndex(); }
         console.log(`[NCP] 포스터 ${(fs.statSync(out).size / 1024).toFixed(0)}KB`);
       }
+      // 만든 김에 로컬에도 남긴다. 예전에는 올리고 곧바로 지웠는데, 그러면 NCP 에서
+      // 영상이 만료될 때 썸네일도 함께 사라져 아무것도 안 남는다.
+      if (fs.existsSync(out)) savePosterLocal(taskId, fs.readFileSync(out));
     } catch (e: any) { console.warn('[NCP] 포스터 업로드 실패:', e?.message); }
     finally { try { fs.rmSync(out, { force: true }); } catch {} }
   }

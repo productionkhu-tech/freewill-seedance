@@ -21,6 +21,7 @@ import { MODEL_GRANTS, brandOf } from './src/lib/model-access';
 import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
   presignArchived, recoverFromHints, lookupArchived, archiveStats, pendingSource,
+  posterDir, localPosterPath, savePosterLocal,
   putPoster, presignPoster, hasPoster,
   presignPreview, previewState,
   lastNcpError, resetNcpBackoff,
@@ -386,7 +387,14 @@ async function startServer() {
     for (const f of fs.readdirSync(CACHE_DIR)) {
       if (CONTROL_FILES.has(f)) continue;
       const fp = path.join(CACHE_DIR, f);
-      const age = now - fs.statSync(fp).mtimeMs;
+      const st = fs.statSync(fp);
+      // 폴더는 건너뛴다. 이유가 둘이다.
+      //   1) posters/ 는 여기서 지우면 안 된다 — 썸네일은 영상보다 오래 남아야 한다.
+      //   2) unlinkSync 는 폴더에 EPERM 을 던지는데 그 예외를 루프 바깥 try 가 잡아
+      //      나머지 정리가 통째로 멈춘다. 폴더 하나 때문에 30일 청소가 조용히 안 돌고
+      //      있을 수 있었다.
+      if (st.isDirectory()) continue;
+      const age = now - st.mtimeMs;
       if (age > CACHE_MAX_AGE_MS) { fs.unlinkSync(fp); console.log(`[Cache] Deleted old file: ${f}`); }
     }
   } catch {};
@@ -559,7 +567,16 @@ async function startServer() {
         const st = fs.statSync(path.join(CACHE_DIR, f));
         if (st.isFile()) { count++; bytes += st.size; }
       }
-      res.json({ count, bytes });
+      // 썸네일도 캐시 비우기로 사라지므로 합계에 넣는다 — 안 그러면 안내에 적힌
+      // 용량과 실제로 비워지는 양이 어긋난다.
+      let posters = 0, posterBytes = 0;
+      try {
+        for (const p of fs.readdirSync(posterDir())) {
+          const st = fs.statSync(path.join(posterDir(), p));
+          if (st.isFile()) { posters++; posterBytes += st.size; }
+        }
+      } catch { /* 없으면 0 */ }
+      res.json({ count: count + posters, bytes: bytes + posterBytes, posters, posterBytes });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -739,6 +756,14 @@ async function startServer() {
         const st = fs.statSync(fp);
         if (st.isFile()) { bytes += st.size; fs.unlinkSync(fp); deleted++; }
       }
+      // 썸네일 폴더는 30일 프루너가 안 건드린다. 사용자가 비우겠다고 할 때만 비운다.
+      try {
+        for (const p of fs.readdirSync(posterDir())) {
+          const pp = path.join(posterDir(), p);
+          const pst = fs.statSync(pp);
+          if (pst.isFile()) { bytes += pst.size; fs.unlinkSync(pp); deleted++; }
+        }
+      } catch { /* 폴더가 없으면 지울 것도 없다 */ }
       console.log(`[Cache] Cleared by user: ${deleted} files, ${(bytes / 1024 / 1024).toFixed(1)}MB`);
       res.json({ ok: true, deleted, bytes });
     } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
@@ -782,18 +807,29 @@ async function startServer() {
     if (!taskId) return res.status(400).end();
     const prov = typeof req.query.provider === 'string' ? req.query.provider : undefined;
     const proj = typeof req.query.project === 'string' ? req.query.project : undefined;
+    // 1) 로컬 먼저. 영상이 NCP 에서 만료된 뒤에도 여기 남아 있는 것이 이 폴더의
+    //    존재 이유다. 트래픽 0 이고 NCP 아웃바운드 과금도 피한다.
+    const localPoster = localPosterPath(taskId);
+    if (fs.existsSync(localPoster)) {
+      res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+      return res.sendFile(localPoster);
+    }
     const url = await presignPoster(taskId, prov, proj);
     if (!url) return res.status(404).json({ error: 'no poster' });
     try {
       const up = await fetch(url);
       if (!up.ok || !up.body) return res.status(502).end();
+      // 2) NCP 에서 가져왔으면 로컬에도 깔아둔다. 다음부터는 위에서 끝나고, 나중에
+      //    NCP 에서 사라져도 이 PC 에는 남는다. 40KB 라 통째로 받아도 부담이 없다.
+      const body = Buffer.from(await up.arrayBuffer());
+      savePosterLocal(taskId, body);
       res.status(200);
       res.setHeader('Content-Type', 'image/webp');
-      const len = up.headers.get('content-length'); if (len) res.setHeader('Content-Length', len);
+      res.setHeader('Content-Length', String(body.length));
       // 포스터는 내용이 바뀌지 않는다(같은 영상의 같은 프레임). 오래 캐시해도 안전하고,
       // 그래야 갤러리를 다시 열 때 NCP 를 또 치지 않는다 — 아웃바운드가 과금이다.
       res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
-      Readable.fromWeb(up.body as any).pipe(res);
+      res.end(body);
     } catch { res.status(502).end(); }
   });
 
@@ -824,7 +860,9 @@ async function startServer() {
     const proj = typeof req.query.project === 'string' ? req.query.project : '';
     const buf = req.body as Buffer;
     if (!taskId || !Buffer.isBuffer(buf) || buf.length < 256) return res.status(400).json({ ok: false });
-    if (hasPoster(taskId)) return res.json({ ok: true, already: true });
+    // 로컬 저장은 NCP 상태와 무관하게 언제나 한다 — 이 PC 에 없으면 남겨야 한다.
+    savePosterLocal(taskId, buf);
+    if (hasPoster(taskId)) return res.json({ ok: true, already: true, local: true });
     const ok = await putPoster(taskId, prov, proj, buf);
     res.json({ ok });
   });
