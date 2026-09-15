@@ -810,19 +810,31 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     const total = formatBytes(totalCacheBytes + mediaStats.bytes);
     // 무엇이 없어지고 무엇이 남는지 둘 다 적는다. '지워진다' 만 적으면 영상까지
     // 날아가는 줄 알고 아무도 안 누르고, 그러면 디스크가 계속 찬다.
+    // ★ 썸네일은 1504 부터 로컬(media-cache/posters)에 있고, 이 버튼으로 지워진다.
+    //   그런데 안내문은 계속 '지워지지 않습니다' 라고 말하고 있었다 — 설계를 바꾸면서
+    //   설명을 안 고친 것이고, 그 결과 창이 거짓말을 했다.
+    //   stats 의 count/bytes 에는 썸네일이 이미 합산돼 있으므로, 레퍼런스 캐시만
+    //   보여주려면 빼줘야 한다. 안 빼면 같은 것을 두 줄에 걸쳐 두 번 세게 된다.
+    const posterN = mediaStats.posters || 0;
+    const posterB = mediaStats.posterBytes || 0;
+    const refN = Math.max(0, mediaStats.count - posterN);
+    const refB = Math.max(0, mediaStats.bytes - posterB);
     const ok = confirm(
       `총 ${total} 캐시를 전부 비울까요?\n\n` +
       `── 지워지는 것 ──\n` +
       `• 디스크: ${disk} (브라우저 HTTP 캐시)\n` +
       `• 메모리: ${mem} (영상 사전 다운로드 풀)\n` +
-      `• 레퍼런스 캐시: ${formatBytes(mediaStats.bytes)} (${mediaStats.count}개 — 재사용용 원본 보관소)\n` +
+      `• 레퍼런스 캐시: ${formatBytes(refB)} (${refN}개 — 재사용용 원본 보관소)\n` +
+      `• 목록 썸네일: ${formatBytes(posterB)} (${posterN}개)\n` +
       `• 생성 영상의 로컬 사본 — 다시 볼 때 NCP 에서 받아오므로 처음 한 번만 느려집니다\n\n` +
       `── 남는 것 ──\n` +
       `• NCP 에 보관된 생성 영상 — 지워지지 않습니다\n` +
-      `• 목록 썸네일 — NCP 에 있어 지워지지 않습니다\n` +
       `• 다운로드 받은 파일 — 영향 없습니다\n\n` +
-      `⚠ 딱 하나 되돌릴 수 없는 것: 과거 메시지를 재사용할 때 쓰는 원본 중 ` +
-      `클립보드로 붙여넣었던 이미지입니다. (파일로 첨부한 것은 원본 경로에서 복구 시도)`
+      `⚠ 되돌릴 수 없는 것 둘\n` +
+      ` 1) 클립보드로 붙여넣었던 재사용 원본 이미지\n` +
+      `    (파일로 첨부한 것은 원본 경로에서 복구 시도)\n` +
+      ` 2) 보관 기간이 지난 영상의 썸네일 — NCP 에도 없어서 지우면 영영 없습니다\n` +
+      `    (아직 살아 있는 영상의 썸네일은 다시 받아옵니다)`
     );
     if (!ok) return;
     clearBlobCache();
