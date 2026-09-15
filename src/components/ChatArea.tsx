@@ -97,15 +97,21 @@ const CAN_PLAY_HEVC = (() => {
 
 // Exported for the all-projects gallery (GlobalGallery). Lazy-mounts on intersection,
 // so a grid of hundreds of clips only ever fetches the handful actually on screen.
-export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf }: {
+export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf, failPoster }: {
   /** 재생 소스를 우선순위 순으로. 앞에서부터 쓰고, 실패하면 다음 단으로 내려간다.
    *  목록은 playbackChain() 한 곳에서만 만든다 — 단이 늘어도 호출부는 안 건드린다. */
   sources: string[];
   className?: string; eager?: boolean; is4k?: boolean;
   /** 목록 썸네일 주소. 주면 카드가 이 이미지로 뜨고, 영상은 마우스를 올릴 때 붙는다. */
   poster?: string;
-  /** 포스터가 아직 없을 때 만들어 올리기 위한 메시지 정보. */
+  /** 포스터가 아직 없을 때 만들어 올리기 위한 메시지 정보.
+   *  ★ 이걸 넘기면 영상이 뜰 때마다 캔버스로 프레임을 떠서 WebP 로 굽고 업로드한다.
+   *  4K HEVC 는 GPU 리드백이라 눈에 띄게 버벅인다 — 목록(갤러리)처럼 포스터가 실제로
+   *  필요한 화면에만 넘긴다. 채팅 카드에는 넘기지 않는다. */
   posterOf?: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } };
+  /** 못 불러왔을 때 뒤에 깔 썸네일 주소. 실패했을 때만 <img> 가 생기므로
+   *  정상 재생 경로에는 아무 비용도 없다 — 캡처와 무관하다. */
+  failPoster?: string;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -123,7 +129,13 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf 
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   // 실패 화면에 깔 썸네일. 404 면 한 번 꺼두고 다시 안 부른다.
+  // 갤러리는 이미 poster 를 들고 있으니 그걸 그대로 쓴다 — 주소가 같다.
   const [failPosterGone, setFailPosterGone] = useState(false);
+  const failBg = failPoster || poster || '';
+  // 포스터가 실제로 떴다 = 이 영상은 NCP 에 보관되어 있다(포스터는 보관할 때 만든다).
+  // 그러면 '만료' 가 아니라 '지금 잠깐 못 가져온 것' 이다. 두 경우를 같은 문구로
+  // 덮으면, 멀쩡히 남아 있는 영상을 사라진 줄 알고 다시 만들게 된다.
+  const [failPosterOk, setFailPosterOk] = useState(false);
   const blobUrlRef = useRef<string | null>(null);
 
   // 재생 소스는 여러 단이고, 한 단이 죽으면 다음 단으로 내려간다. 갓 만든 영상은
@@ -160,6 +172,7 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf 
   const [retryTick, setRetryTick] = useState(0);
   const retry = () => {
     idxRef.current = 0; setSrcIdx(0); setFailed(false); setRetryTick(t => t + 1);
+    setFailPosterGone(false); setFailPosterOk(false);
   };
 
   useEffect(() => {
@@ -350,11 +363,12 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf 
         {/* 포스터가 있으면 뒤에 깔아준다. 검은 상자만 남으면 어느 컷이었는지 알 수가
             없는데, 포스터는 16~34KB 라 띄우는 비용이 사실상 없다. 없으면(404) 조용히
             사라지고 예전처럼 글씨만 남는다 — 보관 전에 만료된 옛 영상이 그 경우다. */}
-        {!failPosterGone && posterOf?.taskId && (
+        {!failPosterGone && failBg && (
           <img
-            src={posterSrcFor(posterOf)}
+            src={failBg}
             alt=""
             aria-hidden
+            onLoad={() => setFailPosterOk(true)}
             onError={() => setFailPosterGone(true)}
             className="absolute inset-0 w-full h-full object-contain opacity-35"
           />
@@ -362,8 +376,11 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf 
         <div className="relative w-full h-full flex flex-col items-center justify-center gap-2 px-4 text-center">
           <p className="text-[12px] text-white leading-snug drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">영상을 불러오지 못했습니다</p>
           <p className="text-[11px] text-white/70 leading-snug drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
-            보관 전에 원본 링크가 만료됐거나, 잠시 연결이 끊겼을 수 있습니다.<br />
-            자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.
+            {failPosterOk ? (
+              <>이 영상은 보관되어 있습니다 — 지금 잠시 못 가져왔을 뿐입니다.<br />다시 시도를 눌러주세요.</>
+            ) : (
+              <>보관 전에 원본 링크가 만료됐거나, 잠시 연결이 끊겼을 수 있습니다.<br />자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.</>
+            )}
           </p>
           <button
             onClick={retry}
@@ -1195,11 +1212,14 @@ export function ChatArea() {
   // 잠깐 동안 바닥에 붙여둔다. 한 번만 맞추면 모자라다 — 카드의 포스터와 영상이
   // 뒤늦게 로드되며 높이가 계속 자라서, 그 순간 맞춘 위치가 곧 중간이 된다.
   // 사용자가 휠을 굴리거나 손가락을 대면 즉시 손을 뗀다. 따라가며 싸우면 안 된다.
+  const pinReleaseRef = useRef<(() => void) | null>(null);
   const pinToBottom = useCallback((ms = 700) => {
     const el = messagesScrollRef.current;
     if (!el) return;
     let stop = false;
     const release = () => { stop = true; };
+    // 휠·터치 말고 버튼(맨 위로 / 특정 컷으로)으로도 풀 수 있어야 한다.
+    pinReleaseRef.current = release;
     el.addEventListener('wheel', release, { once: true, passive: true });
     el.addEventListener('touchstart', release, { once: true, passive: true });
     const t0 = Date.now();
@@ -1213,7 +1233,7 @@ export function ChatArea() {
     requestAnimationFrame(step);
   }, []);
 
-  const scrollToTop = () => messagesScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  const scrollToTop = () => { pinReleaseRef.current?.(); messagesScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); };
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
 
   const enterGallery = () => {
@@ -1228,6 +1248,7 @@ export function ChatArea() {
   };
   // Find a specific message and scroll to it
   const scrollToMessage = (messageId: string) => {
+    pinReleaseRef.current?.();   // 특정 컷으로 가는 중이면 바닥 고정을 푼다
     setShowGallery(false);
     setPreviewItem(null);
     requestAnimationFrame(() => {
@@ -2857,7 +2878,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer sources={playbackChain(previewItem)} posterOf={previewItem} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
+              <VideoPlayer sources={playbackChain(previewItem)} failPoster={posterSrcFor(previewItem)} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -3174,7 +3195,7 @@ export function ChatArea() {
                         <div className="space-y-3">
                           {msg.videoUrl && (
                             <div className="relative">
-                              <VideoPlayer sources={playbackChain(msg)} posterOf={msg} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                              <VideoPlayer sources={playbackChain(msg)} failPoster={posterSrcFor(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
                               <ClipStamp ms={msg.timestamp} />
                             </div>
                           )}
