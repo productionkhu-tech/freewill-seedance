@@ -724,6 +724,16 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const inputRef = useRef<HTMLInputElement>(null);
   const [diskCacheSize, setDiskCacheSize] = useState<number | null>(null);
   const [memCacheBytes, setMemCacheBytes] = useState<number>(0);
+  // 서버가 들고 있는 캐시(레퍼런스 원본 + 썸네일). 버튼에 적히는 숫자가 정리창의
+  // 합계와 달라 보이던 이유가 이것이다 — 버튼은 디스크+메모리만 세고 있었고, 정작
+  // 덩치의 대부분인 이쪽(수 GB)이 빠져 있었다.
+  const [srvCache, setSrvCache] = useState({ count: 0, bytes: 0, posters: 0, posterBytes: 0 });
+  // 캐시 정리 확인창. 네이티브 confirm 을 쓰지 않는 이유는 위 pendingDelete 주석과
+  // 같다 — 네이티브 창은 Electron 창을 비활성화해서 한글 IME 를 먹통으로 만든다.
+  // 앱 전체에서 alert/confirm 을 걷어냈는데 이 버튼만 남아 있었다.
+  const [cacheAsk, setCacheAsk] = useState(false);
+  const [cacheBusy, setCacheBusy] = useState(false);
+  const [cacheDone, setCacheDone] = useState<string | null>(null);
   // Download folder — session-only. Resets to OS Downloads on every app restart.
   const [downloadDir, setDownloadDir] = useState<string>('');
   const [isDefaultDir, setIsDefaultDir] = useState(true);
@@ -757,6 +767,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         try { const r = await api.getCacheSize(); setDiskCacheSize(r.size ?? 0); } catch {}
       }
       setMemCacheBytes(getBlobCacheStats().bytes);
+      try {
+        const r = await fetch('/api/cache/stats');
+        if (r.ok) setSrvCache(await r.json());
+      } catch { /* 서버가 아직이면 다음 주기에 */ }
     };
     refresh();
     const interval = setInterval(refresh, 5000);
@@ -789,7 +803,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     if (!r?.ok) alert(r?.reason === 'missing' ? `폴더를 찾을 수 없습니다.\n${r.path || downloadDir}` : '폴더를 열지 못했습니다.');
   };
 
-  const totalCacheBytes = (diskCacheSize ?? 0) + memCacheBytes;
+  // 버튼에 적히는 값 = 정리창의 합계. 두 숫자가 다르면 어느 쪽이 맞는지 알 수 없다.
+  const totalCacheBytes = (diskCacheSize ?? 0) + memCacheBytes + srvCache.bytes;
 
   const DASHBOARD_URL = 'https://script.google.com/macros/s/AKfycbyC53V4K-CHJnP86qIbBP0WmXZ4cDD9D3CFVmd8otL4ZThzpQ7RKhnCeIXgDu4y7CFrnQ/exec';
 
@@ -799,52 +814,29 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     else window.open(DASHBOARD_URL, '_blank');
   };
 
-  const handleClearCache = async () => {
+  const handleClearCache = () => {
     const api = (window as any).electronAPI;
-    if (!api?.clearCache) { alert('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
-    const disk = formatBytes(diskCacheSize ?? 0);
-    const mem = formatBytes(memCacheBytes);
-    // 레퍼런스 캐시(media-cache) 크기 — 서버에서 조회
-    let mediaStats = { count: 0, bytes: 0 };
-    try { const r = await fetch('/api/cache/stats'); if (r.ok) mediaStats = await r.json(); } catch {}
-    const total = formatBytes(totalCacheBytes + mediaStats.bytes);
-    // 무엇이 없어지고 무엇이 남는지 둘 다 적는다. '지워진다' 만 적으면 영상까지
-    // 날아가는 줄 알고 아무도 안 누르고, 그러면 디스크가 계속 찬다.
-    // ★ 썸네일은 1504 부터 로컬(media-cache/posters)에 있고, 이 버튼으로 지워진다.
-    //   그런데 안내문은 계속 '지워지지 않습니다' 라고 말하고 있었다 — 설계를 바꾸면서
-    //   설명을 안 고친 것이고, 그 결과 창이 거짓말을 했다.
-    //   stats 의 count/bytes 에는 썸네일이 이미 합산돼 있으므로, 레퍼런스 캐시만
-    //   보여주려면 빼줘야 한다. 안 빼면 같은 것을 두 줄에 걸쳐 두 번 세게 된다.
-    const posterN = mediaStats.posters || 0;
-    const posterB = mediaStats.posterBytes || 0;
-    const refN = Math.max(0, mediaStats.count - posterN);
-    const refB = Math.max(0, mediaStats.bytes - posterB);
-    const ok = confirm(
-      `총 ${total} 캐시를 전부 비울까요?\n\n` +
-      `── 지워지는 것 ──\n` +
-      `• 디스크: ${disk} (브라우저 HTTP 캐시)\n` +
-      `• 메모리: ${mem} (영상 사전 다운로드 풀)\n` +
-      `• 레퍼런스 캐시: ${formatBytes(refB)} (${refN}개 — 재사용용 원본 보관소)\n` +
-      `• 목록 썸네일: ${formatBytes(posterB)} (${posterN}개)\n` +
-      `• 생성 영상의 로컬 사본 — 다시 볼 때 NCP 에서 받아오므로 처음 한 번만 느려집니다\n\n` +
-      `── 남는 것 ──\n` +
-      `• NCP 에 보관된 생성 영상 — 지워지지 않습니다\n` +
-      `• 다운로드 받은 파일 — 영향 없습니다\n\n` +
-      `⚠ 되돌릴 수 없는 것 둘\n` +
-      ` 1) 클립보드로 붙여넣었던 재사용 원본 이미지\n` +
-      `    (파일로 첨부한 것은 원본 경로에서 복구 시도)\n` +
-      ` 2) 보관 기간이 지난 영상의 썸네일 — NCP 에도 없어서 지우면 영영 없습니다\n` +
-      `    (아직 살아 있는 영상의 썸네일은 다시 받아옵니다)`
-    );
-    if (!ok) return;
+    if (!api?.clearCache) { setCacheDone('이 기능은 데스크톱 앱에서만 사용할 수 있습니다.'); return; }
+    setCacheDone(null);
+    setCacheAsk(true);
+  };
+
+  const doClearCache = async () => {
+    const api = (window as any).electronAPI;
+    setCacheBusy(true);
     clearBlobCache();
     setMemCacheBytes(0);
-    // 레퍼런스 캐시(media-cache) — 얄짤없이 전부 삭제
+    // 레퍼런스 캐시 + 썸네일(media-cache) — 얄짤없이 전부 삭제
     let mediaOk = true;
     try { const r = await fetch('/api/cache/clear', { method: 'POST' }); mediaOk = r.ok && (await r.json()).ok; } catch { mediaOk = false; }
     const result = await api.clearCache();
-    if (result.ok && mediaOk) { setDiskCacheSize(0); alert('캐시를 전부 비웠습니다. (레퍼런스 캐시 포함)'); }
-    else alert(`일부 캐시 비우기 실패${!mediaOk ? ' — 레퍼런스 캐시' : ''}${!result.ok ? ' — 브라우저 캐시: ' + (result.error || '') : ''}\n나머지는 비웠습니다.`);
+    if (result?.ok) setDiskCacheSize(0);
+    if (mediaOk) setSrvCache({ count: 0, bytes: 0, posters: 0, posterBytes: 0 });
+    setCacheBusy(false);
+    setCacheAsk(false);
+    setCacheDone(result?.ok && mediaOk
+      ? '캐시를 전부 비웠습니다.'
+      : `일부만 비웠습니다${!mediaOk ? ' — 레퍼런스 캐시 실패' : ''}${!result?.ok ? ' — 브라우저 캐시 실패' : ''}`);
   };
 
   useEffect(() => {
@@ -1514,6 +1506,98 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       </AnimatePresence>,
       document.body)}
 
+    {/* 캐시 정리 확인. 네이티브 confirm 을 쓰지 않는다 — 그 창은 Electron 창을
+        비활성화해서 한글 IME 를 먹통으로 만든다(pendingDelete 주석과 같은 이유).
+        그리고 지우는 항목마다 실제 용량이 붙어야 누를지 말지 판단이 선다. */}
+    {createPortal(
+    <AnimatePresence>
+      {cacheAsk && (
+        <motion.div key="cache-ask-backdrop"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          onClick={() => { if (!cacheBusy) setCacheAsk(false); }}
+          className="fixed inset-0 z-[125] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.94, y: 12 }} animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.94, y: 12 }} transition={{ duration: 0.18, ease: 'easeOut' }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-[min(94vw,32rem)] bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-2xl overflow-hidden text-gray-900">
+            <div className="p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="shrink-0 w-9 h-9 rounded-full bg-indigo-50 flex items-center justify-center">
+                  <Sparkles size={18} className="text-indigo-500" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-[16px] font-semibold tracking-tight leading-snug">캐시를 비울까요?</h3>
+                  <p className="text-[13px] text-gray-500 mt-0.5">총 {formatBytes(totalCacheBytes)} 를 정리합니다.</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden">
+                <div className="px-3 py-1.5 bg-gray-50 dark:bg-white/5 text-[11px] font-semibold text-gray-500">지워지는 것</div>
+                <ul className="divide-y divide-gray-100 dark:divide-white/5">
+                  {[
+                    ['브라우저 HTTP 캐시', formatBytes(diskCacheSize ?? 0), ''],
+                    ['영상 사전 다운로드 풀', formatBytes(memCacheBytes), '메모리'],
+                    ['재사용용 원본 보관소', formatBytes(Math.max(0, srvCache.bytes - (srvCache.posterBytes || 0))), `${Math.max(0, srvCache.count - (srvCache.posters || 0))}개`],
+                    ['목록 썸네일', formatBytes(srvCache.posterBytes || 0), `${srvCache.posters || 0}개`],
+                  ].map(([name, size, note]) => (
+                    <li key={name} className="px-3 py-2 flex items-center gap-2 text-[12.5px]">
+                      <span className="flex-1 text-gray-700 dark:text-white/80">{name}</span>
+                      {note && <span className="text-[11px] text-gray-400">{note}</span>}
+                      <span className="font-mono text-[12px] text-gray-500 tabular-nums">{size}</span>
+                    </li>
+                  ))}
+                  <li className="px-3 py-2 text-[12.5px] text-gray-700 dark:text-white/80">
+                    생성 영상의 로컬 사본
+                    <span className="block text-[11px] text-gray-400 mt-0.5">다시 볼 때 NCP 에서 받아오므로 처음 한 번만 느려집니다</span>
+                  </li>
+                </ul>
+              </div>
+
+              <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/40 dark:bg-emerald-500/5 px-3 py-2">
+                <p className="text-[11px] font-semibold text-emerald-700 mb-1">남는 것</p>
+                <p className="text-[12px] text-emerald-900/80 dark:text-emerald-200/80 leading-relaxed">
+                  NCP 에 보관된 생성 영상 · 다운로드 받은 파일 — 둘 다 영향 없습니다
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-amber-200 bg-amber-50/60 dark:bg-amber-500/5 px-3 py-2">
+                <p className="text-[11px] font-semibold text-amber-700 mb-1">되돌릴 수 없는 것 둘</p>
+                <ol className="text-[12px] text-amber-900/85 dark:text-amber-200/80 leading-relaxed list-decimal pl-4 space-y-0.5">
+                  <li>클립보드로 붙여넣었던 재사용 원본 이미지 <span className="text-amber-700/70">(파일로 첨부한 것은 원본 경로에서 복구 시도)</span></li>
+                  <li>보관 기간이 지난 영상의 썸네일 — NCP 에도 없어서 지우면 영영 없습니다 <span className="text-amber-700/70">(아직 살아 있는 영상의 썸네일은 다시 받아옵니다)</span></li>
+                </ol>
+              </div>
+            </div>
+            <div className="px-5 pb-5 flex items-center justify-end gap-2">
+              <button onClick={() => setCacheAsk(false)} disabled={cacheBusy}
+                className="text-[13px] px-4 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors">
+                취소
+              </button>
+              <button onClick={doClearCache} disabled={cacheBusy}
+                className="text-[13px] px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium disabled:opacity-60 transition-colors">
+                {cacheBusy ? '비우는 중…' : '비우기'}
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>, document.body)}
+
+    {/* 결과 알림. alert() 자리 — 네이티브 창은 IME 를 깨뜨린다. 스스로 사라진다. */}
+    {createPortal(
+    <AnimatePresence>
+      {cacheDone && (
+        <motion.div key="cache-done"
+          initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}
+          transition={{ duration: 0.18 }}
+          onAnimationComplete={() => { setTimeout(() => setCacheDone(null), 3200); }}
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[130] px-4 py-2.5 rounded-xl bg-gray-900/95 text-white text-[13px] shadow-2xl">
+          {cacheDone}
+        </motion.div>
+      )}
+    </AnimatePresence>, document.body)}
     {/* Group deletion asks WHICH deletion you meant. "Remove the folder" and "remove the
         folder and everything in it" are different intentions that look like the same click,
         and only one of them is recoverable. The safe option is the primary button; the
