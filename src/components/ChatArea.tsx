@@ -136,6 +136,11 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
   // 그러면 '만료' 가 아니라 '지금 잠깐 못 가져온 것' 이다. 두 경우를 같은 문구로
   // 덮으면, 멀쩡히 남아 있는 영상을 사라진 줄 알고 다시 만들게 된다.
   const [failPosterOk, setFailPosterOk] = useState(false);
+  // 보관본이 '정말 없는' 것과 '지금 못 가져온' 것은 화면에서 구분되지 않는다.
+  // 마스터 단계가 404 로 답했다면 NCP 에 없다는 뜻이고(보관 기간 만료), 그때만
+  // 이미지 다운로드를 내민다. 네트워크가 끊겨 실패한 것뿐인데 '영상은 없습니다'
+  // 라고 말하면, 멀쩡히 남아 있는 것을 포기하게 만든다.
+  const [masterGone, setMasterGone] = useState(false);
   // 썸네일 내려받기. 영상이 사라진 뒤 남는 것이 이 한 장뿐이라, 앱 밖으로 꺼낼
   // 길이 있어야 한다. taskId 는 주소에서 뽑는다 — 이 컴포넌트는 메시지를 모른다.
   // 다시 굽지 않고 있는 파일을 그대로 준다(.webp) — 원본을 손대지 않는다는 규칙은
@@ -181,7 +186,7 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
   const [retryTick, setRetryTick] = useState(0);
   const retry = () => {
     idxRef.current = 0; setSrcIdx(0); setFailed(false); setRetryTick(t => t + 1);
-    setFailPosterGone(false); setFailPosterOk(false);
+    setFailPosterGone(false); setFailPosterOk(false); setMasterGone(false);
   };
 
   useEffect(() => {
@@ -293,7 +298,7 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
     setLoading(true);
     setFailed(false);
     fetch(src)
-      .then(r => { if (!r.ok) throw new Error(`status ${r.status}`); return r.blob(); })
+      .then(r => { if (!r.ok) throw Object.assign(new Error(`status ${r.status}`), { status: r.status }); return r.blob(); })
       .then(b => {
         if (cancelled) return;
         setCachedBlob(src, b); // share with download flow
@@ -302,8 +307,11 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
         setBlobSrc(url);
         setLoading(false);
       })
-      .catch(() => {
+      .catch((err: any) => {
         if (cancelled) return;
+        // 마스터(체인 2번째)가 404 = NCP 에 보관본이 없다. 네트워크 실패는 상태코드가
+        // 없으므로 여기 걸리지 않는다 — 그 차이가 아래 문구와 버튼을 가른다.
+        if (src === chain[1] && err?.status === 404) setMasterGone(true);
         // 보관 전이라 /api/media 가 404 인 경우가 대부분이다 — 원본으로 내려가면 된다.
         if (goFallback()) return;
         setLoading(false);
@@ -374,41 +382,56 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
         {/* 포스터가 있으면 뒤에 깔아준다. 검은 상자만 남으면 어느 컷이었는지 알 수가
             없는데, 포스터는 16~34KB 라 띄우는 비용이 사실상 없다. 없으면(404) 조용히
             사라지고 예전처럼 글씨만 남는다 — 보관 전에 만료된 옛 영상이 그 경우다. */}
+        {/* ★ 썸네일을 가리지 않는다. 이 화면의 요점은 '무엇이었는지' 를 보여주는
+            것인데, 가운데에 글씨를 얹으면 그 요점이 사라진다. 설명은 아래 띠로 내린다.
+            띠는 그림 위에 겹치되 아래쪽 한 줄만 차지하고, 그라데이션으로 글씨만 읽히게
+            한다 — 박스를 키우면 카드 높이가 흔들려 목록이 출렁인다. */}
         {!failPosterGone && failBg && (
           <img
             src={failBg}
             alt=""
-            aria-hidden
             onLoad={() => setFailPosterOk(true)}
             onError={() => setFailPosterGone(true)}
-            className="absolute inset-0 w-full h-full object-contain opacity-35"
+            className="absolute inset-0 w-full h-full object-contain"
           />
         )}
-        <div className="relative w-full h-full flex flex-col items-center justify-center gap-2 px-4 text-center">
-          <p className="text-[12px] text-white leading-snug drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">영상을 불러오지 못했습니다</p>
-          <p className="text-[11px] text-white/70 leading-snug drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
-            {failPosterOk ? (
-              <>이 영상은 보관되어 있습니다 — 지금 잠시 못 가져왔을 뿐입니다.<br />다시 시도를 눌러주세요.</>
-            ) : (
-              <>보관 전에 원본 링크가 만료됐거나, 잠시 연결이 끊겼을 수 있습니다.<br />자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.</>
-            )}
-          </p>
-          <div className="mt-0.5 flex items-center gap-1.5">
-            <button
-              onClick={retry}
-              className="text-[11px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 border border-white/20 rounded-md px-2.5 py-1 transition-colors">
-              다시 시도
-            </button>
-            {failPosterOk && (
+        {failPosterOk ? (
+          <div className="absolute inset-x-0 bottom-0 px-3 pt-6 pb-2 flex items-end gap-2 bg-gradient-to-t from-black/90 via-black/55 to-transparent">
+            <span className="text-[11px] text-white/90 leading-snug flex-1 text-left">
+              {masterGone
+                ? '원본 영상은 보관 기간이 지나 남아 있지 않습니다. 이 이미지는 받아두실 수 있습니다.'
+                : '지금 영상을 불러오지 못했습니다. 보관본은 남아 있습니다.'}
+            </span>
+            {masterGone ? (
               <button
                 onClick={saveFailPoster}
-                title="이 썸네일을 파일로 저장합니다 (1280x720)"
-                className="text-[11px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 border border-white/20 rounded-md px-2.5 py-1 transition-colors">
-                썸네일 저장
+                title="1280x720 이미지로 저장합니다"
+                className="shrink-0 text-[11px] text-white/85 hover:text-white bg-white/15 hover:bg-white/25 border border-white/25 rounded-md px-2.5 py-1 transition-colors">
+                이미지 다운로드
+              </button>
+            ) : (
+              <button
+                onClick={retry}
+                className="shrink-0 text-[11px] text-white/85 hover:text-white bg-white/15 hover:bg-white/25 border border-white/25 rounded-md px-2.5 py-1 transition-colors">
+                다시 시도
               </button>
             )}
           </div>
-        </div>
+        ) : (
+          // 보여줄 그림이 없다. 이때는 검은 상자뿐이니 가운데에 설명을 둔다.
+          <div className="relative w-full h-full flex flex-col items-center justify-center gap-2 px-4 text-center">
+            <p className="text-[12px] text-white leading-snug">영상을 불러오지 못했습니다</p>
+            <p className="text-[11px] text-white/70 leading-snug">
+              보관 전에 원본 링크가 만료됐거나, 잠시 연결이 끊겼을 수 있습니다.<br />
+              자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.
+            </p>
+            <button
+              onClick={retry}
+              className="mt-0.5 text-[11px] text-white/70 hover:text-white bg-white/10 hover:bg-white/20 border border-white/20 rounded-md px-2.5 py-1 transition-colors">
+              다시 시도
+            </button>
+          </div>
+        )}
         </>
       ) : !showPoster && mounted && (blobSrc || is4k) && (
         <video
