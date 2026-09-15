@@ -808,14 +808,21 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     let mediaStats = { count: 0, bytes: 0 };
     try { const r = await fetch('/api/cache/stats'); if (r.ok) mediaStats = await r.json(); } catch {}
     const total = formatBytes(totalCacheBytes + mediaStats.bytes);
+    // 무엇이 없어지고 무엇이 남는지 둘 다 적는다. '지워진다' 만 적으면 영상까지
+    // 날아가는 줄 알고 아무도 안 누르고, 그러면 디스크가 계속 찬다.
     const ok = confirm(
       `총 ${total} 캐시를 전부 비울까요?\n\n` +
+      `── 지워지는 것 ──\n` +
       `• 디스크: ${disk} (브라우저 HTTP 캐시)\n` +
       `• 메모리: ${mem} (영상 사전 다운로드 풀)\n` +
-      `• 레퍼런스 캐시: ${formatBytes(mediaStats.bytes)} (${mediaStats.count}개 — 재사용용 원본 보관소)\n\n` +
-      `⚠ 레퍼런스 캐시를 지우면 과거 메시지 재사용 시 클립보드로 붙여넣었던 ` +
-      `이미지는 복구할 수 없습니다. (파일로 첨부한 것은 원본 경로에서 복구 시도)\n\n` +
-      `다운로드 받은 mp4 파일은 영향 없습니다.`
+      `• 레퍼런스 캐시: ${formatBytes(mediaStats.bytes)} (${mediaStats.count}개 — 재사용용 원본 보관소)\n` +
+      `• 생성 영상의 로컬 사본 — 다시 볼 때 NCP 에서 받아오므로 처음 한 번만 느려집니다\n\n` +
+      `── 남는 것 ──\n` +
+      `• NCP 에 보관된 생성 영상 — 지워지지 않습니다\n` +
+      `• 목록 썸네일 — NCP 에 있어 지워지지 않습니다\n` +
+      `• 다운로드 받은 파일 — 영향 없습니다\n\n` +
+      `⚠ 딱 하나 되돌릴 수 없는 것: 과거 메시지를 재사용할 때 쓰는 원본 중 ` +
+      `클립보드로 붙여넣었던 이미지입니다. (파일로 첨부한 것은 원본 경로에서 복구 시도)`
     );
     if (!ok) return;
     clearBlobCache();
