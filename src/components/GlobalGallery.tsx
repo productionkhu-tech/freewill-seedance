@@ -624,7 +624,13 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
               // scrollTo closes the last gap (the marker aligns to its own bottom edge, not
               // past the container's padding).
               const toMarker = (behavior: ScrollBehavior) => bottomRef.current?.scrollIntoView({ behavior, block: 'end' });
-              const toEnd = () => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight; };
+              // behavior:'instant' — index.css 의 `* { scroll-behavior: smooth }` 때문에
+              // 평범한 scrollTop 대입은 값을 넣는 게 아니라 애니메이션을 시작한다.
+              // 여기는 '끝으로 보낸다' 는 뜻이지 '끝까지 미끄러뜨린다' 가 아니다.
+              const toEnd = () => {
+                const el = scrollRef.current;
+                if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'instant' as ScrollBehavior });
+              };
               requestAnimationFrame(() => requestAnimationFrame(() => {
                 toMarker('smooth');
                 setTimeout(() => toMarker('auto'), 600);

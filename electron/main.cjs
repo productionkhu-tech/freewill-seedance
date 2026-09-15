@@ -216,12 +216,18 @@ function setupAutoUpdater() {
   autoUpdater.disableDifferentialDownload = true;
 
   autoUpdater.on('update-available', (info) => {
+    // 앞으로 벌어질 일을 전부 미리 말한다. 예전 문구('Downloading and restarting')는
+    // 140MB 를 받는 동안의 침묵도, 앱이 꺼졌다 켜지는 것도 설명하지 않았다. 그래서
+    // 확인을 누른 사람은 한참 기다리다 앱이 툭 꺼지는 것만 보게 된다.
     dialog.showMessageBox(mainWindow, {
       type: 'info',
-      title: 'Update Available',
-      message: `New version available: v${info.version}`,
-      detail: 'Downloading and restarting...',
-      buttons: ['OK'],
+      title: '업데이트',
+      message: `새 버전 v${info.version} 을 설치합니다.`,
+      detail: '지금부터 약 140MB 를 내려받습니다(보통 1분 안팎).\n'
+        + '진행률은 작업표시줄 아이콘과 창 제목에 표시됩니다.\n\n'
+        + '다 받으면 앱이 스스로 꺼졌다가 자동으로 다시 켜집니다.\n'
+        + '설치 창은 뜨지 않습니다 — 잠시 꺼져 있어도 정상입니다.',
+      buttons: ['확인'],
     });
     autoUpdater.downloadUpdate();
   });
@@ -238,12 +244,31 @@ function setupAutoUpdater() {
     // 그 앱이 다시 업데이트를 찾아 같은 자리로 돌아가는 것까지 증상이 일치했다.
     // isSilent=true 면 /S 로 설치하고, isForceRunAfter=true 가 --force-run 을 붙여
     // 설치 후 자동 실행한다(둘 다 NsisUpdater.doInstall 에서 인자로 나간다).
+    // 진행 막대를 끄고, 꺼지기 직전에 한 번 더 알린다. 알림은 창을 막지 않으므로
+    // 클릭이 늘지 않는다 — 없앤 것은 마법사 창이지 설명이 아니다.
+    try {
+      mainWindow?.setProgressBar(-1);
+      mainWindow?.setTitle('업데이트 설치 중 — 곧 자동으로 다시 켜집니다');
+      new Notification({
+        title: '업데이트 설치 중',
+        body: '앱이 잠시 꺼집니다. 설치가 끝나면 자동으로 다시 켜집니다.',
+      }).show();
+    } catch { /* 알림이 막혀 있어도 설치는 진행한다 */ }
     autoUpdater.quitAndInstall(true, true);
   });
 
   // 업데이트가 실패하면 앱은 계속 쓸 수 있어야 한다 — 조용히 넘기되 기록은 남긴다.
   autoUpdater.on('error', (err) => console.error('[Updater] error:', err?.message || err));
-  autoUpdater.on('download-progress', (p) => console.log(`[Updater] ${Math.round(p.percent)}%`));
+  // 내려받는 동안 아무 표시가 없으면 멈춘 것과 구분이 안 된다. 창을 새로 만들지 않고
+  // 이미 있는 두 곳에 띄운다 — 작업표시줄 아이콘의 진행 막대와 창 제목.
+  autoUpdater.on('download-progress', (p) => {
+    const pct = Math.round(p.percent);
+    console.log(`[Updater] ${pct}%`);
+    try {
+      mainWindow?.setProgressBar(Math.max(0, Math.min(1, p.percent / 100)));
+      mainWindow?.setTitle(`업데이트 내려받는 중 ${pct}% — Freewill Seedance 2.0`);
+    } catch { /* 창이 이미 닫혔으면 표시할 곳도 없다 */ }
+  });
 
   if (!isDev) autoUpdater.checkForUpdates().catch(() => {});
 }

@@ -233,7 +233,9 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
       if (!home || !home.el.isConnected) return;
       // Two frames: fullscreen teardown relays out, and a single frame lands too early.
       requestAnimationFrame(() => requestAnimationFrame(() => {
-        home.el.scrollTop = home.top;
+        // 되돌리는 것이지 굴리는 것이 아니다. smooth 가 전역이라 그냥 대입하면
+        // 전체화면에서 나올 때 화면이 주르륵 미끄러진다.
+        (home.el as HTMLElement).scrollTo({ top: home.top, behavior: 'instant' as ScrollBehavior });
         scrollHomeRef.current = null;
       }));
     };
@@ -1239,12 +1241,26 @@ export function ChatArea() {
   // 뒤늦게 로드되며 높이가 계속 자라서, 그 순간 맞춘 위치가 곧 중간이 된다.
   // 사용자가 휠을 굴리거나 손가락을 대면 즉시 손을 뗀다. 따라가며 싸우면 안 된다.
   const pinReleaseRef = useRef<(() => void) | null>(null);
-  // 바닥에 붙인다. 한 번만 맞추면 모자라다 — 카드가 뒤늦게 로드되며 높이가 자라서
-  // 그 순간 맞춘 자리가 곧 중간이 된다. 잠깐 동안 따라붙는다.
+  // 바닥으로 '순간이동' 시킨다.
+  //
+  // ★ behavior:'instant' 가 이 함수의 핵심이다. index.css 가 `* { scroll-behavior:
+  //   smooth }` 를 모든 요소에 걸어놔서, 평범한 `el.scrollTop = x` 는 값을 넣는 게
+  //   아니라 애니메이션을 시작한다. 그래서 1505 는 매 프레임 애니메이션을 새로
+  //   시작시키며 영영 도착하지 못했고, 화면에는 끝없이 미끄러지는 것으로 보였다.
+  //   Sidebar 의 자동 스크롤도 같은 자리에서 한 번 당한 적이 있다(거기 주석 참고).
+  const jumpToBottom = (el: HTMLDivElement) => {
+    el.scrollTo({ top: el.scrollHeight, behavior: 'instant' as ScrollBehavior });
+  };
+
+  // 잠깐 동안 바닥에 붙여둔다 — 카드가 뒤늦게 로드되며 높이가 자랄 수 있어서다.
+  // 순간이동이라 붙어 있는 동안에도 눈에 보이는 움직임이 없다.
   // 사용자가 휠을 굴리거나 손가락을 대면 즉시 손을 뗀다. 따라가며 싸우면 안 된다.
   const pinToBottom = useCallback((ms = 700) => {
     const el = messagesScrollRef.current;
     if (!el) return;
+    // ★ 앞서 돌던 고정을 먼저 끈다. 프로젝트를 빠르게 오가면 고정이 여러 개 겹쳐
+    //   돌고, 사용자가 스크롤을 시작해도 남은 것들이 계속 끌어내린다.
+    pinReleaseRef.current?.();
     let stop = false;
     const release = () => { stop = true; };
     const done = () => {
@@ -1259,21 +1275,20 @@ export function ChatArea() {
     const step = () => {
       const cur = messagesScrollRef.current;
       if (stop || !cur) { done(); return; }
-      cur.scrollTop = cur.scrollHeight;
+      jumpToBottom(cur);
       if (Date.now() - t0 < ms) requestAnimationFrame(step);
       else done();
     };
     requestAnimationFrame(step);
   }, []);
 
-  // ★ 그려지기 전에 먼저 바닥으로 보낸다. useEffect 는 그린 뒤에 돌기 때문에,
-  //   거기서 옮기면 '위에 있다가 아래로 내려가는' 한 프레임이 실제로 보인다.
-  //   useLayoutEffect 는 페인트 전이라 처음부터 맨 아래로 그려진다 — 스크롤되는
-  //   것이 아니라 그냥 켜면 맨 아래인 상태가 된다.
+  // 그려지기 전에 먼저 바닥으로 보낸다. useEffect 는 그린 뒤에 돌기 때문에, 거기서
+  // 옮기면 '위에 있다가 아래로 내려가는' 한 프레임이 실제로 보인다. useLayoutEffect
+  // 는 페인트 전이라 처음부터 맨 아래로 그려진다 — 켜면 이미 맨 아래인 상태가 된다.
   useLayoutEffect(() => {
     const el = messagesScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-    pinToBottom();   // 카드가 늦게 로드되며 높이가 자라는 동안 따라붙는다
+    if (el) jumpToBottom(el);
+    pinToBottom();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProjectId]);
 
