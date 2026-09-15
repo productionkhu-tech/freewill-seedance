@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
 import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
@@ -971,14 +971,12 @@ export function ChatArea() {
   const pasteCycleRef = useRef<{ firstId: string; lastId: string; next: 'first_frame' | 'last_frame' } | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  // 프로젝트별 마지막 스크롤 위치.
-  // atBottom 을 따로 두는 이유: 자리를 비운 사이 영상이 늘었다면, 그 사람이 원하는
-  // '맨 아래' 는 저장해둔 픽셀값이 아니라 새로 늘어난 바닥이다. 픽셀만 기억하면
-  // 돌아왔을 때 새 영상 몇 개가 아래에 숨는다.
-  const scrollMemory = useRef<Map<string, { top: number; atBottom: boolean }>>(new Map());
-  // 복원하는 동안에는 기억을 덮어쓰지 않는다 — 복원이 만든 scroll 이벤트가
-  // 아직 못 자란 높이를 기준으로 기억을 망가뜨린다.
-  const restoringRef = useRef(false);
+  // 프로젝트를 열면 언제나 맨 아래(최신)다. 마지막 위치를 기억하지 않는다 —
+  // 기억하게 해봤더니(1503) 전환 도중 브라우저가 쏘는 scroll 이벤트가 아직 자라지
+  // 않은 높이로 기억을 덮어써서, 다른 프로젝트의 중간 위치가 따라붙는 것처럼 보였다.
+  // 그리고 애초에 원하는 동작이 아니었다: 프로젝트를 열면 새로 만든 것이 보여야 한다.
+  // '새로 생성된 것이 어디부터인가' 는 아래의 구분선이 답한다.
+  const [newFrom, setNewFrom] = useState(0);
   const previousProjectIdRef = useRef<string | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [promptHeight, setPromptHeight] = useState(160);
@@ -1088,14 +1086,15 @@ export function ChatArea() {
     setHeaderSearch('');
     setShowGallery(false);
     setPreviewItem(null);
-    // 마지막으로 보던 자리로 돌려놓는다(처음 여는 프로젝트면 맨 아래).
+    // '여기부터 새로 생성됨' 구분선의 기준 시각.
     //
-    // ★ 여기에 아무것도 없었다. 스크롤 컨테이너는 프로젝트가 바뀌어도 같은 DOM 이라
-    //   브라우저가 scrollTop 을 그대로 들고 있고, 짧은 프로젝트로 넘어가면 그 값이
-    //   거기 맞춰 잘린다. 다시 긴 프로젝트로 돌아오면 그 잘린 값이 남아, 짧은 쪽의
-    //   길이만큼 위로 올라간 자리에 떨어진다 — 27회짜리를 들렀다 오면 딱 27회쯤
-    //   위였던 이유다.
-    if (prevId && prevId !== currentProjectId && currentProjectId) restoreScroll(currentProjectId);
+    // App.tsx 가 프로젝트를 열자마자 lastSeenAt 을 지금 시각으로 밀어버리므로, 그전에
+    // 집어둬야 한다. 자식의 effect 가 부모보다 먼저 돌기 때문에 여기서 읽으면 아직
+    // 옛 값이다 — 이 순서에 기대고 있다는 것을 알고 있어야 한다.
+    if (currentProjectId) {
+      const p = useAppStore.getState().projects.find(x => x.id === currentProjectId);
+      setNewFrom(p?.lastSeenAt || 0);
+    }
   }, [currentProjectId]);
 
   // Persist draft on window close (cache before IndexedDB debounce window)
@@ -1214,32 +1213,25 @@ export function ChatArea() {
       // Show "scroll to bottom" when not near the bottom
       const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       setShowScrollBottom(distFromBottom > 300);
-      // 위치를 여기서 계속 적어둔다. 전환 effect 에서 읽으면 늦다 — 그때는 이미
-      // 새 프로젝트가 같은 컨테이너에 그려져 scrollTop 이 잘린 뒤다.
-      if (!restoringRef.current && currentProjectId) {
-        scrollMemory.current.set(currentProjectId, { top: el.scrollTop, atBottom: distFromBottom < 80 });
-      }
     }
-  }, [currentProjectId]);
+  }, []);
 
   // 잠깐 동안 바닥에 붙여둔다. 한 번만 맞추면 모자라다 — 카드의 포스터와 영상이
   // 뒤늦게 로드되며 높이가 계속 자라서, 그 순간 맞춘 위치가 곧 중간이 된다.
   // 사용자가 휠을 굴리거나 손가락을 대면 즉시 손을 뗀다. 따라가며 싸우면 안 된다.
   const pinReleaseRef = useRef<(() => void) | null>(null);
-  // 잠깐 동안 목표 위치에 붙여둔다('bottom' 이면 늘 바닥). 한 번만 맞추면 모자라다 —
-  // 카드가 뒤늦게 로드되며 높이가 자라서, 그 순간 맞춘 자리가 곧 어긋난다.
+  // 바닥에 붙인다. 한 번만 맞추면 모자라다 — 카드가 뒤늦게 로드되며 높이가 자라서
+  // 그 순간 맞춘 자리가 곧 중간이 된다. 잠깐 동안 따라붙는다.
   // 사용자가 휠을 굴리거나 손가락을 대면 즉시 손을 뗀다. 따라가며 싸우면 안 된다.
-  const pinScroll = useCallback((target: 'bottom' | number, ms = 700) => {
+  const pinToBottom = useCallback((ms = 700) => {
     const el = messagesScrollRef.current;
     if (!el) return;
     let stop = false;
-    restoringRef.current = true;
+    const release = () => { stop = true; };
     const done = () => {
       el.removeEventListener('wheel', release);
       el.removeEventListener('touchstart', release);
-      restoringRef.current = false;
     };
-    const release = () => { stop = true; };
     // 휠·터치 말고 버튼(맨 위로 / 특정 컷으로)으로도 풀 수 있어야 한다.
     pinReleaseRef.current = () => { stop = true; done(); };
     el.addEventListener('wheel', release, { once: true, passive: true });
@@ -1248,18 +1240,23 @@ export function ChatArea() {
     const step = () => {
       const cur = messagesScrollRef.current;
       if (stop || !cur) { done(); return; }
-      cur.scrollTop = target === 'bottom' ? cur.scrollHeight : target;
+      cur.scrollTop = cur.scrollHeight;
       if (Date.now() - t0 < ms) requestAnimationFrame(step);
       else done();
     };
     requestAnimationFrame(step);
   }, []);
 
-  // 돌아온 프로젝트를 마지막으로 보던 자리로. 처음 여는 프로젝트는 맨 아래(최신).
-  const restoreScroll = useCallback((pid: string) => {
-    const mem = scrollMemory.current.get(pid);
-    pinScroll(!mem || mem.atBottom ? 'bottom' : mem.top);
-  }, [pinScroll]);
+  // ★ 그려지기 전에 먼저 바닥으로 보낸다. useEffect 는 그린 뒤에 돌기 때문에,
+  //   거기서 옮기면 '위에 있다가 아래로 내려가는' 한 프레임이 실제로 보인다.
+  //   useLayoutEffect 는 페인트 전이라 처음부터 맨 아래로 그려진다 — 스크롤되는
+  //   것이 아니라 그냥 켜면 맨 아래인 상태가 된다.
+  useLayoutEffect(() => {
+    const el = messagesScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    pinToBottom();   // 카드가 늦게 로드되며 높이가 자라는 동안 따라붙는다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProjectId]);
 
   const scrollToTop = () => { pinReleaseRef.current?.(); messagesScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); };
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1322,6 +1319,25 @@ export function ChatArea() {
   const displayMessages = useMemo(() => headerSearch.trim()
     ? project.messages.filter(m => m.promptText?.toLowerCase().includes(headerSearch.toLowerCase()))
     : project.messages, [project.messages, headerSearch]);
+
+  // '여기부터 새로 생성됨' 구분선이 들어갈 자리.
+  //
+  // 왼쪽 목록은 몇 개가 새로 생겼는지 알려주지만, 막상 들어오면 그 몇 개가 어디서부터인지
+  // 알 수가 없다. 기준(newFrom)은 이 프로젝트를 열기 직전의 lastSeenAt 이고, 한 번 열면
+  // App.tsx 가 그 값을 밀어버리므로 다음에 들어올 때는 자연히 사라진다 — 따로 지우는
+  // 코드가 없다.
+  //
+  // newFrom 이 0 이면(한 번도 본 적 없는 프로젝트) 전부가 '새 것' 이라 맨 위에 선이 걸린다.
+  // 그건 알려주는 게 없으므로 그리지 않는다. 검색 중일 때도 목록이 걸러진 상태라 선의
+  // 의미가 없어 건너뛴다.
+  const newDividerIdx = useMemo(() => {
+    if (!newFrom || headerSearch.trim()) return -1;
+    const i = displayMessages.findIndex(m => (m.endTime || m.timestamp || 0) > newFrom);
+    return i > 0 ? i : -1;
+  }, [displayMessages, newFrom, headerSearch]);
+  const newDividerCount = useMemo(() => newDividerIdx < 0 ? 0
+    : displayMessages.slice(newDividerIdx).filter(m => m.status === 'succeeded').length,
+    [displayMessages, newDividerIdx]);
 
   const galleryVideos = useMemo(() => project.messages
     .filter(m => m.status === 'succeeded' && m.videoUrl)
@@ -3102,7 +3118,17 @@ export function ChatArea() {
               </div>
             ) : (
               displayMessages.map((msg, idx) => (
-                <div key={msg.id} id={`msg-${msg.id}`} className="flex justify-center animate-fade-in-up" >
+                <Fragment key={msg.id}>
+                {idx === newDividerIdx && (
+                  <div className="flex items-center gap-3 select-none pointer-events-none">
+                    <div className="flex-1 h-px bg-indigo-300/70 dark:bg-indigo-400/40" />
+                    <span className="text-[11px] font-semibold text-indigo-500 whitespace-nowrap">
+                      여기부터 새로 생성됨{newDividerCount > 0 ? ` · ${newDividerCount}개` : ''}
+                    </span>
+                    <div className="flex-1 h-px bg-indigo-300/70 dark:bg-indigo-400/40" />
+                  </div>
+                )}
+                <div id={`msg-${msg.id}`} className="flex justify-center animate-fade-in-up" >
                   <div className="w-full max-w-3xl bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md transition-shadow duration-300">
                     {/* Card Header */}
                     <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-gray-50/80 to-white dark:to-[#1c1c1e]">
@@ -3275,6 +3301,7 @@ export function ChatArea() {
                     </div>
                   </div>
                 </div>
+                </Fragment>
               ))
             )}
             <div ref={messagesEndRef} />
