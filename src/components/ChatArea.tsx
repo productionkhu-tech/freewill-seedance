@@ -122,6 +122,8 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf 
   const [blobSrc, setBlobSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  // 실패 화면에 깔 썸네일. 404 면 한 번 꺼두고 다시 안 부른다.
+  const [failPosterGone, setFailPosterGone] = useState(false);
   const blobUrlRef = useRef<string | null>(null);
 
   // 재생 소스는 여러 단이고, 한 단이 죽으면 다음 단으로 내려간다. 갓 만든 영상은
@@ -344,9 +346,22 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf 
         // 대신, 왜 못 보는지 말해준다.
         // 예전 조건은 !fallbackSrc 였는데 709 이후로 fallbackSrc 가 항상 채워져 있어
         // 이 안내가 영영 뜨지 않았다 — 그 자리가 전부 검은 상자로 나갔다.
-        <div className="w-full h-full flex flex-col items-center justify-center gap-2 px-4 text-center">
-          <p className="text-[12px] text-white/75 leading-snug">영상을 불러오지 못했습니다</p>
-          <p className="text-[11px] text-white/40 leading-snug">
+        <>
+        {/* 포스터가 있으면 뒤에 깔아준다. 검은 상자만 남으면 어느 컷이었는지 알 수가
+            없는데, 포스터는 16~34KB 라 띄우는 비용이 사실상 없다. 없으면(404) 조용히
+            사라지고 예전처럼 글씨만 남는다 — 보관 전에 만료된 옛 영상이 그 경우다. */}
+        {!failPosterGone && posterOf?.taskId && (
+          <img
+            src={posterSrcFor(posterOf)}
+            alt=""
+            aria-hidden
+            onError={() => setFailPosterGone(true)}
+            className="absolute inset-0 w-full h-full object-contain opacity-35"
+          />
+        )}
+        <div className="relative w-full h-full flex flex-col items-center justify-center gap-2 px-4 text-center">
+          <p className="text-[12px] text-white leading-snug drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">영상을 불러오지 못했습니다</p>
+          <p className="text-[11px] text-white/70 leading-snug drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
             보관 전에 원본 링크가 만료됐거나, 잠시 연결이 끊겼을 수 있습니다.<br />
             자동 다운로드를 켜두셨다면 다운로드 폴더에 남아 있습니다.
           </p>
@@ -356,6 +371,7 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf 
             다시 시도
           </button>
         </div>
+        </>
       ) : !showPoster && mounted && (blobSrc || is4k) && (
         <video
           ref={videoRef}
@@ -1047,6 +1063,14 @@ export function ChatArea() {
     setHeaderSearch('');
     setShowGallery(false);
     setPreviewItem(null);
+    // 새 프로젝트는 맨 아래(최신)에서 시작한다.
+    //
+    // ★ 여기에 아무것도 없었다. 스크롤 컨테이너는 프로젝트가 바뀌어도 같은 DOM 이라
+    //   브라우저가 scrollTop 을 그대로 들고 있고, 짧은 프로젝트로 넘어가면 그 값이
+    //   거기 맞춰 잘린다. 다시 긴 프로젝트로 돌아오면 그 잘린 값이 남아, 짧은 쪽의
+    //   길이만큼 위로 올라간 자리에 떨어진다 — 27회짜리를 들렀다 오면 딱 27회쯤
+    //   위였던 이유다.
+    if (prevId && prevId !== currentProjectId) pinToBottom();
   }, [currentProjectId]);
 
   // Persist draft on window close (cache before IndexedDB debounce window)
@@ -1166,6 +1190,27 @@ export function ChatArea() {
       const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       setShowScrollBottom(distFromBottom > 300);
     }
+  }, []);
+
+  // 잠깐 동안 바닥에 붙여둔다. 한 번만 맞추면 모자라다 — 카드의 포스터와 영상이
+  // 뒤늦게 로드되며 높이가 계속 자라서, 그 순간 맞춘 위치가 곧 중간이 된다.
+  // 사용자가 휠을 굴리거나 손가락을 대면 즉시 손을 뗀다. 따라가며 싸우면 안 된다.
+  const pinToBottom = useCallback((ms = 700) => {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    let stop = false;
+    const release = () => { stop = true; };
+    el.addEventListener('wheel', release, { once: true, passive: true });
+    el.addEventListener('touchstart', release, { once: true, passive: true });
+    const t0 = Date.now();
+    const step = () => {
+      const cur = messagesScrollRef.current;
+      if (stop || !cur) { el.removeEventListener('wheel', release); el.removeEventListener('touchstart', release); return; }
+      cur.scrollTop = cur.scrollHeight;
+      if (Date.now() - t0 < ms) requestAnimationFrame(step);
+      else { el.removeEventListener('wheel', release); el.removeEventListener('touchstart', release); }
+    };
+    requestAnimationFrame(step);
   }, []);
 
   const scrollToTop = () => messagesScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2812,7 +2857,7 @@ export function ChatArea() {
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer sources={playbackChain(previewItem)} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
+              <VideoPlayer sources={playbackChain(previewItem)} posterOf={previewItem} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -3129,7 +3174,7 @@ export function ChatArea() {
                         <div className="space-y-3">
                           {msg.videoUrl && (
                             <div className="relative">
-                              <VideoPlayer sources={playbackChain(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                              <VideoPlayer sources={playbackChain(msg)} posterOf={msg} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
                               <ClipStamp ms={msg.timestamp} />
                             </div>
                           )}
