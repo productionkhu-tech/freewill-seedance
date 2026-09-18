@@ -22,6 +22,9 @@ let pendingWrite: { name: string; value: StorageValue<unknown> } | null = null;
 // Longer debounce than IDB so we don't churn the disk during heavy editing.
 let backupTimer: ReturnType<typeof setTimeout> | null = null;
 const BACKUP_DEBOUNCE_MS = 5 * 60 * 1000;
+// 아무리 바빠도 이만큼 지나면 디바운스를 무시하고 쓴다. 순수 디바운스만 두면
+// 쉬지 않고 작업하는 동안 백업이 한 번도 안 일어난다.
+const BACKUP_MAX_AGE_MS = 15 * 60 * 1000;
 // Last library payload we successfully mirrored. The library is ~500MB, so re-writing it
 // every 5 minutes when nothing changed would grind the disk for no reason.
 let lastBackedUpElements: string | null = null;
@@ -236,6 +239,86 @@ function getBackupApi(): BackupApi | null {
   return httpBackupApi;                            // browser — same files, over the local server
 }
 
+// 대기 중인 백업 스냅샷과 마지막으로 실제로 쓴 시각.
+let pendingBackup: any = null;
+let lastBackupAt = 0;
+
+// 백업을 실제로 수행한다. 타이머가 부르거나, 창을 숨길 때 flushBackup 이 부른다.
+function runBackup() {
+  if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
+  const v = pendingBackup;
+  if (!v) return;
+
+  const api = getBackupApi();
+  if (!api?.backupSave) return;
+  // ★ SAFETY: never write a backup before the library has loaded. Backing up an
+  // empty/half-loaded elementAssets would OVERWRITE a good backup with one that
+  // has no library — destroying the very safety net this mirror exists to be.
+  // Skipping is safe: the previous good backup stays on disk and the next write
+  // (post-hydration) reschedules this timer.
+  let st;
+  try { st = useAppStore.getState(); } catch { return; }
+  if (!st || !st._elementsHydrated) {
+    console.warn('[Backup] skipped — element library not hydrated yet (keeping previous backup)');
+    return;
+  }
+
+  // 여기까지 와야 '실제로 쓴다'. 위에서 건너뛴 경우까지 시각을 갱신하면, 한 번도
+  // 안 썼는데 방금 쓴 것처럼 보여 다음 15분을 또 그냥 보낸다. 스냅샷도 여기서
+  // 비운다 — 건너뛴 경우에는 들고 있다가 다음 기회에 써야 한다.
+  pendingBackup = null;
+  lastBackupAt = Date.now();
+
+  // ── The work history goes first, and ALONE ──────────────────────────────────
+  // This used to be one combined string (state + library). Once the library passed
+  // ~500MB the combined JSON exceeded V8's 512MB single-string ceiling and
+  // JSON.stringify threw RangeError — synchronously inside this timer, so the
+  // .catch below never ran and backups silently stopped for weeks. Measured:
+  // 19.4MB + 505.9MB = 525.3MB against a 512MB limit.
+  // Separated, the irreplaceable part is ~19MB and cannot be dragged over the
+  // cliff by the library growing.
+  try {
+    api.backupSave(JSON.stringify(v), 'state')
+      .then((r: any) => {
+        if (r?.ok) console.log(`[Backup] state ${(r.bytes / 1048576).toFixed(2)}MB → ${r.path}`);
+        else console.warn('[Backup] state save failed:', r?.error);
+      })
+      .catch((err: any) => console.warn('[Backup] state save error:', err?.message || err));
+  } catch (err: any) {
+    // try/catch because stringify throws SYNCHRONOUSLY — a promise .catch cannot see it.
+    console.error('[Backup] state serialize failed:', err?.message || err);
+  }
+
+  // ── The library second, chunked, best-effort ───────────────────────────────
+  // Same chunking as IDB: no whole-library string is ever built, so the library can
+  // grow past 512MB without the backup quietly dying the way it did before.
+  // Skipped when unchanged — this is half a gigabyte of disk writes.
+  void (async () => {
+    try {
+      const els = st.elementAssets || [];
+      const parts = buildElementChunks(els);
+      const sig = parts.length + ':' + parts.reduce((n, p) => n + p.length, 0);
+      if (sig === lastBackedUpElements) return;
+      for (let i = 0; i < parts.length; i++) {
+        const r = await api.backupSaveElementsChunk(i, parts[i], parts.length, els.length);
+        if (!r?.ok) { console.warn('[Backup] elements chunk', i, 'failed:', r?.error); return; }
+      }
+      lastBackedUpElements = sig;
+      console.log(`[Backup] library mirrored in ${parts.length} chunk(s), ${els.length} asset(s)`);
+    } catch (err: any) {
+      // The work-history backup above already succeeded and is unaffected.
+      console.error('[Backup] library mirror failed (work history is safe):', err?.message || err);
+    }
+  })();
+    
+}
+
+// 창을 숨기거나(트레이로 내림) 끌 때 즉시 쓴다. 디바운스가 끝나기를 기다리면
+// 그 순간의 작업분이 통째로 날아간다 — 앱을 끄는 것이 바로 그 순간이다.
+export function flushBackup(): void {
+  if (pendingBackup) runBackup();
+}
+
 const idbPersistStorage: PersistStorage<unknown> = {
   getItem: async (name: string): Promise<StorageValue<unknown> | null> => {
     const parse = (raw: string): StorageValue<unknown> | null => {
@@ -322,66 +405,19 @@ const idbPersistStorage: PersistStorage<unknown> = {
       }
     }, DEBOUNCE_MS);
 
-    // Mirror to external backup file (long debounce — 5 min). Stringifies its own
-    // snapshot at fire time (once per 5 min, not per set).
+    // 외부 백업 파일로 미러링.
+    //
+    // ★ 예전에는 순수 디바운스였다 — 저장이 있을 때마다 5분 타이머를 리셋했다.
+    //   그런데 영상을 만드는 동안에는 10초마다 폴링 결과가 들어와 상태가 바뀐다.
+    //   타이머가 영영 리셋되어 한 번도 안 터지고, 앱을 닫으면 대기 중이던 백업은
+    //   그대로 버려진다. 즉 '계속 작업하다 끄는' 가장 흔한 패턴에서 백업이 0건이다.
+    //   실제로 2026-09-15 이후 사흘간 한 번도 안 쓰였고, 그동안 영상 68편이 쌓였다.
+    //   이제 마지막 백업이 오래됐으면 디바운스를 무시하고 바로 쓴다 — 최악의 경우에도
+    //   BACKUP_MAX_AGE_MS 만큼만 뒤처진다.
+    pendingBackup = value;
     if (backupTimer) clearTimeout(backupTimer);
-    backupTimer = setTimeout(() => {
-      const api = getBackupApi();
-      if (!api?.backupSave) return;
-      // ★ SAFETY: never write a backup before the library has loaded. Backing up an
-      // empty/half-loaded elementAssets would OVERWRITE a good backup with one that
-      // has no library — destroying the very safety net this mirror exists to be.
-      // Skipping is safe: the previous good backup stays on disk and the next write
-      // (post-hydration) reschedules this timer.
-      let st;
-      try { st = useAppStore.getState(); } catch { return; }
-      if (!st || !st._elementsHydrated) {
-        console.warn('[Backup] skipped — element library not hydrated yet (keeping previous backup)');
-        return;
-      }
-
-      // ── The work history goes first, and ALONE ──────────────────────────────────
-      // This used to be one combined string (state + library). Once the library passed
-      // ~500MB the combined JSON exceeded V8's 512MB single-string ceiling and
-      // JSON.stringify threw RangeError — synchronously inside this timer, so the
-      // .catch below never ran and backups silently stopped for weeks. Measured:
-      // 19.4MB + 505.9MB = 525.3MB against a 512MB limit.
-      // Separated, the irreplaceable part is ~19MB and cannot be dragged over the
-      // cliff by the library growing.
-      try {
-        api.backupSave(JSON.stringify(value), 'state')
-          .then((r: any) => {
-            if (r?.ok) console.log(`[Backup] state ${(r.bytes / 1048576).toFixed(2)}MB → ${r.path}`);
-            else console.warn('[Backup] state save failed:', r?.error);
-          })
-          .catch((err: any) => console.warn('[Backup] state save error:', err?.message || err));
-      } catch (err: any) {
-        // try/catch because stringify throws SYNCHRONOUSLY — a promise .catch cannot see it.
-        console.error('[Backup] state serialize failed:', err?.message || err);
-      }
-
-      // ── The library second, chunked, best-effort ───────────────────────────────
-      // Same chunking as IDB: no whole-library string is ever built, so the library can
-      // grow past 512MB without the backup quietly dying the way it did before.
-      // Skipped when unchanged — this is half a gigabyte of disk writes.
-      void (async () => {
-        try {
-          const els = st.elementAssets || [];
-          const parts = buildElementChunks(els);
-          const sig = parts.length + ':' + parts.reduce((n, p) => n + p.length, 0);
-          if (sig === lastBackedUpElements) return;
-          for (let i = 0; i < parts.length; i++) {
-            const r = await api.backupSaveElementsChunk(i, parts[i], parts.length, els.length);
-            if (!r?.ok) { console.warn('[Backup] elements chunk', i, 'failed:', r?.error); return; }
-          }
-          lastBackedUpElements = sig;
-          console.log(`[Backup] library mirrored in ${parts.length} chunk(s), ${els.length} asset(s)`);
-        } catch (err: any) {
-          // The work-history backup above already succeeded and is unaffected.
-          console.error('[Backup] library mirror failed (work history is safe):', err?.message || err);
-        }
-      })();
-    }, BACKUP_DEBOUNCE_MS);
+    const overdue = lastBackupAt > 0 && Date.now() - lastBackupAt >= BACKUP_MAX_AGE_MS;
+    backupTimer = setTimeout(runBackup, overdue ? 0 : BACKUP_DEBOUNCE_MS);
   },
   removeItem: async (name: string): Promise<void> => {
     await del(name);
@@ -405,9 +441,9 @@ export function flushPersist(): Promise<void> {
 // in Chromium/Electron; pagehide covers real navigation/quit.
 if (typeof window !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') { void flushPersist(); void flushElements(); }
+    if (document.visibilityState === 'hidden') { void flushPersist(); void flushElements(); flushBackup(); }
   });
-  window.addEventListener('pagehide', () => { void flushPersist(); void flushElements(); });
+  window.addEventListener('pagehide', () => { void flushPersist(); void flushElements(); flushBackup(); });
 }
 
 export type AssetRole = 'reference_image' | 'reference_video' | 'reference_audio' | 'first_frame' | 'last_frame';
