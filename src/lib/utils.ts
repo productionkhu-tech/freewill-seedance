@@ -327,7 +327,7 @@ export function totalDurationError(
 // drift. Feedback is emitted as a 'seedance:toast' event so callers don't each need
 // their own toast UI; ChatArea owns the toast and renders whatever arrives.
 export async function copyImageToClipboard(
-  sources: { src?: string | null | false; fromPath?: string; original?: boolean }[],
+  sources: { src?: string | null | false; fromPath?: string; expect?: string; original?: boolean }[],
   label = '이미지',
 ): Promise<boolean> {
   const toast = (msg: string, ok: boolean) =>
@@ -339,10 +339,12 @@ export async function copyImageToClipboard(
     if (!src && cand.fromPath) {
       // media-cache entry gone (cache cleared) but the source file is still on disk →
       // re-cache it server-side, which hands back a fresh id for the untouched original.
+      // 'untouched' 는 expect(첨부 때 cacheId)로 확인한다. 같은 이름의 수정본이면 서버가
+      // 409 를 주고 cacheId 가 없으므로 이 후보는 건너뛴다 — 수정본을 '원본' 이라고 복사하지 않는다.
       try {
         const r = await fetch('/api/cache-from-path', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ originalPath: cand.fromPath }),
+          body: JSON.stringify({ originalPath: cand.fromPath, expectCacheId: cand.expect }),
         });
         const j = await r.json();
         if (j?.cacheId) src = `/api/cache/${j.cacheId}`;
@@ -444,17 +446,25 @@ export async function reuploadFromCache(cacheId: string): Promise<string> {
   return data.url;
 }
 
+// 경로에서 다시 읽은 파일이 첨부 때와 다른 내용일 때 던진다 — 같은 이름으로 수정본을
+// 덮어쓴 경우다. 부르는 쪽이 "파일이 없다" 같은 일반 실패와 구분해서 따로 알린다.
+// expectCacheId 는 첨부 때의 cacheId(= 그때 내용의 md5 앞 12자리)다. 서버가 비교한다.
+export class SourceChangedError extends Error {
+  readonly changed = true;
+}
+
 // Image/audio counterpart to reuploadFromPath — re-reads the original file
 // from disk and re-populates media-cache, but skips R2. Caller then uses
 // readCacheAsDataUrl(cacheId) to get the base64 data URL.
-export async function cacheFromPath(originalPath: string): Promise<string> {
+export async function cacheFromPath(originalPath: string, expectCacheId?: string): Promise<string> {
   const res = await fetch('/api/cache-from-path', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ originalPath }),
+    body: JSON.stringify({ originalPath, expectCacheId }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
+    if (err?.changed) throw new SourceChangedError(err.error);
     throw new Error(err.error || 'Cache from path failed');
   }
   const data = await res.json();
@@ -465,14 +475,15 @@ export async function cacheFromPath(originalPath: string): Promise<string> {
 // absolute path. Used when the server media-cache entry is gone. Re-caches
 // server-side, so returns a fresh { url, cacheId } the caller should persist.
 // VIDEO-ONLY — image/audio uses cacheFromPath (no R2 round-trip).
-export async function reuploadFromPath(originalPath: string): Promise<{ url: string; cacheId: string }> {
+export async function reuploadFromPath(originalPath: string, expectCacheId?: string): Promise<{ url: string; cacheId: string }> {
   const res = await fetch('/api/reupload-from-path', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ originalPath }),
+    body: JSON.stringify({ originalPath, expectCacheId }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
+    if (err?.changed) throw new SourceChangedError(err.error);
     throw new Error(err.error || 'Re-upload from path failed');
   }
   return await res.json();

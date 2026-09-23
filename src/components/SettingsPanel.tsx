@@ -97,7 +97,7 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
                     // (which announces itself as low-res).
                     copyImageToClipboard([
                       { src: asset.cacheId && `/api/cache/${asset.cacheId}`, original: true },
-                      { fromPath: (asset as any).originalPath, original: true },
+                      { fromPath: (asset as any).originalPath, expect: asset.cacheId, original: true },
                       { src: asset.url, original: !thumb },
                       { src: thumb },
                     ], '이미지');

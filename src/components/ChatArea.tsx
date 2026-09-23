@@ -6,7 +6,7 @@ import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as I
 import { getAssetNames } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
-import { formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl } from '../lib/utils';
+import { formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
 
 // Resolve one element-library image to a fresh R2 URL for the API payload. Tries
 // the opportunistic media-cache id first; on miss (30-day LRU eviction) rebuilds
@@ -2178,13 +2178,20 @@ export function ChatArea() {
         }
         if (!recovered && a.originalPath) {
           try {
-            // Disk fallback: re-cache the file (NOT R2) so the next send hits cache
-            const cacheId = await cacheFromPath(a.originalPath);
+            // Disk fallback: re-cache the file (NOT R2) so the next send hits cache.
+            // 첨부 때의 cacheId 를 함께 보내 '그 파일이 맞는지' 확인한다. 같은 이름으로
+            // 수정본을 덮어썼다면 서버가 거절한다 — 이 카드를 만든 버전이 아니므로 대신
+            // 넣지 않고 빠뜨린 채 알린다(재생성은 여기서 멈춘다).
+            const cacheId = await cacheFromPath(a.originalPath, a.cacheId);
             restored.push({ ...rest, url: '', cacheId });
             recovered = true;
           } catch (err: any) {
-            const m = (err?.message || '').replace(/^Error:\s*/, '');
-            failures.push(`${label}${m ? ' — ' + m : ''}`);
+            if (err instanceof SourceChangedError) {
+              failures.push(`${label} — 이 카드를 만든 뒤 같은 이름으로 수정됨 (그때 버전은 캐시가 지워져 되살릴 수 없음)`);
+            } else {
+              const m = (err?.message || '').replace(/^Error:\s*/, '');
+              failures.push(`${label}${m ? ' — ' + m : ''}`);
+            }
           }
         }
 
@@ -2463,10 +2470,19 @@ export function ChatArea() {
       }
       if (!done && a.originalPath) {
         try {
-          const result = await reuploadFromPath(a.originalPath);
+          // 첨부 때의 cacheId 로 '패널에 보이는 그 파일' 인지 확인한다. 같은 이름의 수정본이
+          // 덮어써져 있으면 패널 썸네일과 다른 것이 나가므로, 대신 보내지 않고 멈춘다.
+          const result = await reuploadFromPath(a.originalPath, a.cacheId);
           currentAssets[i] = { ...a, url: result.url, cacheId: result.cacheId };
           done = true;
-        } catch { /* handled below */ }
+        } catch (err: any) {
+          if (err instanceof SourceChangedError) {
+            warn(`래퍼런스 '${a.file_name || a.type}' 의 원본 파일이 첨부한 뒤 수정됐습니다.\n첨부할 때의 내용은 캐시가 지워져 되살릴 수 없어서, 수정본을 대신 보내지 않고 멈췄습니다.\n지금 파일로 보내려면 ↻로 다시 첨부해주세요.`);
+            setIsGenerating(false);
+            return;
+          }
+          /* 그 밖의 실패는 아래에서 한꺼번에 알린다 */
+        }
       }
 
       if (!done) {
@@ -3154,7 +3170,7 @@ export function ChatArea() {
                           e.preventDefault();
                           copyImageToClipboard([
                             { src: a.cacheId && `/api/cache/${a.cacheId}`, original: true },
-                            { fromPath: a.originalPath, original: true },
+                            { fromPath: a.originalPath, expect: a.cacheId, original: true },
                             { src: a.url }, { src: a.thumbnailUrl },
                           ], a.file_name || '이미지');
                         }}
@@ -3378,7 +3394,7 @@ export function ChatArea() {
                                     // 원본(미디어캐시) → 디스크 원본 재캐시 → (없으면) 썸네일
                                     copyImageToClipboard([
                                       { src: asset.cacheId && `/api/cache/${asset.cacheId}`, original: true },
-                                      { fromPath: asset.originalPath, original: true },
+                                      { fromPath: asset.originalPath, expect: asset.cacheId, original: true },
                                       { src: asset.url }, { src: asset.thumbnailUrl },
                                     ], asset.file_name || asset.name || '이미지');
                                   }}

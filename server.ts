@@ -977,6 +977,19 @@ async function startServer() {
     }
   });
 
+  // ★ 경로에서 다시 읽은 파일이 '첨부했던 그 파일' 인가.
+  // cacheId 는 첨부 때 내용의 md5 앞 12자리다 — 원본의 지문을 이미 들고 있는 셈이다.
+  // 같은 이름으로 수정본을 덮어쓴 뒤 캐시가 지워지면(30일·캐시 정리) 예전에는 경로의 새
+  // 내용을 아무 말 없이 대신 보냈다. 카드 썸네일은 옛 버전인데 나가는 건 수정본이었다.
+  // 호출하는 쪽이 기대값을 주면 비교해서, 다르면 409 로 멈춘다 — 캐시에도 R2 에도 아무것도
+  // 남기지 않는다. 형식이 다른 옛 id 는 비교할 근거가 없으므로 예전처럼 통과시킨다.
+  function contentChanged(expectCacheId: unknown, hash: string): boolean {
+    if (typeof expectCacheId !== 'string') return false;
+    const m = /^([0-9a-f]{12})/.exec(expectCacheId);
+    return !!m && m[1] !== hash;
+  }
+  const CHANGED_MSG = '첨부한 뒤 원본 파일의 내용이 바뀌었습니다 (같은 이름의 수정본).';
+
   // Re-cache an image/audio from its on-disk original path WITHOUT touching R2.
   // The image/audio path is base64-inline to BytePlus, so R2 must not be involved
   // for these — that's the whole point of the brief's audio/image separation. The
@@ -995,6 +1008,10 @@ async function startServer() {
       const filename = path.basename(originalPath);
       const ext = path.extname(filename) || '';
       const hash = crypto.createHash('md5').update(fileBuffer).digest('hex').slice(0, 12);
+      if (contentChanged(req.body?.expectCacheId, hash)) {
+        console.warn(`[Cache from path] 내용이 바뀜 — 기대 ${req.body.expectCacheId}, 지금 ${hash}: ${originalPath}`);
+        return res.status(409).json({ error: CHANGED_MSG, changed: true });
+      }
       const cacheId = `${hash}${ext}`;
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
@@ -1026,6 +1043,11 @@ async function startServer() {
       const filename = path.basename(originalPath);
       const ext = path.extname(filename) || '';
       const hash = crypto.createHash('md5').update(fileBuffer).digest('hex').slice(0, 12);
+      // R2 에 올리기 전에 막는다 — 보내지도 않을 수정본이 버킷에 남지 않게.
+      if (contentChanged(req.body?.expectCacheId, hash)) {
+        console.warn(`[Re-upload from path] 내용이 바뀜 — 기대 ${req.body.expectCacheId}, 지금 ${hash}: ${originalPath}`);
+        return res.status(409).json({ error: CHANGED_MSG, changed: true });
+      }
       const cacheId = `${hash}${ext}`;
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
