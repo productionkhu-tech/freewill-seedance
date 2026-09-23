@@ -786,6 +786,72 @@ export function ClipStamp({ ms }: { ms: number }) {
   );
 }
 
+// Draft ↔ 본편 연결 줄의 작은 썸네일. 포스터가 있으면 그 이미지를 쓰고, 없으면 영상 첫 프레임을
+// 한 번 떠서 이미지로 바꾼다 — 작은 칸 하나 때문에 디코더를 계속 붙잡아 두지 않게.
+// Draft 는 갤러리에서 기본으로 숨겨져 있어 포스터가 거의 없다(포스터는 갤러리에서 영상을 띄울
+// 때 만들어진다). 뜬 이미지는 이번 실행 동안만 taskId 별로 기억한다.
+const pairThumbCache = new Map<string, string>();
+function PairThumb({ m }: { m: any }) {
+  const key = m?.taskId || '';
+  const ready = m?.status === 'succeeded' && !!m?.videoUrl;
+  const [img, setImg] = useState(() => pairThumbCache.get(key) || '');
+  const [stage, setStage] = useState<number>(-1);          // -1 = 포스터, 0.. = 재생 소스 순서
+  const [near, setNear] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || near) return;
+    const io = new IntersectionObserver(([e]) => { if (e.isIntersecting) { setNear(true); io.disconnect(); } }, { rootMargin: '300px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [near]);
+  const sources = ready ? playbackChain(m).filter(Boolean) : [];
+  const grab = (v: HTMLVideoElement) => {
+    try {
+      const w = 160, h = Math.max(1, Math.round(w * (v.videoHeight || 9) / (v.videoWidth || 16)));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d')?.drawImage(v, 0, 0, w, h);
+      const url = c.toDataURL('image/jpeg', 0.8);
+      pairThumbCache.set(key, url);
+      setImg(url);
+    } catch { /* 다른 출처(원본 URL)라 캔버스로 못 뜨면 영상 첫 프레임을 그대로 보여 준다 */ }
+  };
+  return (
+    <div ref={boxRef} className="w-16 h-9 rounded-md overflow-hidden bg-black/80 shrink-0 flex items-center justify-center">
+      {!ready ? <Loader2 size={14} className="animate-spin text-white/70" />
+        : img ? <img src={img} alt="" className="w-full h-full object-cover" />
+        : !near ? null
+        : stage < 0 ? <img src={posterSrcFor(m)} alt="" className="w-full h-full object-cover" onError={() => setStage(0)} />
+        : stage < sources.length ? (
+          <video key={stage} src={`${sources[stage]}#t=0.1`} muted playsInline preload="auto" className="w-full h-full object-cover"
+            onLoadedData={(e) => grab(e.currentTarget)} onError={() => setStage(s => s + 1)} />
+        ) : <Video size={14} className="text-white/60" />}
+    </div>
+  );
+}
+
+// Draft ↔ 본편을 잇는 줄. 카드 맨 위에 둔다 — 짝이 어느 카드인지 썸네일과 생성 시각으로 바로
+// 보인다. 시각은 짝 카드의 영상 왼쪽 위 스탬프와 같은 형식이라 눈으로 맞춰 볼 수 있다.
+// 누르면 그 카드로 가서 테두리를 잠깐 밝힌다. 영상 위에 글을 얹지 않으려고 카드 머리에 둔다.
+function PairLink({ toDraft, other, onGo }: { toDraft: boolean; other: any; onGo: () => void }) {
+  const running = !toDraft && other.status !== 'succeeded';
+  return (
+    <button onClick={onGo}
+      title={toDraft ? '이 본편을 만든 Draft 로 이동' : '이 Draft 로 만든 본편으로 이동'}
+      className={`flex items-center gap-2 w-fit max-w-full rounded-lg border pl-1 pr-2.5 py-1 transition-colors ${toDraft
+        ? 'border-amber-200 bg-amber-50/70 hover:bg-amber-100/70'
+        : 'border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100/70'}`}>
+      <PairThumb m={other} />
+      <span className={`text-[12px] font-semibold whitespace-nowrap ${toDraft ? 'text-amber-700' : 'text-indigo-600'}`}>
+        {toDraft ? '원본 Draft' : running ? '본편 만드는 중' : '본편'}
+      </span>
+      <span className="text-[11px] text-gray-400 tabular-nums whitespace-nowrap">{formatStamp(other.timestamp)}</span>
+      {toDraft ? <ArrowUp size={13} className="text-amber-500 shrink-0" /> : !running && <ArrowDown size={13} className="text-indigo-500 shrink-0" />}
+    </button>
+  );
+}
+
 // Download a clip and mark its message so the button flips to "다시 다운로드".
 // Module-level and owner-resolved-by-message-id (rather than closing over the open
 // project) so the all-projects gallery can download a clip from ANY project. That also
@@ -1376,7 +1442,15 @@ export function ChatArea() {
     requestAnimationFrame(() => {
       setTimeout(() => {
         const el = document.getElementById(`msg-${messageId}`);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // 도착한 카드의 테두리를 잠깐 밝힌다. 같은 프롬프트의 Draft 가 여러 장 붙어 있으면
+        // 스크롤만으로는 어느 카드로 왔는지 알 수 없다. 줄 전체가 아니라 카드(첫 자식)에 건다.
+        const card = el.firstElementChild as HTMLElement | null;
+        if (card) {
+          card.classList.add('ring-2', 'ring-indigo-400');
+          window.setTimeout(() => card.classList.remove('ring-2', 'ring-indigo-400'), 1800);
+        }
       }, 100);
     });
   };
@@ -3386,6 +3460,14 @@ export function ChatArea() {
                     <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-gray-50/80 to-white dark:to-[#1c1c1e]">
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1 min-w-0 flex flex-col gap-3">
+                          {/* Draft ↔ 본편 짝. 본편은 맨 아래에 붙으므로, 어느 Draft 에서 나왔는지(또는 이
+                              Draft 로 무엇을 만들었는지)를 카드 맨 위에서 썸네일로 보여 준다. */}
+                          {msg.draftOf && draftByTaskId.has(msg.draftOf) && (
+                            <PairLink toDraft other={draftByTaskId.get(msg.draftOf)} onGo={() => scrollToMessage(draftByTaskId.get(msg.draftOf!)!.id)} />
+                          )}
+                          {isDraftClip(msg) && msg.taskId && finalOfDraft.has(msg.taskId) && (
+                            <PairLink toDraft={false} other={finalOfDraft.get(msg.taskId)} onGo={() => scrollToMessage(finalOfDraft.get(msg.taskId!)!.id)} />
+                          )}
                           {(msg.usedAssets?.length > 0 || (msg.usedElementImages as any)?.length > 0) && (
                             <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
                               {(msg.usedAssets || []).map((asset: any, i: number) => (
@@ -3542,18 +3624,12 @@ export function ChatArea() {
                                   <Download size={14} /> 이미지
                                 </button>
                               )}
-                              {/* 초안 → 본편. 초안 카드는 본편을 만들거나(이미 있으면 그리로 가고),
-                                  본편 카드는 자기 초안으로 돌아간다. 본편은 맨 아래에 붙으므로
-                                  둘 사이를 오가는 길이 카드에 있어야 한다. */}
+                              {/* Draft → 본편 만들기 버튼. 이미 만든 본편으로 가는 길(과 본편에서 Draft 로
+                                  돌아가는 길)은 카드 맨 위의 짝 줄(PairLink)이 맡는다. */}
                               {isDraftClip(msg) && msg.taskId && (() => {
-                                const fin = finalOfDraft.get(msg.taskId);
-                                if (fin) return (
-                                  <button onClick={() => scrollToMessage(fin.id)}
-                                    className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all whitespace-nowrap shrink-0 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border-indigo-200">
-                                    {fin.status === 'succeeded' ? <ArrowDown size={14} /> : <Loader2 size={14} className="animate-spin" />}
-                                    {fin.status === 'succeeded' ? '본편 보기' : '본편 만드는 중'}
-                                  </button>
-                                );
+                                // 본편이 이미 있으면(만드는 중 포함) 여기엔 아무것도 없다 — 카드 맨 위의
+                                // 짝 줄(PairLink)이 그 본편을 썸네일로 보여 주고 데려간다.
+                                if (finalOfDraft.has(msg.taskId)) return null;
                                 const exp = draftExpiresAt(msg);
                                 if (Date.now() > exp) return (
                                   <span title="Draft는 생성 후 7일까지만 본편으로 만들 수 있습니다" className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
@@ -3567,12 +3643,6 @@ export function ChatArea() {
                                   </button>
                                 );
                               })()}
-                              {msg.draftOf && draftByTaskId.has(msg.draftOf) && (
-                                <button onClick={() => scrollToMessage(draftByTaskId.get(msg.draftOf!)!.id)}
-                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
-                                  <ArrowUp size={14} /> Draft 보기
-                                </button>
-                              )}
                             </div>
                             {/* Just the duration. The start/finish timestamps used to sit here
                                 too, but the clip already carries its stamp in the top-left
