@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftExpiresAt, DRAFT_FINAL_RESOLUTION } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -1004,7 +1004,7 @@ export function ChatArea() {
   const needsBillingSelection = !billingProject;
   const isOmni = !!project && modelProvider(project.settings.model) === 'gemini'; // Gemini Omni surface
   // 지금 보내면 초안(480p)으로 나가는가. 보내는 쪽 판정(applyTaskConstraints)과 같은 조건이다.
-  const sendAsDraft = !!project && !isOmni && !!project.settings.draft && modelSupportsDraft(project.settings.model);
+  const sendAsDraft = !!project && !isOmni && draftEffective(project.settings.model, project.settings.draft);
   // Task is always explicit; coerce empty/legacy/other-model values to text_to_video.
   // Resolved against the project's model so 1.1's Extend can't drive the preview's UI.
   const omniTask = project ? resolveOmniTask(project.settings.model, project.settings.omniTask) : '';
@@ -2147,6 +2147,9 @@ export function ChatArea() {
       useAppStore.getState().updateProjectSettings(project.id, {
         ...restore,
         ...(targetModel ? { model: targetModel } : {}),
+        // Draft 는 그 카드가 실제로 어땠는지를 true/false 로 못 박는다. 2.5 는 Draft 가 기본이라,
+        // 값을 비워 두면 Draft 이전에 1080p 로 만든 카드를 재생성해도 480p Draft 가 나간다.
+        draft: !!msg.usedSettings.draft,
       });
     }
     if (msg.usedAssets) {

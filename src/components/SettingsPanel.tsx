@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -280,7 +280,8 @@ export function SettingsPanel() {
   // 따로 두면 '해상도 1080p' 와 '초안 켜짐' 이 동시에 보여 둘 중 무엇이 나가는지 헷갈린다.
   // 저장된 resolution 은 그대로 두므로 초안을 끄면 쓰던 해상도로 돌아온다.
   const draftAvailable = !isOmni && modelSupportsDraft(settings.model);
-  const draftOn = draftAvailable && !!settings.draft;
+  // 저장값이 없으면 모델 기본값(2.5 = Draft). 보내는 쪽(applyTaskConstraints)과 같은 함수로 판단한다.
+  const draftOn = draftAvailable && draftEffective(settings.model, settings.draft);
   // 이름은 짧게 'Draft' — 이 칸은 ~140px 라 'Draft (480p) → 1080p' 는 잘린다. 흐름은 바로
   // 아래 한 줄이 말한다.
   const resSelectOptions = draftAvailable ? [...resOptions, { id: DRAFT_OPTION, name: 'Draft' }] : resOptions;
@@ -743,9 +744,10 @@ export function SettingsPanel() {
                 // clamp above — otherwise 2.5's 'mov' rides along onto a model that never
                 // accepted the parameter.
                 if (settings.output_format && !modelOutputFormats(val).includes(settings.output_format)) patch.output_format = undefined;
-                // 초안도 같다. 2.5 에서 켜 둔 채 2.0 으로 가면 끈다 — 다시 2.5 로 와도 켜진 채
-                // 돌아오지 않게. (보낼 때도 applyTaskConstraints 가 한 번 더 막는다.)
-                if (settings.draft && !modelSupportsDraft(val)) patch.draft = false;
+                // Draft 는 모델을 바꾸면 '모델 기본값을 따름' 으로 돌아간다 — 2.5 를 고르면 Draft 로
+                // 시작하고, 2.0 으로 가면 아무 의미가 없어진다. 같은 모델을 다시 고른 것은 바꾼 게
+                // 아니므로 사용자가 끈 Draft 를 되살리지 않는다.
+                if (val !== settings.model) patch.draft = undefined;
                 // Duration ranges differ per model (2.0: 4–15, 2.5: 4–30, Omni: 3–10), so a
                 // switch can strand an out-of-range value — 2.5@30s → 2.0 stayed at 30 and got
                 // rejected by the API at send. Clamp on EVERY switch, not just the Omni one.

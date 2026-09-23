@@ -518,6 +518,9 @@ export interface GenerationSettings {
   // 초안 모드 (2.5 전용, MODELS.draftMode). 켜면 480p 초안으로 보내고, 마음에 드는 것만
   // 카드에서 1080p 본편으로 만든다. 해상도는 이 값이 대신 정하므로(applyTaskConstraints)
   // 저장된 resolution 은 건드리지 않는다 — 끄면 쓰던 해상도가 그대로 돌아온다.
+  // ★ 세 가지 상태다. undefined = "모델 기본값을 따름"(2.5 는 켜짐, draftEffective),
+  //   true/false = 사용자가 해상도 드롭다운에서 직접 고른 것. 모델·모드를 바꾸거나 초기화하면
+  //   undefined 로 돌아가 기본값을 다시 따른다.
   draft?: boolean;
 }
 
@@ -840,8 +843,9 @@ export const defaultSettings: GenerationSettings = {
   // 초기화 would have restored everything except this one. Declaring it here means the
   // reset carries it, and undefined is exactly "use whatever this model renders by default".
   output_format: undefined,
-  // 같은 이유로 명시한다. 없으면 초기화를 눌러도 초안 모드만 켜진 채 남는다.
-  draft: false,
+  // 같은 이유로 명시한다 — 초기화가 이 키도 덮어써야 한다. undefined 는 "모델 기본값을 따름"
+  // 이라서 2.5 는 초기화하면 Draft 로 돌아간다.
+  draft: undefined,
 };
 
 // ── Theme ───────────────────────────────────────────────────────────────────────────
@@ -972,7 +976,9 @@ const SEEDANCE_25 = {
   // value: adaptiveOnly / autoDurationOnly are applied AFTER these, so Edit / Extend /
   // first-frame modes still get adaptive (and Edit still gets -1) with no exception listed
   // here. That ordering is the whole point — exceptions live in one place, not two.
-  defaults: { resolution: '720p', ratio: '16:9', duration: 5 },
+  // draft: 2.5 는 Draft 로 시작한다(사용자 요청, 2026-09-23). 모드와 상관없이 — t2v·레퍼런스·
+  // 편집·연장 모두. 1080p 를 바로 뽑던 방식이 기본이면 버려질 컷에도 본편 값을 낸다.
+  defaults: { resolution: '720p', ratio: '16:9', duration: 5, draft: true },
 };
 
 // The Omni video tasks every Gemini model has offered since the first Flash preview.
@@ -1005,7 +1011,7 @@ export const MODELS: {
   // Absent → OMNI_DEFAULT_TASKS (the 4 the original Flash preview shipped with), so adding
   // this field cannot change any model that doesn't declare it.
   omniTasks?: string[];
-  defaults?: { resolution?: string; ratio?: string; duration?: number };
+  defaults?: { resolution?: string; ratio?: string; duration?: number; draft?: boolean };
 }[] = [
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
@@ -1178,6 +1184,13 @@ export const DRAFT_FINAL_RESOLUTION = '1080p';
 export const DRAFT_VALID_MS = 7 * 24 * 60 * 60 * 1000;
 export function modelSupportsDraft(model: string): boolean {
   return MODELS.find(m => m.id === model)?.draftMode === true;
+}
+// 지금 보내면 Draft 로 나가는가. 저장값이 없으면(undefined) 모델 기본값을 따른다.
+// 패널 표시·전송 버튼·페이로드가 모두 이 함수 하나로 판단한다 — 셋이 따로 판단하면 화면은
+// 1080p 인데 480p 가 나가는 식으로 어긋난다.
+export function draftEffective(model: string, draft?: boolean): boolean {
+  if (!modelSupportsDraft(model)) return false;
+  return draft ?? (MODELS.find(m => m.id === model)?.defaults?.draft === true);
 }
 // 초안 id 가 언제 만료되는가. startTime 은 생성 API 가 id 를 돌려준 순간이라 created_at 과
 // 1초 안팎으로 같다. startTime 이 없으면 timestamp(전송 직전)를 쓴다 — 그쪽이 더 이르므로
@@ -1354,20 +1367,29 @@ export function durationLockedFor(model: string, mode: GenerationMode): boolean 
 }
 // One place that answers "what must this request actually carry", used by both the
 // settings panel (to lock the controls) and handleSend (to fix the payload).
-export function applyTaskConstraints<T extends { ratio: string; duration: number; resolution?: string; draft?: boolean }>(
+// 비율·길이만. 모드를 바꿀 때의 기본값 계산(settingsDefaultsFor)도 이것을 쓴다 — 거기에
+// Draft 의 480p 를 섞으면 저장된 해상도가 480p 로 덮여, Draft 를 꺼도 480p 가 남는다.
+function applyModeConstraints<T extends { ratio: string; duration: number }>(
   model: string, mode: GenerationMode, settings: T,
 ): T {
   const out = { ...settings };
   if (ratioLockedFor(model, mode)) out.ratio = 'adaptive';
   if (durationLockedFor(model, mode)) out.duration = -1;
-  // 초안은 480p 하나뿐이다 — 다른 해상도는 API 가 거절한다(문서). 모델이 초안을 모르면
-  // (2.5 에서 켜 둔 채 2.0 으로 바꾼 경우) 꺼서 보낸다 — 문서 표에서 2.0 계열은 초안 ✗.
+  return out;
+}
+export function applyTaskConstraints<T extends { ratio: string; duration: number; resolution?: string; draft?: boolean }>(
+  model: string, mode: GenerationMode, settings: T,
+): T {
+  const out = applyModeConstraints(model, mode, settings);
+  // Draft 는 480p 하나뿐이다 — 다른 해상도는 API 가 거절한다(문서). 켜졌는지는 draftEffective
+  // 가 정한다: 저장값이 없으면 모델 기본값(2.5 = 켜짐), 초안을 모르는 모델은 늘 꺼짐.
+  // 결과에는 실제로 나간 값을 true/false 로 적는다 — usedSettings 로 남아 재사용·재생성이
+  // "그 카드 그대로" 를 되살릴 수 있어야 한다(기본값이 나중에 바뀌어도).
   // 비율·길이와 같은 규칙으로 저장값은 건드리지 않는다: 이 함수의 결과는 페이로드와
   // usedSettings 로만 간다.
-  if (out.draft) {
-    if (modelSupportsDraft(model)) out.resolution = DRAFT_RESOLUTION;
-    else out.draft = false;
-  }
+  const d = draftEffective(model, out.draft);
+  out.draft = d;
+  if (d) out.resolution = DRAFT_RESOLUTION;
   return out;
 }
 
@@ -1379,21 +1401,25 @@ export function applyTaskConstraints<T extends { ratio: string; duration: number
 // looked up: model defaults → mode constraints → validity for that model.
 // Only called from an explicit user action (mode switch). Never from a watcher: that is
 // what turned "lock" into "silently overwrote your setting" the first time round.
-export function settingsDefaultsFor(model: string, mode: GenerationMode): { resolution: string; ratio: string; duration: number } {
+export function settingsDefaultsFor(model: string, mode: GenerationMode): { resolution: string; ratio: string; duration: number; draft: undefined } {
   const d = MODELS.find(m => m.id === model)?.defaults;
   const base = {
     resolution: d?.resolution ?? defaultSettings.resolution,
     ratio: d?.ratio ?? defaultSettings.ratio,
     duration: d?.duration ?? defaultSettings.duration,
   };
-  const withMode = applyTaskConstraints(model, mode, base);
+  // applyTaskConstraints 가 아니다 — 그쪽은 Draft 의 480p 까지 덮어쓰는데, 여기 결과는 프로젝트에
+  // 저장된다. 480p 가 저장되면 Draft 를 꺼도 480p 가 남는다.
+  const withMode = applyModeConstraints(model, mode, base);
   // Structural validity last — a default is worthless if the model can't accept it.
   if (!modelResolutions(model).includes(withMode.resolution)) withMode.resolution = '720p';
   if (withMode.duration !== -1) {
     const [lo, hi] = modelDurationRange(model);
     withMode.duration = Math.max(lo, Math.min(hi, withMode.duration));
   }
-  return withMode;
+  // Draft 도 '모델 기본값을 따름' 으로 되돌린다. 모드를 바꾸면 해상도·비율·길이가 모델 기본값으로
+  // 돌아가는 것과 같은 규칙이고, 2.5 는 어느 모드든 Draft 로 시작한다.
+  return { ...withMode, draft: undefined };
 }
 // Which backend a model routes to. Gemini Omni → Interactions API (server
 // /api/gemini/*, key NANOBANANA_STUDIO_KEY); everything else → BytePlus. This is
@@ -2185,6 +2211,13 @@ export const useAppStore = create<AppState>()(
           // Migrate: fill missing settings fields with defaults + clamp invalid values
           const validModelIds = MODELS.map(m => m.id);
           const state = useAppStore.getState();
+          // 한 번만: 2.5 는 이제 Draft 가 기본이다(draft 가 비어 있으면 모델 기본값). 그 전 시험 빌드
+          // (26.9.2301~2303)는 기본값을 false 로 저장했기 때문에, 그 빌드를 거친 PC 에는 사용자가
+          // 고른 적 없는 draft:false 가 모든 프로젝트에 박혀 있다. 그것을 한 번 비워서 새 기본값을
+          // 따르게 한다. 시험 빌드를 안 거친 PC 에는 draft:false 가 없으므로 아무 일도 안 한다.
+          const DRAFT_DEFAULT_KEY = 'seedance-draft-default-v1';
+          let resetStaleDraft = false;
+          try { resetStaleDraft = localStorage.getItem(DRAFT_DEFAULT_KEY) !== '1'; } catch { /* 못 읽으면 건드리지 않는다 */ }
           const patched = state.projects.map(p => {
             const s = { ...defaultSettings, ...p.settings };
             // Retired ids → their replacement, BEFORE anything reads the model. This has
@@ -2214,11 +2247,13 @@ export const useAppStore = create<AppState>()(
             // would NOT reject it (it validates the schema, not the model) — it would just
             // generate something the user didn't ask for. Structural, like the two above.
             s.omniTask = resolveOmniTask(s.model, s.omniTask);
-            // 초안 모드도 같은 규칙. 초안을 모르는 모델에 켜진 값이 남아 있으면 끈다.
-            if (s.draft && !modelSupportsDraft(s.model)) s.draft = false;
+            // Draft 도 같은 규칙. 초안을 모르는 모델에 남은 값은 비운다(= 모델 기본값을 따름).
+            if (s.draft !== undefined && !modelSupportsDraft(s.model)) delete s.draft;
+            if (resetStaleDraft && s.draft === false) delete s.draft;
             // Clear in-progress draft prompts on app restart (session-only persistence)
             return { ...p, settings: s, draftPrompt: '' };
           });
+          if (resetStaleDraft) { try { localStorage.setItem(DRAFT_DEFAULT_KEY, '1'); } catch { /* 다음 실행에 다시 시도 */ } }
           // Re-apply the saved theme. localStorage is the AUTHORITATIVE live copy — applyTheme
           // writes it synchronously on every change, while this store's copy only reaches
           // IndexedDB after the persist debounce. Reading the store here (which is what this
