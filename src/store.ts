@@ -2077,8 +2077,8 @@ export const useAppStore = create<AppState>()(
             if (contentData?.last_frame_url && !getCachedBlob(contentData.last_frame_url)) {
               safePrefetch(contentData.last_frame_url, 'image/');
             }
-            showNotification(message.usedSettings?.draft ? '초안 생성 완료' : '영상 생성 완료', {
-              body: message.usedSettings?.draft ? '480p 초안이 나왔습니다. 마음에 들면 카드에서 1080p 본편을 만드세요.' : '영상이 성공적으로 생성되었습니다.',
+            showNotification(message.usedSettings?.draft ? 'Draft 생성 완료' : '영상 생성 완료', {
+              body: message.usedSettings?.draft ? '480p Draft가 나왔습니다. 마음에 들면 카드에서 1080p 본편을 만드세요.' : '영상이 성공적으로 생성되었습니다.',
             });
           } else if (status === 'failed' || status === 'expired') {
             console.log(`[Poll] ${taskId} FAILED: ${errorData?.message || errorData}`);

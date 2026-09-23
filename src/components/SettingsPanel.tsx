@@ -281,7 +281,9 @@ export function SettingsPanel() {
   // 저장된 resolution 은 그대로 두므로 초안을 끄면 쓰던 해상도로 돌아온다.
   const draftAvailable = !isOmni && modelSupportsDraft(settings.model);
   const draftOn = draftAvailable && !!settings.draft;
-  const resSelectOptions = draftAvailable ? [...resOptions, { id: DRAFT_OPTION, name: '초안 → 1080p' }] : resOptions;
+  // 이름은 짧게 'Draft' — 이 칸은 ~140px 라 'Draft (480p) → 1080p' 는 잘린다. 흐름은 바로
+  // 아래 한 줄이 말한다.
+  const resSelectOptions = draftAvailable ? [...resOptions, { id: DRAFT_OPTION, name: 'Draft' }] : resOptions;
   const [durMin, durMax] = modelDurationRange(settings.model);   // 2.0: 4–15 (unchanged)
   const imgMax = modelImageMax(settings.model);                  // 2.0: 9 (unchanged)
   const vidMax = modelVideoMax(settings.model);                  // 2.0: 3 (unchanged)
@@ -867,10 +869,7 @@ export function SettingsPanel() {
             </p>
           )}
           {draftOn && (
-            <p className="text-[11px] text-gray-500 leading-snug -mt-2">
-              480p 초안을 먼저 만들고, 고른 것만 카드에서 <b className="font-semibold text-gray-700">1080p 본편</b>으로 만듭니다 (구도·길이·비율은 초안 그대로).
-              초안 비용은 1080p의 약 1/4 · 본편은 7일 안에.
-            </p>
+            <p className="text-[11px] text-gray-500 leading-snug -mt-2">Draft (480p) → 1080p</p>
           )}
 
           {durationLockedToSource ? (

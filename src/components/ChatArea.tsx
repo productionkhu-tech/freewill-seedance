@@ -81,7 +81,7 @@ function translateError(error: string): string {
   //   물려받는 값 재전송 → "generate_audio is not supported for draft_task"
   //   없는 초안 id     → "`content[0].draft_task.id` ... is not valid: the parameter
   //                       'draft_task_id' must be a draft task with status 'succeeded'"
-  if (/draft[_ ]?task/i.test(error)) return '초안 → 본편 요청이 거절되었습니다.\n초안은 생성 후 7일까지만 본편으로 만들 수 있습니다. 아래 원문을 확인해주세요.';
+  if (/draft[_ ]?task/i.test(error)) return 'Draft → 본편 요청이 거절되었습니다.\nDraft는 생성 후 7일까지만 본편으로 만들 수 있습니다. 아래 원문을 확인해주세요.';
   // 4k is flagship-only: Fast/Mini reject it at parameter validation, before a task exists.
   if (error.includes('parameter resolution') && error.includes('not valid')) return '이 모델은 선택한 해상도를 지원하지 않습니다. 4K는 Seedance 2.0(플래그십) 전용입니다.';
   if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;
@@ -702,7 +702,7 @@ export function originMaybeAlive(m: { endTime?: number; timestamp?: number }): b
 
 // 초안/본편 칩. 문자열 목록(settingsTagList)은 그대로 두고, 그리는 쪽이 이 두 값만 색을
 // 달리 칠한다 — 회색 칩 사이에서 "이건 480p 미리보기" 가 한눈에 보여야 한다.
-const DRAFT_TAG = '초안';
+const DRAFT_TAG = 'Draft';
 const FINAL_TAG = '본편';
 const tagTone = (tag: string, plain: string) => tag === DRAFT_TAG ? 'bg-amber-100 text-amber-700'
   : tag === FINAL_TAG ? 'bg-indigo-100 text-indigo-600'
@@ -2934,17 +2934,17 @@ export function ChatArea() {
     // 실패한 본편만 있으면 다시 만들 수 있다. 스토어를 새로 읽으므로 같은 틱의 두 번째
     // 클릭도 첫 클릭이 붙인 카드를 본다.
     if (owner.messages.some(m => m.draftOf === draftTaskId && m.status !== 'failed')) {
-      warn('이 초안으로 만든 본편이 이미 있습니다.\n(초안 카드의 "본편 보기" 로 이동할 수 있습니다.)');
+      warn('이 Draft로 만든 본편이 이미 있습니다.\n(Draft 카드의 "본편 보기" 로 이동할 수 있습니다.)');
       return;
     }
     const draftMsg = owner.messages.find(m => m.taskId === draftTaskId);
     if (draftMsg && Date.now() > draftExpiresAt(draftMsg)) {
-      warn('초안은 생성 후 7일까지만 본편으로 만들 수 있습니다.\n같은 설정으로 다시 뽑으려면 초안 카드의 재생성(✦)을 누르세요.');
+      warn('Draft는 생성 후 7일까지만 본편으로 만들 수 있습니다.\n같은 설정으로 다시 뽑으려면 Draft 카드의 재생성(✦)을 누르세요.');
       return;
     }
     const us = base.usedSettings || {};
     const model = resolveModelId(us.model || '');
-    if (!modelSupportsDraft(model)) { warn('이 모델은 초안 → 본편을 지원하지 않습니다.'); return; }
+    if (!modelSupportsDraft(model)) { warn('이 모델은 Draft → 본편을 지원하지 않습니다.'); return; }
     // 과금 프로젝트는 초안이 나간 곳을 따른다 — 같은 컷의 연장이다. 그 사이 드롭다운에서
     // 다른 프로젝트를 골라 두었어도 본편만 엉뚱한 프로젝트에 찍히지 않게.
     const billTo = base.videoStorage?.project || st.billingProject;
@@ -2958,7 +2958,7 @@ export function ChatArea() {
     // 그대로 쓰고, 해상도만 1080p 로, 초안 표시는 끈다.
     const usedSettings = { ...us, model, resolution: DRAFT_FINAL_RESOLUTION, draft: false };
     const id = crypto.randomUUID();
-    addMessage(owner.id, { id, role: 'system', content: '본편 생성 시작... (초안 → 1080p)', status: 'queued',
+    addMessage(owner.id, { id, role: 'system', content: '본편 생성 시작... (Draft → 1080p)', status: 'queued',
       promptText: base.promptText, promptHtml: base.promptHtml, usedSettings,
       usedAssets: base.usedAssets, usedElementImages: base.usedElementImages,
       videoStorage: { project: billTo }, draftOf: draftTaskId } as any);
@@ -3267,12 +3267,12 @@ export function ChatArea() {
               )}
               {draftClipCount > 0 && (
                 <button onClick={() => setWithDrafts(v => !v)}
-                  title="초안(480p 미리보기)은 기본으로 숨겨 둡니다"
+                  title="Draft(480p 미리보기)는 기본으로 숨겨 둡니다"
                   className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors ${withDrafts
                     ? 'text-amber-700 bg-amber-50 border-amber-300'
                     : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
                   {withDrafts ? <Check size={13} /> : <Eye size={13} />}
-                  초안 포함 <span className="font-mono opacity-70">{draftClipCount}</span>
+                  Draft 포함 <span className="font-mono opacity-70">{draftClipCount}</span>
                 </button>
               )}
             </div>
@@ -3281,12 +3281,12 @@ export function ChatArea() {
             <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3 animate-fade-in">
               <LayoutGrid size={48} className="text-gray-300" />
               <p className="text-lg">{starredOnly ? '채택한 컷이 없습니다.'
-                : !withDrafts && draftClipCount > 0 ? `본편이 아직 없습니다 · 초안 ${draftClipCount}개` : '아직 생성된 영상이 없습니다.'}</p>
+                : !withDrafts && draftClipCount > 0 ? `본편이 아직 없습니다 · Draft ${draftClipCount}개` : '아직 생성된 영상이 없습니다.'}</p>
               {starredOnly && (
                 <button onClick={() => setStarredOnly(false)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">전체 보기</button>
               )}
               {!starredOnly && !withDrafts && draftClipCount > 0 && (
-                <button onClick={() => setWithDrafts(true)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">초안 보기</button>
+                <button onClick={() => setWithDrafts(true)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">Draft 보기</button>
               )}
             </div>
           ) : (
@@ -3315,7 +3315,7 @@ export function ChatArea() {
                     {/* 초안 표시는 영상 위가 아니라 글 줄에 둔다 — 썸네일 위에는 글을 얹지 않는다 */}
                     <p className="text-[11px] font-semibold text-indigo-500 flex items-center gap-1.5">
                       <span className="truncate">{project.name}</span>
-                      {isDraftClip(item) && <span className="shrink-0 px-1.5 py-px rounded-full bg-amber-100 text-amber-700 text-[10px] font-medium">초안 480p</span>}
+                      {isDraftClip(item) && <span className="shrink-0 px-1.5 py-px rounded-full bg-amber-100 text-amber-700 text-[10px] font-medium">Draft 480p</span>}
                     </p>
                     <p className="text-[13px] text-gray-700 line-clamp-2 leading-snug h-[2.5em]">{item.promptText || '프롬프트 없음'}</p>
                     <div className="flex items-center gap-1 pt-1 flex-wrap">
@@ -3456,7 +3456,7 @@ export function ChatArea() {
                         <div className="flex items-center gap-0.5 shrink-0">
                           <button onClick={() => handleReuse(msg)} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors" title="프롬프트 재사용"><RefreshCw size={15} /></button>
                           {(msg.status === 'succeeded' || msg.status === 'failed') && (
-                            <button onClick={() => handleRegenerate(msg)} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={msg.draftOf && msg.status === 'failed' ? '본편 다시 시도 (같은 초안에서)' : '재생성 (같은 설정·래퍼런스로 다시 생성)'}><Sparkles size={15} /></button>
+                            <button onClick={() => handleRegenerate(msg)} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={msg.draftOf && msg.status === 'failed' ? '본편 다시 시도 (같은 Draft에서)' : '재생성 (같은 설정·래퍼런스로 다시 생성)'}><Sparkles size={15} /></button>
                           )}
                           <button onClick={() => useAppStore.getState().deleteMessage(project.id, msg.id)} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="삭제"><Trash2 size={15} /></button>
                         </div>
@@ -3553,11 +3553,11 @@ export function ChatArea() {
                                 );
                                 const exp = draftExpiresAt(msg);
                                 if (Date.now() > exp) return (
-                                  <span title="초안은 생성 후 7일까지만 본편으로 만들 수 있습니다" className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">초안 만료 · 본편 불가</span>
+                                  <span title="Draft는 생성 후 7일까지만 본편으로 만들 수 있습니다" className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
                                 );
                                 return (
                                   <button onClick={() => makeFinalFromDraft(msg.taskId!, msg)}
-                                    title={`구도·길이·비율은 이 초안 그대로 두고 1080p 로 다시 그립니다.\n이 초안은 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
+                                    title={`구도·길이·비율은 이 Draft 그대로 두고 1080p 로 다시 그립니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
                                     className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-indigo-500 transition-all whitespace-nowrap shrink-0 text-white bg-indigo-500 hover:bg-indigo-600 active:scale-95">
                                     <Sparkles size={14} /> 1080p 본편 만들기
                                     <span className="text-[11px] font-normal text-white/75">{draftLeftLabel(exp)}</span>
@@ -3567,7 +3567,7 @@ export function ChatArea() {
                               {msg.draftOf && draftByTaskId.has(msg.draftOf) && (
                                 <button onClick={() => scrollToMessage(draftByTaskId.get(msg.draftOf!)!.id)}
                                   className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
-                                  <ArrowUp size={14} /> 초안 보기
+                                  <ArrowUp size={14} /> Draft 보기
                                 </button>
                               )}
                             </div>
@@ -3718,10 +3718,10 @@ export function ChatArea() {
                 {/* 초안 모드면 버튼에 '초안' 을 붙인다. 설정 패널을 접어 두고 쓰는 사람도 지금 보내는
                     것이 480p 초안인지 전송 직전에 알 수 있어야 한다. */}
                 <button onClick={handleSend} disabled={!hasText || isGenerating || needsBillingSelection}
-                  title={needsBillingSelection ? '프로젝트를 먼저 선택하세요' : sendAsDraft ? '초안 생성 (480p) — 마음에 들면 카드에서 1080p 본편을 만듭니다' : '전송'}
+                  title={needsBillingSelection ? '프로젝트를 먼저 선택하세요' : sendAsDraft ? 'Draft (480p) — 마음에 들면 카드에서 1080p 본편을 만듭니다' : '전송'}
                   className={`shrink-0 flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all duration-200 mb-0.5 mr-0.5 active:scale-95 ${sendAsDraft ? 'px-3' : ''}`}>
                   {isGenerating ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
-                  {sendAsDraft && <span className="text-[13px] font-semibold leading-none">초안</span>}
+                  {sendAsDraft && <span className="text-[13px] font-semibold leading-none">Draft</span>}
                 </button>
               </div>
             </div>

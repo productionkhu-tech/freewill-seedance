@@ -483,11 +483,11 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           </button>
           {draftCount > 0 && (
             <button onClick={() => setWithDrafts(v => !v)}
-              title="초안(480p 미리보기)은 기본으로 숨겨 둡니다"
+              title="Draft(480p 미리보기)는 기본으로 숨겨 둡니다"
               className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1 rounded-lg border transition-colors ${withDrafts
                 ? 'text-amber-700 bg-amber-50 border-amber-300'
                 : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
-              초안 포함 <span className="font-mono opacity-70">{draftCount}</span>
+              Draft 포함 <span className="font-mono opacity-70">{draftCount}</span>
             </button>
           )}
           {anyFilter && (
@@ -527,7 +527,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
             <LayoutGrid size={44} className="text-gray-300" />
             <p className="text-[15px]">
               {allRows.length === 0 ? '아직 생성된 영상이 없습니다.'
-                : scopeCount === 0 ? `본편이 아직 없습니다 · 초안 ${draftCount}개` : '조건에 맞는 영상이 없습니다.'}
+                : scopeCount === 0 ? `본편이 아직 없습니다 · Draft ${draftCount}개` : '조건에 맞는 영상이 없습니다.'}
             </p>
             {anyFilter && allRows.length > 0 && (
               <button onClick={resetFilters} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">
@@ -536,7 +536,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
             )}
             {!withDrafts && scopeCount === 0 && draftCount > 0 && (
               <button onClick={() => setWithDrafts(true)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">
-                초안 보기
+                Draft 보기
               </button>
             )}
           </div>
@@ -579,7 +579,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
                     <ArrowRight size={11} className="shrink-0 opacity-0 group-hover/p:opacity-100 transition-opacity" />
                   </button>
                   {/* 초안 표시는 영상 위가 아니라 글 줄에 — 썸네일 위에는 글을 얹지 않는다 */}
-                  {r.usedSettings?.draft && <span className="shrink-0 px-1.5 py-px rounded-full bg-amber-100 text-amber-700 text-[10px] font-medium">초안 480p</span>}
+                  {r.usedSettings?.draft && <span className="shrink-0 px-1.5 py-px rounded-full bg-amber-100 text-amber-700 text-[10px] font-medium">Draft 480p</span>}
                   </div>
                   <p className="text-[13px] text-gray-700 line-clamp-2 leading-snug h-[2.5em]">
                     {r.promptText || '프롬프트 없음'}
