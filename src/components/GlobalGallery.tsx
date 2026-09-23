@@ -174,6 +174,9 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [starredOnly, setStarredOnly] = useState(false);
+  // 초안(480p 미리보기)은 기본으로 숨긴다 — 프로젝트 갤러리와 같은 규칙. 편집에 쓸 컷을
+  // 찾는 화면이 버려질 미리보기로 덮이지 않게.
+  const [withDrafts, setWithDrafts] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [shown, setShown] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -268,6 +271,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       dur: (r: Row) => durFilter === ALL || durKey(r.usedSettings?.duration) === durFilter,
       when: (r: Row) => r.timestamp >= since && r.timestamp <= until,
       star: (r: Row) => !starredOnly || !!r.starred,
+      draft: (r: Row) => withDrafts || !r.usedSettings?.draft,
     };
     type Dim = keyof typeof pass;
     const dims = Object.keys(pass) as Dim[];
@@ -362,7 +366,13 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       },
     };
   }, [allRows, projectGroups, groupFilter, groupMatch, projectFilter, modelFilter,
-      resFilter, ratioFilter, durFilter, since, until, starredOnly]);
+      resFilter, ratioFilter, durFilter, since, until, starredOnly, withDrafts]);
+
+  // 라이브러리의 초안 수. 0 이면 '초안 포함' 버튼 자체를 안 보인다.
+  const draftCount = useMemo(() => allRows.filter(r => r.usedSettings?.draft).length, [allRows]);
+  // 머리의 "N / 전체" 에서 전체는 '지금 범위' 다. 초안을 숨긴 상태에서 초안까지 센 숫자를
+  // 보이면 필터를 걸지 않았는데도 "12 / 15" 가 떠서 뭔가 걸러진 것처럼 읽힌다.
+  const scopeCount = withDrafts ? allRows.length : allRows.length - draftCount;
 
   // ★ Filter values are NAMES, and names are not stable — rename a group or a project and
   // the selection points at something that no longer exists. The grid then shows 0 of N
@@ -380,7 +390,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
 
   // Any filter change resets the window — otherwise you narrow to 3 results and still
   // carry a "shown = 96" from before, or worse, land past the end of a shorter list.
-  useEffect(() => { setShown(PAGE_SIZE); }, [groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter, since, until, starredOnly]);
+  useEffect(() => { setShown(PAGE_SIZE); }, [groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter, since, until, starredOnly, withDrafts]);
 
   const visible = rows.slice(0, shown);
   const hasMore = rows.length > shown;
@@ -398,10 +408,11 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   }, [hasMore, rows.length]);
 
   const anyFilter = groupFilter !== ALL || projectFilter !== ALL || modelFilter !== ALL || resFilter !== ALL
-    || ratioFilter !== ALL || durFilter !== ALL || period !== 'all' || starredOnly;
+    || ratioFilter !== ALL || durFilter !== ALL || period !== 'all' || starredOnly || withDrafts;
   const resetFilters = () => {
     setGroupFilter(ALL); setProjectFilter(ALL); setModelFilter(ALL); setResFilter(ALL);
     setRatioFilter(ALL); setDurFilter(ALL); setPeriod('all'); setFromDate(''); setToDate(''); setStarredOnly(false);
+    setWithDrafts(false);
   };
 
   const goToProject = (r: Row) => {
@@ -434,7 +445,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           <h2 className="text-[16px] font-semibold tracking-tight">전체 갤러리</h2>
           <span className="text-[12px] text-gray-400 tabular-nums">
             {rows.length}
-            {rows.length !== allRows.length && <span className="text-gray-300"> / {allRows.length}</span>}
+            {rows.length !== scopeCount && <span className="text-gray-300"> / {scopeCount}</span>}
             개
           </span>
           <div className="flex-1" />
@@ -470,6 +481,15 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
               : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
             <Star size={13} className={starredOnly ? 'fill-amber-400 text-amber-500' : ''} /> 채택만
           </button>
+          {draftCount > 0 && (
+            <button onClick={() => setWithDrafts(v => !v)}
+              title="초안(480p 미리보기)은 기본으로 숨겨 둡니다"
+              className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1 rounded-lg border transition-colors ${withDrafts
+                ? 'text-amber-700 bg-amber-50 border-amber-300'
+                : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
+              초안 포함 <span className="font-mono opacity-70">{draftCount}</span>
+            </button>
+          )}
           {anyFilter && (
             <button onClick={resetFilters}
               className="text-[12px] text-gray-400 hover:text-indigo-600 underline underline-offset-2 transition-colors">
@@ -506,11 +526,17 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
           <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3">
             <LayoutGrid size={44} className="text-gray-300" />
             <p className="text-[15px]">
-              {allRows.length === 0 ? '아직 생성된 영상이 없습니다.' : '조건에 맞는 영상이 없습니다.'}
+              {allRows.length === 0 ? '아직 생성된 영상이 없습니다.'
+                : scopeCount === 0 ? `본편이 아직 없습니다 · 초안 ${draftCount}개` : '조건에 맞는 영상이 없습니다.'}
             </p>
             {anyFilter && allRows.length > 0 && (
               <button onClick={resetFilters} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">
                 필터 초기화
+              </button>
+            )}
+            {!withDrafts && scopeCount === 0 && draftCount > 0 && (
+              <button onClick={() => setWithDrafts(true)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">
+                초안 보기
               </button>
             )}
           </div>
@@ -538,9 +564,10 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="p-3 space-y-2">
                   {/* Which project this came from — the whole point of a cross-project view */}
+                  <div className="flex items-center gap-1.5 min-w-0">
                   <button onClick={() => goToProject(r)}
                     title="이 프로젝트로 이동"
-                    className="group/p flex items-center gap-1 max-w-full text-[11px] font-semibold text-indigo-500 hover:text-indigo-700 transition-colors">
+                    className="group/p flex items-center gap-1 min-w-0 max-w-full text-[11px] font-semibold text-indigo-500 hover:text-indigo-700 transition-colors">
                     <span className="shrink-0">
                       {r.projectIcon
                         ? (r.projectIcon.startsWith('data:')
@@ -551,6 +578,9 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
                     <span className="truncate">{r.projectName}</span>
                     <ArrowRight size={11} className="shrink-0 opacity-0 group-hover/p:opacity-100 transition-opacity" />
                   </button>
+                  {/* 초안 표시는 영상 위가 아니라 글 줄에 — 썸네일 위에는 글을 얹지 않는다 */}
+                  {r.usedSettings?.draft && <span className="shrink-0 px-1.5 py-px rounded-full bg-amber-100 text-amber-700 text-[10px] font-medium">초안 480p</span>}
+                  </div>
                   <p className="text-[13px] text-gray-700 line-clamp-2 leading-snug h-[2.5em]">
                     {r.promptText || '프롬프트 없음'}
                   </p>

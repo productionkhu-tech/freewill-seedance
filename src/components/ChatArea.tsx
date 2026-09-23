@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftExpiresAt, DRAFT_FINAL_RESOLUTION } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -73,6 +73,15 @@ function translateError(error: string): string {
     return `프롬프트가 "${ko}"으로 해석되었습니다.\n이 작업은 비율·길이를 원본 영상에서 그대로 가져가므로 아래를 바꿔주세요.\n${what}\n(레퍼런스로 쓰려던 거라면 프롬프트에서 "원본 영상을 그대로/이어서 사용" 같은 표현을 빼주세요.)`;
   }
 
+  // 초안 → 본편 거절. 만료된 초안의 정확한 문구는 아직 본 적이 없다(일부러 만들 수가 없다).
+  // 그래서 원인을 단정하지 않고 규칙만 말한다 — 원문은 카드에 그대로 한 줄 더 남는다.
+  // 'draft task' 를 말하는 거절만 받는다. 그냥 'draft' 로 잡으면 초안 '생성' 쪽 거절까지
+  // 본편 이야기로 둔갑한다. 'not valid' 규칙보다 먼저 와야 한다 — 실측한 본편 거절이 모두
+  // 그 문구를 달고 온다 (2026-09-23, 둘 다 동기 400 · 태스크 안 생김):
+  //   물려받는 값 재전송 → "generate_audio is not supported for draft_task"
+  //   없는 초안 id     → "`content[0].draft_task.id` ... is not valid: the parameter
+  //                       'draft_task_id' must be a draft task with status 'succeeded'"
+  if (/draft[_ ]?task/i.test(error)) return '초안 → 본편 요청이 거절되었습니다.\n초안은 생성 후 7일까지만 본편으로 만들 수 있습니다. 아래 원문을 확인해주세요.';
   // 4k is flagship-only: Fast/Mini reject it at parameter validation, before a task exists.
   if (error.includes('parameter resolution') && error.includes('not valid')) return '이 모델은 선택한 해상도를 지원하지 않습니다. 4K는 Seedance 2.0(플래그십) 전용입니다.';
   if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;
@@ -691,8 +700,34 @@ export function originMaybeAlive(m: { endTime?: number; timestamp?: number }): b
   return at > 0 && Date.now() - at < 20 * 60 * 60 * 1000;
 }
 
-const settingsTagList = (us: any, videoUrl?: string): string[] => {
+// 초안/본편 칩. 문자열 목록(settingsTagList)은 그대로 두고, 그리는 쪽이 이 두 값만 색을
+// 달리 칠한다 — 회색 칩 사이에서 "이건 480p 미리보기" 가 한눈에 보여야 한다.
+const DRAFT_TAG = '초안';
+const FINAL_TAG = '본편';
+const tagTone = (tag: string, plain: string) => tag === DRAFT_TAG ? 'bg-amber-100 text-amber-700'
+  : tag === FINAL_TAG ? 'bg-indigo-100 text-indigo-600'
+  : plain;
+
+// 초안이 본편으로 쓰일 수 있는 남은 시간. 하루 넘게 남았으면 날짜로(그게 가장 덜 헷갈린다),
+// 하루 안쪽이면 시간으로 — 그때는 급하다는 것이 보여야 한다.
+export function draftLeftLabel(expiresAt: number, now = Date.now()): string {
+  const left = expiresAt - now;
+  if (left >= 24 * 60 * 60 * 1000) {
+    const d = new Date(expiresAt);
+    return `${d.getMonth() + 1}/${d.getDate()}까지`;
+  }
+  return `${Math.max(1, Math.ceil(left / (60 * 60 * 1000)))}시간 남음`;
+}
+
+const settingsTagList = (us: any, videoUrl?: string, draftOf?: string): string[] => {
   if (!us) return [];
+  // 초안/본편 표시는 모델·해상도 칩 뒤에 붙인다. 앞쪽 칩의 순서는 기존 카드와 같게 둔다.
+  const withDraftTag = (tags: string[]) =>
+    us.draft ? [...tags, DRAFT_TAG] : draftOf ? [...tags, FINAL_TAG] : tags;
+  return withDraftTag(baseSettingsTags(us, videoUrl));
+};
+
+const baseSettingsTags = (us: any, videoUrl?: string): string[] => {
   // Two Omni models now ship side by side, so the chip has to tell them apart in ~90px:
   // 'Gemini Omni 1.1 Flash' → 'Omni 1.1 Flash', 'Gemini Omni Flash' → 'Omni Flash'.
   const modelName = MODELS.find((m: any) => m.id === us.model)?.name?.replace('Seedance ', '').replace('Gemini Omni', 'Omni') || '2.0';
@@ -765,8 +800,10 @@ export async function downloadClip(msgId: string, videoUrl: string, taskId: stri
     // 있었고 자동 다운로드 쪽에는 규칙 자체가 없었다.
     // 확장자는 이 클립이 실제로 가진 URL 에서 뽑는다(2.5 → .mov). 프로젝트의 현재
     // 모델이 아니라 이 클립을 만든 모델을 쓴다 — 그 사이 바뀌었을 수 있다.
-    const msgModel = owner.messages.find(m => m.id === msgId)?.usedSettings?.model || '';
-    const filename = downloadFilenameFor({ videoUrl, taskId, usedSettings: { model: msgModel } as any });
+    const msgSettings = owner.messages.find(m => m.id === msgId)?.usedSettings;
+    const msgModel = msgSettings?.model || '';
+    // 초안이면 이름 끝에 -draft 가 붙는다 — 그 판단에 쓰는 값도 함께 넘긴다.
+    const filename = downloadFilenameFor({ videoUrl, taskId, usedSettings: { model: msgModel, draft: msgSettings?.draft } as any });
     // Remember which message this filename belongs to. The Electron download path only
     // learns the save path once 'download-done' fires, long after this call returns.
     pendingReveal.set(filename, msgId);
@@ -966,6 +1003,8 @@ export function ChatArea() {
   // getState() so Enter & 재생성 are gated too; this is just the visual disable.
   const needsBillingSelection = !billingProject;
   const isOmni = !!project && modelProvider(project.settings.model) === 'gemini'; // Gemini Omni surface
+  // 지금 보내면 초안(480p)으로 나가는가. 보내는 쪽 판정(applyTaskConstraints)과 같은 조건이다.
+  const sendAsDraft = !!project && !isOmni && !!project.settings.draft && modelSupportsDraft(project.settings.model);
   // Task is always explicit; coerce empty/legacy/other-model values to text_to_video.
   // Resolved against the project's model so 1.1's Extend can't drive the preview's UI.
   const omniTask = project ? resolveOmniTask(project.settings.model, project.settings.omniTask) : '';
@@ -984,6 +1023,7 @@ export function ChatArea() {
   // 갤러리 "채택만" 필터. 세션 한정(저장 안 함) — 필터 상태까지 영속화하면 다음에 열었을 때
   // 영상이 사라진 것처럼 보인다.
   const [starredOnly, setStarredOnly] = useState(false);
+  const [withDrafts, setWithDrafts] = useState(false); // 갤러리에 초안까지 보일지 (기본: 본편만)
   const [previewItem, setPreviewItem] = useState<any>(null);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -1396,20 +1436,41 @@ export function ChatArea() {
     : displayMessages.slice(newDividerIdx).filter(m => m.status === 'succeeded').length,
     [displayMessages, newDividerIdx]);
 
+  // 초안 ↔ 본편 연결. 초안 카드는 자기 본편을, 본편 카드는 자기 초안을 여기서 찾는다.
+  // 한 초안에 본편이 여럿이면(실패 뒤 재시도) 실패하지 않은 것 중 가장 나중 것을 쓴다.
+  const { finalOfDraft, draftByTaskId } = useMemo(() => {
+    const finalOfDraft = new Map<string, any>();
+    const draftByTaskId = new Map<string, any>();
+    for (const m of project.messages) {
+      if (m.usedSettings?.draft && m.taskId) draftByTaskId.set(m.taskId, m);
+      if (m.draftOf && m.status !== 'failed') finalOfDraft.set(m.draftOf, m);
+    }
+    return { finalOfDraft, draftByTaskId };
+  }, [project.messages]);
+
+  // 갤러리는 기본이 '본편만' 이다. 초안은 고르기 위한 480p 미리보기라 대부분 버려지는데,
+  // 그대로 섞으면 편집 때 쓸 컷을 찾는 화면이 미리보기로 덮인다. 초안이 하나라도 있으면
+  // '초안 포함' 버튼이 나타난다.
+  const isDraftClip = (m: any) => !!m.usedSettings?.draft;
+  const draftClipCount = useMemo(
+    () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && isDraftClip(m)).length,
+    [project.messages]);
   const galleryVideos = useMemo(() => project.messages
     .filter(m => m.status === 'succeeded' && m.videoUrl)
+    .filter(m => withDrafts || !isDraftClip(m))
     .filter(m => !starredOnly || m.starred)
-    .sort((a, b) => b.timestamp - a.timestamp), [project.messages, starredOnly]);
+    .sort((a, b) => b.timestamp - a.timestamp), [project.messages, starredOnly, withDrafts]);
+  // 채택 숫자도 지금 보이는 범위(초안 포함 여부)에 맞춘다 — 누르면 나오는 개수와 같아야 한다.
   const starredCount = useMemo(
-    () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && m.starred).length,
-    [project.messages]);
+    () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && m.starred && (withDrafts || !isDraftClip(m))).length,
+    [project.messages, withDrafts]);
 
   // Gallery paging — see the note on the grid. Reset whenever the visible set changes
   // (opening it, switching project, toggling 채택만) so we never open mid-list.
   const GALLERY_PAGE = 24;
   const [gallShown, setGallShown] = useState(GALLERY_PAGE);
   const gallSentinelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { setGallShown(GALLERY_PAGE); }, [showGallery, project.id, starredOnly]);
+  useEffect(() => { setGallShown(GALLERY_PAGE); }, [showGallery, project.id, starredOnly, withDrafts]);
   useEffect(() => {
     if (!showGallery || galleryVideos.length <= gallShown) return;
     const el = gallSentinelRef.current;
@@ -2070,10 +2131,24 @@ export function ChatArea() {
     // no longer exists. Reusing such a card would restore a dead id into the live settings
     // and the send would 400 — map it forward here, the same way hydration does for the
     // project's own settings.
-    if (msg.usedSettings) useAppStore.getState().updateProjectSettings(project.id, {
-      ...msg.usedSettings,
-      ...(msg.usedSettings.model ? { model: resolveModelId(msg.usedSettings.model) } : {}),
-    });
+    if (msg.usedSettings) {
+      const targetModel = msg.usedSettings.model ? resolveModelId(msg.usedSettings.model) : undefined;
+      // 초안 카드의 480p 는 사용자가 고른 값이 아니라 초안이 강제한 값이다. 그대로 되살리면
+      // 나중에 초안을 껐을 때 해상도가 480p 로 남는다 — "끄면 쓰던 해상도로 돌아온다" 가
+      // 깨진다. 그래서 초안 카드는 해상도만 빼고 되살린다(초안 모드 자체는 켜진다).
+      // 지금 해상도가 그 모델에 없는 값이면(2.0 의 4K → 2.5) 모델 기본값으로 둔다.
+      let restore: any = msg.usedSettings;
+      if (msg.usedSettings.draft) {
+        const { resolution: _forced, ...rest } = msg.usedSettings;
+        const cur = useAppStore.getState().projects.find(p => p.id === project.id)?.settings.resolution;
+        const m: string = targetModel || msg.usedSettings.model || '';
+        restore = { ...rest, resolution: cur && modelResolutions(m).includes(cur) ? cur : (MODELS.find(x => x.id === m)?.defaults?.resolution || '720p') };
+      }
+      useAppStore.getState().updateProjectSettings(project.id, {
+        ...restore,
+        ...(targetModel ? { model: targetModel } : {}),
+      });
+    }
     if (msg.usedAssets) {
       // Build the full restored list FIRST, then commit in one atomic store call.
       // Old approach (clearAssets + N×addAsset across awaits) could interleave
@@ -2502,6 +2577,9 @@ export function ChatArea() {
       const refTask = refTaskTypeFor(currentSettings.model, currentSettings.mode, content);
       if (refTask) payload.omni_reference_task_type = refTask;
       if (currentSettings.return_last_frame) payload.return_last_frame = true;
+      // 초안. 해상도는 applyTaskConstraints 가 이미 480p 로 바꿔 두었고, 초안을 모르는 모델이면
+      // 거기서 draft 자체가 꺼진다. 나머지(모델·토큰 과금·트래커 보고)는 일반 생성과 똑같다.
+      if (currentSettings.draft) payload.draft = true;
 
       // Settings + assets are preserved after send so user can iterate quickly with same setup
 
@@ -2823,6 +2901,80 @@ export function ChatArea() {
     }
   };
 
+  /* ─── 초안 → 1080p 본편 ─── */
+  // handleSend 를 타지 않는다. 본편 요청에 초안에서 물려받는 값(프롬프트·레퍼런스·길이·비율·
+  // 시드·오디오·작업 종류)을 다시 실으면 값이 같아도 즉시 400 이다 — 실측(generate_audio).
+  // handleSend 는 바로 그것들을 싣는 게 일이라, 거기에 예외를 끼우면 둘이 얽힌다. 여기서는
+  // 초안 id 하나와 '다시 정할 수 있는' 값만 보낸다.
+  // 새 카드는 맨 아래에 붙는다. 초안 바로 밑에 끼우면 '여기부터 새로 생성됨' 구분선과 갤러리
+  // 정렬(생성 시각)이 어긋난다. 대신 초안 카드의 '본편 보기' 가 그 자리로 데려간다.
+  // base: 새 카드에 옮겨 적을 프롬프트·설정·레퍼런스를 가진 메시지 — 초안 카드 자신이거나,
+  // 실패한 본편을 다시 시도할 때는 그 본편 카드.
+  const makeFinalFromDraft = async (draftTaskId: string, base: any) => {
+    const st = useAppStore.getState();
+    const owner = st.projects.find(p => p.messages.some(m => m.id === base.id));
+    if (!owner || !draftTaskId) return;
+    // 같은 초안으로 이미 만드는 중이거나 다 만들었으면 또 보내지 않는다 (더블클릭 등).
+    // 실패한 본편만 있으면 다시 만들 수 있다. 스토어를 새로 읽으므로 같은 틱의 두 번째
+    // 클릭도 첫 클릭이 붙인 카드를 본다.
+    if (owner.messages.some(m => m.draftOf === draftTaskId && m.status !== 'failed')) {
+      warn('이 초안으로 만든 본편이 이미 있습니다.\n(초안 카드의 "본편 보기" 로 이동할 수 있습니다.)');
+      return;
+    }
+    const draftMsg = owner.messages.find(m => m.taskId === draftTaskId);
+    if (draftMsg && Date.now() > draftExpiresAt(draftMsg)) {
+      warn('초안은 생성 후 7일까지만 본편으로 만들 수 있습니다.\n같은 설정으로 다시 뽑으려면 초안 카드의 재생성(✦)을 누르세요.');
+      return;
+    }
+    const us = base.usedSettings || {};
+    const model = resolveModelId(us.model || '');
+    if (!modelSupportsDraft(model)) { warn('이 모델은 초안 → 본편을 지원하지 않습니다.'); return; }
+    // 과금 프로젝트는 초안이 나간 곳을 따른다 — 같은 컷의 연장이다. 그 사이 드롭다운에서
+    // 다른 프로젝트를 골라 두었어도 본편만 엉뚱한 프로젝트에 찍히지 않게.
+    const billTo = base.videoStorage?.project || st.billingProject;
+    if (!billTo) { warn('프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)'); return; }
+    if (!isModelAllowed(model, { billingProject: billTo, billingProjects: st.billingProjects })) {
+      warn(`"${billTo}" 프로젝트는 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 없습니다.`);
+      return;
+    }
+
+    // 카드에는 '실제로 나오는 것' 을 적는다. 비율·길이·오디오는 초안 그대로라 초안의 기록을
+    // 그대로 쓰고, 해상도만 1080p 로, 초안 표시는 끈다.
+    const usedSettings = { ...us, model, resolution: DRAFT_FINAL_RESOLUTION, draft: false };
+    const id = crypto.randomUUID();
+    addMessage(owner.id, { id, role: 'system', content: '본편 생성 시작... (초안 → 1080p)', status: 'queued',
+      promptText: base.promptText, promptHtml: base.promptHtml, usedSettings,
+      usedAssets: base.usedAssets, usedElementImages: base.usedElementImages,
+      videoStorage: { project: billTo }, draftOf: draftTaskId } as any);
+
+    // 다시 정할 수 있는 값은 빠뜨리면 '초안 때 값' 이 아니라 모델 기본값이 된다(문서).
+    // 그래서 형식과 마지막 프레임은 초안 때 값을 다시 실어 보낸다.
+    const payload: any = {
+      model,
+      content: [{ type: 'draft_task', draft_task: { id: draftTaskId } }],
+      resolution: DRAFT_FINAL_RESOLUTION,
+      watermark: false,
+      project: billTo, // app-only — server.ts 가 떼어내 과금 프로젝트로 쓴다 (handleSend 와 같다)
+    };
+    const outFmt = resolveOutputFormat(model, us.output_format);
+    if (outFmt) payload.output_format = outFmt;
+    if (us.return_last_frame) payload.return_last_frame = true;
+
+    try {
+      const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const text = await res.text();
+      let data; try { data = JSON.parse(text); } catch { throw new Error(`서버 응답 오류 (${res.status})`); }
+      if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
+      const taskId = data.id || data.data?.task_id;
+      if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
+      updateMessage(owner.id, id, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now() });
+      useAppStore.getState().pollTask(owner.id, id, taskId);
+      showToast('1080p 본편을 만들기 시작했습니다 — 맨 아래에 추가됩니다.', true);
+    } catch (error: any) {
+      updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
+    }
+  };
+
   /* ─── Regenerate: restore this card's exact setup, then re-run the SAME send ─── */
   // Reuses the proven handleReuse + handleSend paths verbatim → the payload,
   // [Image N] numbering, R2 re-upload and validation are byte-for-byte a normal
@@ -2833,6 +2985,10 @@ export function ChatArea() {
   const regenLockRef = useRef(false);
   const handleRegenerate = async (msg: any) => {
     if (isGenerating || regenLockRef.current) return;
+    // 초안에서 만든 본편이 실패했으면 다시 시도도 같은 초안에서 한다. handleSend 로 보내면
+    // 초안과 상관없는 새 1080p 영상이 나와서, 골라 둔 구도를 잃는다.
+    // (성공한 본편의 재생성은 다른 카드와 같다 — 같은 설정으로 새 1080p 한 편.)
+    if (msg.draftOf && msg.status === 'failed') { await makeFinalFromDraft(msg.draftOf, msg); return; }
     regenLockRef.current = true;
     try {
       const ok = await handleReuse(msg);
@@ -3041,8 +3197,8 @@ export function ChatArea() {
               )}
               {previewItem.usedSettings && (
                 <div className="flex flex-wrap gap-2">
-                  {settingsTagList(previewItem.usedSettings, previewItem.videoUrl).map((tag, i) => (
-                    <span key={i} className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded-full text-[11px] font-medium">{tag}</span>
+                  {settingsTagList(previewItem.usedSettings, previewItem.videoUrl, previewItem.draftOf).map((tag, i) => (
+                    <span key={i} className={`px-2.5 py-1 rounded-full text-[11px] font-medium ${tagTone(tag, 'bg-gray-100 text-gray-600')}`}>{tag}</span>
                   ))}
                 </div>
               )}
@@ -3081,24 +3237,40 @@ export function ChatArea() {
           0.15초짜리 장식 때문에 기능이 멈추는 거래라 애니메이션을 뜼고 그냥 즉시 교체한다. */}
       {showGallery ? (
         <div className="flex-1 overflow-y-auto p-6 bg-[#f5f5f7] dark:bg-[#242426]">
-          {/* 채택만 보기 — 채택된 컷이 하나도 없으면 굳이 노출하지 않는다 */}
-          {starredCount > 0 && (
+          {/* 채택만 보기 · 초안 포함 — 해당하는 컷이 하나도 없으면 그 버튼은 굳이 노출하지 않는다 */}
+          {(starredCount > 0 || draftClipCount > 0) && (
             <div className="flex items-center gap-2 mb-4">
-              <button onClick={() => setStarredOnly(v => !v)}
-                className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors ${starredOnly
-                  ? 'text-amber-700 bg-amber-50 border-amber-300'
-                  : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
-                <Star size={13} className={starredOnly ? 'fill-amber-400 text-amber-500' : ''} />
-                채택만 <span className="font-mono opacity-70">{starredCount}</span>
-              </button>
+              {starredCount > 0 && (
+                <button onClick={() => setStarredOnly(v => !v)}
+                  className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors ${starredOnly
+                    ? 'text-amber-700 bg-amber-50 border-amber-300'
+                    : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
+                  <Star size={13} className={starredOnly ? 'fill-amber-400 text-amber-500' : ''} />
+                  채택만 <span className="font-mono opacity-70">{starredCount}</span>
+                </button>
+              )}
+              {draftClipCount > 0 && (
+                <button onClick={() => setWithDrafts(v => !v)}
+                  title="초안(480p 미리보기)은 기본으로 숨겨 둡니다"
+                  className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors ${withDrafts
+                    ? 'text-amber-700 bg-amber-50 border-amber-300'
+                    : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
+                  {withDrafts ? <Check size={13} /> : <Eye size={13} />}
+                  초안 포함 <span className="font-mono opacity-70">{draftClipCount}</span>
+                </button>
+              )}
             </div>
           )}
           {galleryVideos.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3 animate-fade-in">
               <LayoutGrid size={48} className="text-gray-300" />
-              <p className="text-lg">{starredOnly ? '채택한 컷이 없습니다.' : '아직 생성된 영상이 없습니다.'}</p>
+              <p className="text-lg">{starredOnly ? '채택한 컷이 없습니다.'
+                : !withDrafts && draftClipCount > 0 ? `본편이 아직 없습니다 · 초안 ${draftClipCount}개` : '아직 생성된 영상이 없습니다.'}</p>
               {starredOnly && (
                 <button onClick={() => setStarredOnly(false)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">전체 보기</button>
+              )}
+              {!starredOnly && !withDrafts && draftClipCount > 0 && (
+                <button onClick={() => setWithDrafts(true)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">초안 보기</button>
               )}
             </div>
           ) : (
@@ -3124,7 +3296,11 @@ export function ChatArea() {
                     </button>
                   </div>
                   <div className="p-3 space-y-2">
-                    <p className="text-[11px] font-semibold text-indigo-500">{project.name}</p>
+                    {/* 초안 표시는 영상 위가 아니라 글 줄에 둔다 — 썸네일 위에는 글을 얹지 않는다 */}
+                    <p className="text-[11px] font-semibold text-indigo-500 flex items-center gap-1.5">
+                      <span className="truncate">{project.name}</span>
+                      {isDraftClip(item) && <span className="shrink-0 px-1.5 py-px rounded-full bg-amber-100 text-amber-700 text-[10px] font-medium">초안 480p</span>}
+                    </p>
                     <p className="text-[13px] text-gray-700 line-clamp-2 leading-snug h-[2.5em]">{item.promptText || '프롬프트 없음'}</p>
                     <div className="flex items-center gap-1 pt-1 flex-wrap">
                       <button onClick={() => { if (item.videoUrl && item.taskId) handleVideoDownload(item.id, item.videoUrl, item.taskId); }}
@@ -3245,8 +3421,8 @@ export function ChatArea() {
                               : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
                             {msg.usedSettings && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
-                                {settingsTagList(msg.usedSettings, msg.videoUrl).map((tag, i) => (
-                                  <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full text-[10px] font-medium">{tag}</span>
+                                {settingsTagList(msg.usedSettings, msg.videoUrl, msg.draftOf).map((tag, i) => (
+                                  <span key={i} className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${tagTone(tag, 'bg-gray-100 text-gray-500')}`}>{tag}</span>
                                 ))}
                               </div>
                             )}
@@ -3264,7 +3440,7 @@ export function ChatArea() {
                         <div className="flex items-center gap-0.5 shrink-0">
                           <button onClick={() => handleReuse(msg)} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors" title="프롬프트 재사용"><RefreshCw size={15} /></button>
                           {(msg.status === 'succeeded' || msg.status === 'failed') && (
-                            <button onClick={() => handleRegenerate(msg)} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title="재생성 (같은 설정·래퍼런스로 다시 생성)"><Sparkles size={15} /></button>
+                            <button onClick={() => handleRegenerate(msg)} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={msg.draftOf && msg.status === 'failed' ? '본편 다시 시도 (같은 초안에서)' : '재생성 (같은 설정·래퍼런스로 다시 생성)'}><Sparkles size={15} /></button>
                           )}
                           <button onClick={() => useAppStore.getState().deleteMessage(project.id, msg.id)} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="삭제"><Trash2 size={15} /></button>
                         </div>
@@ -3316,8 +3492,8 @@ export function ChatArea() {
                               {!msg.videoUrl && <ClipStamp ms={msg.timestamp} />}
                             </div>
                           )}
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               {(msg.videoUrl || msg.imageUrl) && (
                                 <button onClick={() => toggleStar(msg.id, !msg.starred)}
                                   title={msg.starred ? '채택 해제' : '컷 채택'}
@@ -3345,6 +3521,37 @@ export function ChatArea() {
                                 <button onClick={() => downloadViaProxy(msg.imageUrl!, buildDownloadFilename(msg.taskId || 'unknown', '.png'))}
                                   className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
                                   <Download size={14} /> 이미지
+                                </button>
+                              )}
+                              {/* 초안 → 본편. 초안 카드는 본편을 만들거나(이미 있으면 그리로 가고),
+                                  본편 카드는 자기 초안으로 돌아간다. 본편은 맨 아래에 붙으므로
+                                  둘 사이를 오가는 길이 카드에 있어야 한다. */}
+                              {isDraftClip(msg) && msg.taskId && (() => {
+                                const fin = finalOfDraft.get(msg.taskId);
+                                if (fin) return (
+                                  <button onClick={() => scrollToMessage(fin.id)}
+                                    className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all whitespace-nowrap shrink-0 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border-indigo-200">
+                                    {fin.status === 'succeeded' ? <ArrowDown size={14} /> : <Loader2 size={14} className="animate-spin" />}
+                                    {fin.status === 'succeeded' ? '본편 보기' : '본편 만드는 중'}
+                                  </button>
+                                );
+                                const exp = draftExpiresAt(msg);
+                                if (Date.now() > exp) return (
+                                  <span title="초안은 생성 후 7일까지만 본편으로 만들 수 있습니다" className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">초안 만료 · 본편 불가</span>
+                                );
+                                return (
+                                  <button onClick={() => makeFinalFromDraft(msg.taskId!, msg)}
+                                    title={`구도·길이·비율은 이 초안 그대로 두고 1080p 로 다시 그립니다.\n이 초안은 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
+                                    className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-indigo-500 transition-all whitespace-nowrap shrink-0 text-white bg-indigo-500 hover:bg-indigo-600 active:scale-95">
+                                    <Sparkles size={14} /> 1080p 본편 만들기
+                                    <span className="text-[11px] font-normal text-white/75">{draftLeftLabel(exp)}</span>
+                                  </button>
+                                );
+                              })()}
+                              {msg.draftOf && draftByTaskId.has(msg.draftOf) && (
+                                <button onClick={() => scrollToMessage(draftByTaskId.get(msg.draftOf!)!.id)}
+                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
+                                  <ArrowUp size={14} /> 초안 보기
                                 </button>
                               )}
                             </div>
@@ -3492,10 +3699,13 @@ export function ChatArea() {
                     className="w-full bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] dark:text-gray-900 outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                     data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />
                 </div>
+                {/* 초안 모드면 버튼에 '초안' 을 붙인다. 설정 패널을 접어 두고 쓰는 사람도 지금 보내는
+                    것이 480p 초안인지 전송 직전에 알 수 있어야 한다. */}
                 <button onClick={handleSend} disabled={!hasText || isGenerating || needsBillingSelection}
-                  title={needsBillingSelection ? '프로젝트를 먼저 선택하세요' : '전송'}
-                  className="shrink-0 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all duration-200 mb-0.5 mr-0.5 active:scale-95">
+                  title={needsBillingSelection ? '프로젝트를 먼저 선택하세요' : sendAsDraft ? '초안 생성 (480p) — 마음에 들면 카드에서 1080p 본편을 만듭니다' : '전송'}
+                  className={`shrink-0 flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all duration-200 mb-0.5 mr-0.5 active:scale-95 ${sendAsDraft ? 'px-3' : ''}`}>
                   {isGenerating ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
+                  {sendAsDraft && <span className="text-[13px] font-semibold leading-none">초안</span>}
                 </button>
               </div>
             </div>

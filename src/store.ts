@@ -515,6 +515,10 @@ export interface GenerationSettings {
   // (MODELS.outputFormats); absent or unsupported falls back to the model's default, so
   // every model that never had this behaves exactly as before.
   output_format?: string;
+  // 초안 모드 (2.5 전용, MODELS.draftMode). 켜면 480p 초안으로 보내고, 마음에 드는 것만
+  // 카드에서 1080p 본편으로 만든다. 해상도는 이 값이 대신 정하므로(applyTaskConstraints)
+  // 저장된 resolution 은 건드리지 않는다 — 끄면 쓰던 해상도가 그대로 돌아온다.
+  draft?: boolean;
 }
 
 export interface ChatMessage {
@@ -550,6 +554,8 @@ export interface ChatMessage {
                            // download folder is a session-only override — resolving it
                            // later would point at the wrong folder. Empty when the
                            // browser picked the location (dev/anchor fallback).
+  draftOf?: string; // 이 본편을 만든 초안의 taskId. 초안 카드는 이 값을 거꾸로 찾아 "본편 보기"
+                    // 를 띄우고, 본편 카드는 이 값으로 초안을 찾아 "초안 보기" 를 띄운다.
 }
 
 // A sidebar folder. Purely an organisational shell: it owns no settings and no data,
@@ -834,6 +840,8 @@ export const defaultSettings: GenerationSettings = {
   // 초기화 would have restored everything except this one. Declaring it here means the
   // reset carries it, and undefined is exactly "use whatever this model renders by default".
   output_format: undefined,
+  // 같은 이유로 명시한다. 없으면 초기화를 눌러도 초안 모드만 켜진 채 남는다.
+  draft: false,
 };
 
 // ── Theme ───────────────────────────────────────────────────────────────────────────
@@ -941,6 +949,16 @@ const SEEDANCE_25 = {
   // Only the three reference-family modes get a value; frame modes are decided by the
   // first_frame/last_frame roles and text-to-video has no references at all.
   refTaskTypes: { multimodal_reference: 'reference', edit_video: 'edit', extend_video: 'extend' } as Partial<Record<GenerationMode, string>>,
+  // ★ 초안 모드 (문서 2607688 #2.5_draft_mode). 2.5 만 된다 — 표에 2.0/Fast/Mini 는 ✗.
+  //   초안: draft:true + 480p 만 허용. 본편: content 에 draft_task.id 하나 + 1080p 만 허용.
+  // 2026-09-23 실측 (같은 레퍼런스·프롬프트·4초):
+  //   초안 cgt-20260923150149-uwfpr  38,830 토큰  H.264 854x480        ~59초
+  //   본편 cgt-20260923150252-668nu 196,425 토큰  HEVC 10bit 1920x1080  ~32초
+  //   seed 가 같고(92341) 구도도 같다. 본편은 초안을 '키운 것' 이지 새로 뽑은 것이 아니다.
+  //   초안이 끝나고 R2 레퍼런스를 지운 뒤에도 본편이 만들어졌다 — 입력은 BytePlus 가 들고 있다.
+  // 본편에 generate_audio 를 다시 보내면 값이 같아도 즉시 400 이다(태스크가 안 생김).
+  // 그래서 본편은 handleSend 를 타지 않고 전용 페이로드로 보낸다 (ChatArea / makeFinalFromDraft).
+  draftMode: true,
   // Defaults a mode starts at. Only `resolution` is the datasheet's own "Default value" —
   // ratio and duration deliberately are not, and for the same reason: the API's defaults
   // both hand the decision to the model, and a default should be predictable.
@@ -973,6 +991,9 @@ export const MODELS: {
   outputFormat?: string; outputFormats?: string[]; audioOnly?: boolean;
   adaptiveOnly?: GenerationMode[]; autoDurationOnly?: GenerationMode[];
   refTaskTypes?: Partial<Record<GenerationMode, string>>;
+  // 초안(480p) → 본편(1080p) 두 단계 생성을 지원하는가. 없으면 초안 토글이 안 보이고,
+  // 저장된 draft 값이 남아 있어도 applyTaskConstraints 가 꺼서 보낸다.
+  draftMode?: boolean;
   // Gemini Omni only — does this model do first+last frame interpolation as a documented
   // feature? Absent → the older reference_to_video workaround, which is what the Flash
   // preview has always used and must keep using.
@@ -1149,6 +1170,22 @@ export function modelAllowsAudioOnly(model: string): boolean {
   return MODELS.find(m => m.id === model)?.audioOnly === true;
 }
 
+// ── 초안 모드 ────────────────────────────────────────────────────────────────────────
+// 두 해상도는 문서가 못 박은 값이다 — 둘 다 "다른 값을 넣으면 에러" 라고 적혀 있다.
+export const DRAFT_RESOLUTION = '480p';
+export const DRAFT_FINAL_RESOLUTION = '1080p';
+// 초안 task id 는 created_at 부터 7일 동안만 본편에 쓸 수 있다 (문서 명시).
+export const DRAFT_VALID_MS = 7 * 24 * 60 * 60 * 1000;
+export function modelSupportsDraft(model: string): boolean {
+  return MODELS.find(m => m.id === model)?.draftMode === true;
+}
+// 초안 id 가 언제 만료되는가. startTime 은 생성 API 가 id 를 돌려준 순간이라 created_at 과
+// 1초 안팎으로 같다. startTime 이 없으면 timestamp(전송 직전)를 쓴다 — 그쪽이 더 이르므로
+// 만료를 실제보다 늦게 말하는 일은 없다.
+export function draftExpiresAt(m: { startTime?: number; timestamp?: number }): number {
+  return (m.startTime || m.timestamp || 0) + DRAFT_VALID_MS;
+}
+
 /**
  * 저장 파일 이름 — 항상 `{모델 상징 id}-{날짜}-{taskId}.{확장자}`.
  *
@@ -1165,7 +1202,10 @@ export function modelAllowsAudioOnly(model: string): boolean {
  */
 export function downloadFilenameFor(m: Pick<ChatMessage, 'videoUrl' | 'taskId' | 'usedSettings'>): string {
   const model = m.usedSettings?.model || '';
-  return buildDownloadFilename(m.taskId || 'unknown', videoExtFor(m.videoUrl || '', model), brandOf(model));
+  // 초안은 끝에 -draft 를 단다. 480p 미리보기가 본편과 똑같은 모양의 이름으로 편집 폴더에
+  // 섞이면 파일만 보고는 가려낼 방법이 없다. taskId 부분은 그대로라 NCP 위치 규칙도 그대로다.
+  const tail = m.usedSettings?.draft ? '-draft' : '';
+  return buildDownloadFilename((m.taskId || 'unknown') + tail, videoExtFor(m.videoUrl || '', model), brandOf(model));
 }
 
 // 결과물 하나당 정확히 한 번만 받는다. updateMessage 가 "이번에 처음 성공"일 때만
@@ -1175,6 +1215,9 @@ const autoDownloaded = new Set<string>();
 function fireAutoDownload(m: ChatMessage) {
   if (!useAppStore.getState().autoDownload) return;
   if (!m.videoUrl || autoDownloaded.has(m.id)) return;
+  // 초안은 받지 않는다. 고르기 위한 480p 미리보기라 대부분 버려지고, 받아둘 것은 본편이다.
+  // 초안이 필요하면 카드의 '영상 다운로드' 로 받으면 된다(이름 끝에 -draft).
+  if (m.usedSettings?.draft) return;
   autoDownloaded.add(m.id);
   // downloadedAt 은 남기지 않는다 — 그 표시는 수동 클릭("다시 다운로드") 전용이다.
   // 저장 폴더는 여기서 정하지 않는다. 폴더 지정(sessionDownloadDir)은 electron 쪽
@@ -1311,12 +1354,20 @@ export function durationLockedFor(model: string, mode: GenerationMode): boolean 
 }
 // One place that answers "what must this request actually carry", used by both the
 // settings panel (to lock the controls) and handleSend (to fix the payload).
-export function applyTaskConstraints<T extends { ratio: string; duration: number }>(
+export function applyTaskConstraints<T extends { ratio: string; duration: number; resolution?: string; draft?: boolean }>(
   model: string, mode: GenerationMode, settings: T,
 ): T {
   const out = { ...settings };
   if (ratioLockedFor(model, mode)) out.ratio = 'adaptive';
   if (durationLockedFor(model, mode)) out.duration = -1;
+  // 초안은 480p 하나뿐이다 — 다른 해상도는 API 가 거절한다(문서). 모델이 초안을 모르면
+  // (2.5 에서 켜 둔 채 2.0 으로 바꾼 경우) 꺼서 보낸다 — 문서 표에서 2.0 계열은 초안 ✗.
+  // 비율·길이와 같은 규칙으로 저장값은 건드리지 않는다: 이 함수의 결과는 페이로드와
+  // usedSettings 로만 간다.
+  if (out.draft) {
+    if (modelSupportsDraft(model)) out.resolution = DRAFT_RESOLUTION;
+    else out.draft = false;
+  }
   return out;
 }
 
@@ -2026,7 +2077,9 @@ export const useAppStore = create<AppState>()(
             if (contentData?.last_frame_url && !getCachedBlob(contentData.last_frame_url)) {
               safePrefetch(contentData.last_frame_url, 'image/');
             }
-            showNotification('영상 생성 완료', { body: '영상이 성공적으로 생성되었습니다.' });
+            showNotification(message.usedSettings?.draft ? '초안 생성 완료' : '영상 생성 완료', {
+              body: message.usedSettings?.draft ? '480p 초안이 나왔습니다. 마음에 들면 카드에서 1080p 본편을 만드세요.' : '영상이 성공적으로 생성되었습니다.',
+            });
           } else if (status === 'failed' || status === 'expired') {
             console.log(`[Poll] ${taskId} FAILED: ${errorData?.message || errorData}`);
             get().updateMessage(projectId, messageId, {
@@ -2161,6 +2214,8 @@ export const useAppStore = create<AppState>()(
             // would NOT reject it (it validates the schema, not the model) — it would just
             // generate something the user didn't ask for. Structural, like the two above.
             s.omniTask = resolveOmniTask(s.model, s.omniTask);
+            // 초안 모드도 같은 규칙. 초안을 모르는 모델에 켜진 값이 남아 있으면 끈다.
+            if (s.draft && !modelSupportsDraft(s.model)) s.draft = false;
             // Clear in-progress draft prompts on app restart (session-only persistence)
             return { ...p, settings: s, draftPrompt: '' };
           });

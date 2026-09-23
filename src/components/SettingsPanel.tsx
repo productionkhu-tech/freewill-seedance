@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -17,6 +17,9 @@ const RESOLUTIONS: { id: string; name: string }[] = [
   // sheet — see allowedResolutions(). Flagship Seedance 2.0 only.
   { id: '4k', name: '4K' },
 ];
+// 해상도 드롭다운 안의 '초안' 선택지. 해상도 값이 아니라 draft 플래그를 켜는 자리라서
+// 어떤 해상도 id 와도 겹치지 않는 값을 쓴다.
+const DRAFT_OPTION = '__draft__';
 const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
 // Gemini Omni — display names for the API's task values. Which of these a given model
 // actually offers comes from modelOmniTasks(); this map is only the label lookup, so a
@@ -273,6 +276,12 @@ export function SettingsPanel() {
   // dropdown, and nothing says why ("4k는 어디갔누"). The silence is the bug, not the gate.
   // Only shown while the picker is actually visible (edit/extend hide it entirely).
   const fourKHidden = !fourKAvailable && !fourKBlocked && modelResolutions(settings.model).includes('4k');
+  // 초안 모드. 해상도를 대신 정하는 방식이라 해상도 드롭다운 안에 한 칸으로 둔다 — 토글을
+  // 따로 두면 '해상도 1080p' 와 '초안 켜짐' 이 동시에 보여 둘 중 무엇이 나가는지 헷갈린다.
+  // 저장된 resolution 은 그대로 두므로 초안을 끄면 쓰던 해상도로 돌아온다.
+  const draftAvailable = !isOmni && modelSupportsDraft(settings.model);
+  const draftOn = draftAvailable && !!settings.draft;
+  const resSelectOptions = draftAvailable ? [...resOptions, { id: DRAFT_OPTION, name: '초안 → 1080p' }] : resOptions;
   const [durMin, durMax] = modelDurationRange(settings.model);   // 2.0: 4–15 (unchanged)
   const imgMax = modelImageMax(settings.model);                  // 2.0: 9 (unchanged)
   const vidMax = modelVideoMax(settings.model);                  // 2.0: 3 (unchanged)
@@ -732,6 +741,9 @@ export function SettingsPanel() {
                 // clamp above — otherwise 2.5's 'mov' rides along onto a model that never
                 // accepted the parameter.
                 if (settings.output_format && !modelOutputFormats(val).includes(settings.output_format)) patch.output_format = undefined;
+                // 초안도 같다. 2.5 에서 켜 둔 채 2.0 으로 가면 끈다 — 다시 2.5 로 와도 켜진 채
+                // 돌아오지 않게. (보낼 때도 applyTaskConstraints 가 한 번 더 막는다.)
+                if (settings.draft && !modelSupportsDraft(val)) patch.draft = false;
                 // Duration ranges differ per model (2.0: 4–15, 2.5: 4–30, Omni: 3–10), so a
                 // switch can strand an out-of-range value — 2.5@30s → 2.0 stayed at 30 and got
                 // rejected by the API at send. Clamp on EVERY switch, not just the Omni one.
@@ -821,9 +833,9 @@ export function SettingsPanel() {
               {(
                 <div onPointerDown={() => window.dispatchEvent(new CustomEvent('seedance:refresh-projects'))}>
                   <CustomSelect
-                    value={settings.resolution}
-                    onChange={(val) => updateProjectSettings(project.id, { resolution: val })}
-                    options={resOptions}
+                    value={draftOn ? DRAFT_OPTION : settings.resolution}
+                    onChange={(val) => updateProjectSettings(project.id, val === DRAFT_OPTION ? { draft: true } : { resolution: val, draft: false })}
+                    options={resSelectOptions}
                     // Short on purpose — this column is ~140px, so anything longer truncates.
                     placeholder={fourKBlocked ? '4K 잠김' : undefined}
                   />
@@ -852,6 +864,12 @@ export function SettingsPanel() {
               {fourKBlockedReason === 'no-project'
                 ? '프로젝트를 선택하면 4K가 목록에 나옵니다.'
                 : '4K는 이 프로젝트에 권한이 없어 목록에 없습니다 (크레딧 시트 · 4K 허용)'}
+            </p>
+          )}
+          {draftOn && (
+            <p className="text-[11px] text-gray-500 leading-snug -mt-2">
+              480p 초안을 먼저 만들고, 고른 것만 카드에서 <b className="font-semibold text-gray-700">1080p 본편</b>으로 만듭니다 (구도·길이·비율은 초안 그대로).
+              초안 비용은 1080p의 약 1/4 · 본편은 7일 안에.
             </p>
           )}
 
