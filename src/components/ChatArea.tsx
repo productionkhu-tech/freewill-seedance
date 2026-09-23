@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION } from '../store';
+import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -1062,12 +1062,12 @@ function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText
 
 /* ─── Main Component ─── */
 export function ChatArea() {
-  const { projects, currentProjectId, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages, billingProject } = useAppStore();
+  const { projects, currentProjectId, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages, billingProjectKey } = useAppStore();
   const project = projects.find((p) => p.id === currentProjectId);
   // Block sends (reactive mirror for the button's disabled state) whenever no
   // project is picked — strict: no project ⇒ no generate. handleSend re-checks via
   // getState() so Enter & 재생성 are gated too; this is just the visual disable.
-  const needsBillingSelection = !billingProject;
+  const needsBillingSelection = !billingProjectKey;
   const isOmni = !!project && modelProvider(project.settings.model) === 'gemini'; // Gemini Omni surface
   // 지금 보내면 초안(480p)으로 나가는가. 보내는 쪽 판정(applyTaskConstraints)과 같은 조건이다.
   const sendAsDraft = !!project && !isOmni && draftEffective(project.settings.model, project.settings.draft);
@@ -2352,24 +2352,24 @@ export function ChatArea() {
     // → a just-picked project is always honored; the selection is app-global +
     // session-only and only changes by deliberate dropdown pick, so a queue send /
     // local-project switch never disturbs it.
-    const { billingProject } = useAppStore.getState();
-    if (!billingProject) {
-      warn('프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)');
+    // 선택은 key 로 들고 있다 — 이름·id 는 지금 목록에서 찾는다(이름이 바뀌었으면 새 이름).
+    const bill = selectedBillingProject(useAppStore.getState());
+    if (!bill) {
+      warn(useAppStore.getState().billingProjectKey
+        ? '선택한 프로젝트를 목록에서 찾을 수 없습니다.\n프로젝트를 다시 선택해주세요.'
+        : '프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)');
       return;
     }
     // ★ Model grant (tracker sheet column G → allow25). Blocks rather than downgrading:
     // clamping 4k→1080p is a graceful loss of a knob, but silently swapping 2.5 for 2.0
     // would hand back a different model's output under the user's own settings. And the
     // stored settings.model is left ALONE — permission is false on every fresh launch
-    // (billingProject is session-only), so rewriting it here would knock every saved 2.5
+    // (billingProjectKey is session-only), so rewriting it here would knock every saved 2.5
     // project back to 2.0 on restart. Same rule as the 4k hydration clamp in §5-2.
-    {
-      const st = useAppStore.getState();
-      if (!isModelAllowed(project.settings.model, { billingProject: st.billingProject, billingProjects: st.billingProjects })) {
-        const label = MODELS.find(m => m.id === project.settings.model)?.name || '이 모델';
-        warn(`"${billingProject}" 프로젝트는 ${label} 권한이 없습니다.\n(다른 모델로 바꾸면 바로 생성할 수 있습니다.)`);
-        return;
-      }
+    if (!isModelAllowed(project.settings.model, useAppStore.getState())) {
+      const label = MODELS.find(m => m.id === project.settings.model)?.name || '이 모델';
+      warn(`"${bill.project}" 프로젝트는 ${label} 권한이 없습니다.\n(다른 모델로 바꾸면 바로 생성할 수 있습니다.)`);
+      return;
     }
 
     // Gemini Omni = separate provider → its own send path (no BytePlus payload).
@@ -2503,8 +2503,7 @@ export function ChatArea() {
     // would yank the config out from under the user. Instead it shows a locked chip and
     // we clamp here, at the moment the queue is fired, exactly as intended.
     {
-      const { billingProject: bp, billingProjects: bps } = useAppStore.getState();
-      const allow4k = isFourKAllowed({ billingProject: bp, billingProjects: bps });
+      const allow4k = isFourKAllowed(useAppStore.getState());
       const clamped = clampResolution(currentSettings.model, currentSettings.resolution, allow4k);
       if (clamped !== currentSettings.resolution) {
         const was4k = currentSettings.resolution === '4k';
@@ -2618,9 +2617,9 @@ export function ChatArea() {
     for (let i = 0; i < outputCount; i++) {
       const id = crypto.randomUUID();
       systemMessageIds.push(id);
-      // 보낼 때의 프로젝트를 메시지에 굽는다. billingProject 는 세션 전용이라 앱을 껐다
+      // 보낼 때의 프로젝트를 메시지에 굽는다. billingProjectKey 는 세션 전용이라 앱을 껐다
       // 켜면 비어 있고, 시트에서 이름이 바뀔 수도 있다 — NCP 폴더를 되찾는 힌트다.
-      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, videoStorage: { project: useAppStore.getState().billingProject } } as any);
+      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key } } as any);
     }
     setTimeout(() => scrollToBottom(), 150);
 
@@ -2651,7 +2650,9 @@ export function ChatArea() {
         generate_audio: currentSettings.return_last_frame ? false : currentSettings.generate_audio,
         ratio: currentSettings.ratio, duration: currentSettings.duration,
         resolution: currentSettings.resolution, watermark: false,
-        project: billingProject, // app-only field; server.ts strips it before BytePlus + maps it to the task for credit reporting
+        // app-only fields; server.ts strips both before BytePlus + maps them to the task for credit
+        // reporting. project_id 가 있으면 트래커가 그것으로 프로젝트를 찾아 '지금 이름' 으로 적는다.
+        project: bill.project, project_id: bill.id,
       };
       // Only models that declare one send output_format at all — omitting it keeps every
       // 2.0 request byte-for-byte what it has always been.
@@ -2724,7 +2725,7 @@ export function ChatArea() {
     const omniResolution = (): string | undefined => {
       if (modelResolutions(s.model).length <= 1) return undefined;
       const st = useAppStore.getState();
-      return clampResolution(s.model, s.resolution, isFourKAllowed({ billingProject: st.billingProject, billingProjects: st.billingProjects }));
+      return clampResolution(s.model, s.resolution, isFourKAllowed(st));
     };
     // Element @mentions only mean something for reference_to_video, where they become
     // <IMAGE_REF_N>. Switching the task clears the ASSETS but not the PROMPT, so a pill
@@ -2944,9 +2945,13 @@ export function ChatArea() {
     try {
       const count = s.output_count || 1;
       const ids: string[] = [];
+      // 과금 프로젝트는 보낼 때 한 번 정한다(handleSend 가 이미 있는지 확인했다). 이름은 NCP 폴더,
+      // id·key 는 이름이 바뀌어도 같은 프로젝트를 가리키는 값.
+      const omniBill = selectedBillingProject(useAppStore.getState());
+      const omniStorage = { project: omniBill?.project || '', projectId: omniBill?.id || '', projectKey: omniBill?.key || '' };
       for (let i = 0; i < count; i++) {
         const id = crypto.randomUUID(); ids.push(id);
-        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, videoStorage: { project: useAppStore.getState().billingProject } } as any);
+        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, videoStorage: omniStorage } as any);
       }
       setTimeout(() => scrollToBottom(), 150);
 
@@ -2970,13 +2975,13 @@ export function ChatArea() {
         const timer = window.setTimeout(() => ctrl.abort(), 2400000);
         try {
           // project 는 앱 전용 필드다 — 서버가 NCP 폴더 이름으로만 쓰고 구글로 보내기 전에 지운다.
-          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, project: useAppStore.getState().billingProject }), signal: ctrl.signal });
+          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, project: omniStorage.project }), signal: ctrl.signal });
           const t = await r.text();
           let d: any; try { d = JSON.parse(t); } catch { throw new Error(`서버 응답 오류 (${r.status})`); }
           if (!r.ok) throw new Error(d.error || `생성 오류 (${r.status})`);
           if (!d.videoUrl) throw new Error('영상 URL을 받지 못했습니다.');
           // Omni 는 서버가 항상 .mp4 로 캐시에 쓴다.
-          updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', videoStorage: { project: useAppStore.getState().billingProject, ext: '.mp4' }, endTime: Date.now() });
+          updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', videoStorage: { ...omniStorage, ext: '.mp4' }, endTime: Date.now() });
         } catch (error: any) {
           const msg = error.name === 'AbortError'
             ? '응답 없이 40분이 지나 중단했습니다.\n4K 이어붙이기는 20분 이상 걸리는 게 정상이지만 여기까지는 아닙니다 — 요청이 중간에 끊겼거나 앱이 재시작된 경우입니다.'
@@ -3022,12 +3027,25 @@ export function ChatArea() {
     const us = base.usedSettings || {};
     const model = resolveModelId(us.model || '');
     if (!modelSupportsDraft(model)) { warn('이 모델은 Draft → 본편을 지원하지 않습니다.'); return; }
-    // 과금 프로젝트는 초안이 나간 곳을 따른다 — 같은 컷의 연장이다. 그 사이 드롭다운에서
+    // 과금 프로젝트는 Draft 가 나간 곳을 따른다 — 같은 컷의 연장이다. 그 사이 드롭다운에서
     // 다른 프로젝트를 골라 두었어도 본편만 엉뚱한 프로젝트에 찍히지 않게.
-    const billTo = base.videoStorage?.project || st.billingProject;
-    if (!billTo) { warn('프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)'); return; }
-    if (!isModelAllowed(model, { billingProject: billTo, billingProjects: st.billingProjects })) {
-      warn(`"${billTo}" 프로젝트는 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 없습니다.`);
+    // ★ 이름이 아니라 key 로 찾는다. Draft 를 만든 뒤 프로젝트 이름이 바뀌어도(POS) 같은 프로젝트를
+    //   찾고, 보낼 때는 '지금 이름' 을 쓴다. 이름으로 찾던 때는 이름이 바뀌는 순간 "권한 없음" 으로
+    //   영구히 막혔다. key 가 없는 Draft(26.9.2306 이전)는 이름으로 찾는다. Draft 에 프로젝트 기록이
+    //   아예 없으면 지금 선택된 프로젝트를 쓴다.
+    const vs = base.videoStorage || {};
+    const origin = billingProjectOfDraft(st.billingProjects, vs);
+    const hasOrigin = origin.hasOrigin;
+    const bill = hasOrigin ? origin.bill : selectedBillingProject(st);
+    if (!bill) {
+      // '권한 없음' 이 아니라 실제 이유를 말한다 — 목록(진행 중인 프로젝트)에 없는 것이다.
+      warn(hasOrigin
+        ? `이 Draft 의 프로젝트(${vs.project || '알 수 없음'})가 종료되었거나 목록에 없어 본편을 만들 수 없습니다.`
+        : '프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)');
+      return;
+    }
+    if (!isModelAllowed(model, { billingProjectKey: bill.key, billingProjects: st.billingProjects })) {
+      warn(`"${bill.project}" 프로젝트는 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 없습니다.`);
       return;
     }
 
@@ -3038,7 +3056,7 @@ export function ChatArea() {
     addMessage(owner.id, { id, role: 'system', content: '본편 생성 시작... (Draft → 1080p)', status: 'queued',
       promptText: base.promptText, promptHtml: base.promptHtml, usedSettings,
       usedAssets: base.usedAssets, usedElementImages: base.usedElementImages,
-      videoStorage: { project: billTo }, draftOf: draftTaskId } as any);
+      videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key }, draftOf: draftTaskId } as any);
 
     // 다시 정할 수 있는 값은 빠뜨리면 '초안 때 값' 이 아니라 모델 기본값이 된다(문서).
     // 그래서 형식과 마지막 프레임은 초안 때 값을 다시 실어 보낸다.
@@ -3047,7 +3065,8 @@ export function ChatArea() {
       content: [{ type: 'draft_task', draft_task: { id: draftTaskId } }],
       resolution: DRAFT_FINAL_RESOLUTION,
       watermark: false,
-      project: billTo, // app-only — server.ts 가 떼어내 과금 프로젝트로 쓴다 (handleSend 와 같다)
+      // app-only — server.ts 가 둘 다 떼어내 과금 프로젝트로 쓴다 (handleSend 와 같다)
+      project: bill.project, project_id: bill.id,
     };
     const outFmt = resolveOutputFormat(model, us.output_format);
     if (outFmt) payload.output_format = outFmt;

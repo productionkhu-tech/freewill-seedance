@@ -537,7 +537,10 @@ export interface ChatMessage {
   // 재설치 등으로 색인을 잃으면 이 두 값으로 객체를 되찾는다.
   // ext 를 여기 굽는 이유: 확장자는 생성 API 가 준 URL 에서만 확정되고(2.5 는 .mov),
   // 그 URL 은 24시간 뒤 없다 — 나중에는 계산할 방법이 없다.
-  videoStorage?: { project?: string; ext?: string };
+  // project 는 보낼 때의 이름 — NCP 폴더 이름이라 나중에 이름이 바뀌어도 그대로 둔다(영상이 거기 있다).
+  // projectId/projectKey 는 과금 프로젝트를 이름 대신 따라가는 값이다(Draft → 본편 권한·트래커 보고).
+  // 26.9.2306 이전 메시지에는 없다 — 그때는 project(이름)로 찾는다.
+  videoStorage?: { project?: string; ext?: string; projectId?: string; projectKey?: string };
   error?: string;
   timestamp: number;
   startTime?: number;
@@ -754,7 +757,10 @@ interface AppState {
   // Billing/tracking project (시트 연동). Session-only + app-global: picked once per
   // launch, survives local-project switches AND queue sends, NOT persisted (restart
   // → must re-pick). Distinct from the local `projects` sidebar workspaces.
-  billingProject: string;
+  // ★ 이름이 아니라 키(BillingProject.key)를 든다. 프로젝트 이름은 PM 프로그램(POS)에서 바뀔 수
+  // 있고, 이름으로 기억하면 이름이 바뀌는 순간 선택이 풀리고 Draft → 본편이 막힌다.
+  // 이름·권한이 필요하면 selectedBillingProject() 로 지금 목록에서 찾는다.
+  billingProjectKey: string;
   // allow4k mirrors the tracker sheet's Project_Status F column ("4K 허용"), refreshed
   // by the same 60s poll that carries status. Kept on this list rather than in its own
   // store field so a permission flip costs zero extra writes/renders.
@@ -766,16 +772,16 @@ interface AppState {
   // Persisting the last known-good list makes a slow tracker invisible — the dropdown is
   // there instantly and the 60s poll corrects it in the background.
   // Persisting the SELECTION would be a different matter and is still forbidden: see the
-  // hydration-clamp rule (isFourKAllowed returns false whenever billingProject is empty,
+  // hydration-clamp rule (isFourKAllowed returns false whenever billingProjectKey is empty,
   // which is exactly what keeps a stored '4k' setting from being wiped at boot).
-  billingProjects: { project: string; status: string; allow4k?: boolean; allow25?: boolean }[];
+  billingProjects: BillingProject[];
   // Did the last tracker fetch actually land? null = 아직 모름 (boot). The server already
   // distinguishes "couldn't fetch" (ok:false) from "fetched, list is empty" (ok:true, []),
   // and App.tsx already acts on it — but the UI had no way to see it, so a dead tracker
   // was reported to the user as "your PM never registered you". Transient, never persisted.
   trackerReachable: boolean | null;
-  setBillingProject: (p: string) => void;
-  setBillingProjects: (list: { project: string; status: string; allow4k?: boolean; allow25?: boolean }[]) => void;
+  setBillingProjectKey: (key: string) => void;
+  setBillingProjects: (list: BillingProject[]) => void;
   setTrackerReachable: (v: boolean) => void;
   // Transient (NOT persisted): # of images from elements currently @mentioned in
   // the active prompt. ChatArea writes it; SettingsPanel reads it to show the
@@ -1440,7 +1446,7 @@ export function modelProvider(model: string): 'byteplus' | 'gemini' {
 // The docs also state "4k: Only supported by Seedance 2.0".
 //
 // ★ The hydration clamp MUST use this one, never allowedResolutions. Hydration runs at
-// boot, and billingProject is session-only (starts empty) → the 4k permission is always
+// boot, and billingProjectKey is session-only (starts empty) → the 4k permission is always
 // false at that moment. Clamping against policy there would wipe a saved '4k' setting on
 // every single restart. Structural validity is the right question for stored data; the
 // live permission gate belongs at render + send time.
@@ -1488,16 +1494,92 @@ export function clampResolution(model: string, res: string, allow4k: boolean): s
   return lowest;
 }
 
+// ── 과금 프로젝트 (크레딧 트래커 목록의 한 줄) ─────────────────────────────────────────
+// key 가 앱 안에서 프로젝트를 가리키는 값이다. id(PM 프로그램 POS 의 영구 ID, 'PJ-' + 8자)가
+// 있으면 id, 없으면(TA Test 같은 트래커 전용 프로젝트) 'name:' + 이름.
+// 이름(project)은 POS 에서 바뀔 수 있으므로 선택·권한·Draft → 본편은 전부 key 로 따라가고,
+// 화면에는 이름만 보인다. 트래커 안에서 이름도 유일하다(같은 이름의 행을 허용하지 않음).
+export interface BillingProject {
+  key: string;
+  id: string;           // '' = POS 밖의 트래커 전용 프로젝트
+  project: string;      // 지금 이름
+  status: string;
+  allow4k?: boolean;
+  allow25?: boolean;
+}
+export function billingKeyOf(p: { id?: string; project: string }): string {
+  return p.id ? String(p.id) : 'name:' + p.project;
+}
+// key 로 목록에서 찾는다. 저장본에 남은 옛 모양(key·id 없음)도 이름으로 key 를 만들어 비교한다.
+// ★ 키 올려 주기: 'name:○○' 로 골라 둔 프로젝트에 나중에 id 가 붙으면 key 가 바뀐다. key 로
+//   못 찾으면 같은 이름으로 한 번 더 찾는다 — 그 항목(새 key)을 돌려주고, 부르는 쪽이 필요하면
+//   저장된 key 를 새 것으로 바꾼다. Draft 에 구워 둔 key 도 같은 규칙으로 찾는다.
+export function findBillingProject(list: BillingProject[], key: string | undefined): BillingProject | undefined {
+  if (!key) return undefined;
+  const norm = (p: BillingProject): BillingProject =>
+    ({ ...p, id: p.id || '', key: p.key || billingKeyOf(p) });
+  const hit = list.find(p => (p.key || billingKeyOf(p)) === key);
+  if (hit) return norm(hit);
+  if (key.startsWith('name:')) {
+    const byName = list.find(p => p.project === key.slice(5));
+    if (byName) return norm(byName);
+  }
+  return undefined;
+}
+export function selectedBillingProject(state: {
+  billingProjectKey: string; billingProjects: BillingProject[];
+}): BillingProject | undefined {
+  return findBillingProject(state.billingProjects, state.billingProjectKey);
+}
+// 목록이 새로 들어왔을 때 선택을 어떻게 할지. 순수 함수라 App.tsx 의 60초 폴링과 시험이 같은
+// 답을 낸다.
+//   · key 가 그대로 있으면 선택 유지 — 이름이 바뀌었으면 알림만(옛 → 새).
+//   · 'name:' key 인데 같은 이름에 id 가 붙었으면 조용히 새 key 로.
+//   · 그 밖에 목록에서 사라졌으면(종료) 선택 해제 + 지금과 같은 '종료' 안내.
+export function reconcileBillingSelection(
+  prev: BillingProject[], next: BillingProject[], selKey: string,
+): { key: string; note: string | null } {
+  if (!selKey) return { key: '', note: null };
+  const before = findBillingProject(prev, selKey);
+  const same = next.find(p => (p.key || billingKeyOf(p)) === selKey);
+  if (same) {
+    const renamed = before && before.project !== same.project;
+    return { key: selKey, note: renamed ? `선택한 프로젝트의 이름이 바뀌었습니다: "${before!.project}" → "${same.project}"` : null };
+  }
+  const upgraded = findBillingProject(next, selKey);
+  if (upgraded) return { key: upgraded.key, note: null };
+  // id 는 화면에 보이지 않는다 — 이름을 모르면 이름 없이 말한다.
+  const name = before?.project || (selKey.startsWith('name:') ? selKey.slice(5) : '');
+  return { key: '', note: name
+    ? `선택했던 프로젝트 "${name}"가 종료되어 해제되었습니다. 새 프로젝트를 선택해주세요.`
+    : '선택했던 프로젝트가 종료되어 해제되었습니다. 새 프로젝트를 선택해주세요.' };
+}
+
+// Draft 의 과금 프로젝트를 지금 목록에서 찾는다: key → id → 이름(26.9.2306 이전 Draft) 순.
+// 이름이 아니라 key 로 찾아야 Draft 를 만든 뒤 프로젝트 이름이 바뀌어도(POS) 본편이 막히지 않는다.
+// hasOrigin=false 는 Draft 에 프로젝트 기록이 아예 없다는 뜻 — 부르는 쪽이 지금 선택을 쓴다.
+export function billingProjectOfDraft(
+  list: BillingProject[],
+  vs: { project?: string; projectId?: string; projectKey?: string } | undefined,
+): { hasOrigin: boolean; bill?: BillingProject } {
+  const v = vs || {};
+  const hasOrigin = !!(v.projectKey || v.projectId || v.project);
+  if (!hasOrigin) return { hasOrigin };
+  const bill = findBillingProject(list, v.projectKey)
+    || findBillingProject(list, v.projectId)
+    || (v.project ? findBillingProject(list, 'name:' + v.project) : undefined);
+  return { hasOrigin, bill };
+}
+
 // Is 4k unlocked for the CURRENTLY selected billing project? Always derived, never
 // stored — so a grant/revoke in the sheet takes effect the moment the poll lands, with
 // no second copy of the truth to keep in sync. Fail-closed: no project selected, project
 // missing from the list, or field absent (older tracker) → false.
 export function isFourKAllowed(state: {
-  billingProject: string;
-  billingProjects: { project: string; allow4k?: boolean }[];
+  billingProjectKey: string;
+  billingProjects: BillingProject[];
 }): boolean {
-  if (!state.billingProject) return false;
-  return state.billingProjects.find(p => p.project === state.billingProject)?.allow4k === true;
+  return selectedBillingProject(state)?.allow4k === true;
 }
 
 // Is this model permitted for the selected billing project? Models without a grant are
@@ -1508,14 +1590,14 @@ export function isFourKAllowed(state: {
 // This is the UI's copy of the answer. server.ts asks the tracker the same question again
 // before it forwards anything, because both inputs here are editable at rest: the roster
 // is persisted in IndexedDB and settings.model is stored per project.
+// state.billingProjectKey 에 선택된 키 대신 다른 키(Draft 의 프로젝트)를 넣어 물어도 된다.
 export function isModelAllowed(model: string, state: {
-  billingProject: string;
-  billingProjects: { project: string; allow25?: boolean }[];
+  billingProjectKey: string;
+  billingProjects: BillingProject[];
 }): boolean {
   const grant = MODEL_GRANTS[model];
   if (!grant) return true;
-  if (!state.billingProject) return false;
-  return state.billingProjects.find(p => p.project === state.billingProject)?.[grant] === true;
+  return selectedBillingProject(state)?.[grant] === true;
 }
 export function modelGrant(model: string): 'allow25' | undefined {
   return MODEL_GRANTS[model];
@@ -1532,10 +1614,10 @@ export const useAppStore = create<AppState>()(
       currentProjectId: null,
       autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
-      billingProject: '',
+      billingProjectKey: '',
       billingProjects: [],
       trackerReachable: null,
-      setBillingProject: (p) => set({ billingProject: p }),
+      setBillingProjectKey: (key) => set({ billingProjectKey: key }),
       setBillingProjects: (list) => set({ billingProjects: list }),
       setTrackerReachable: (v) => set((s) => (s.trackerReachable === v ? s : { trackerReachable: v })),
       mentionedElementImages: 0,
@@ -2201,7 +2283,7 @@ export const useAppStore = create<AppState>()(
         projectGroups: state.projectGroups,
         projectCollectionId: state.projectCollectionId,
         // Last known-good tracker list. Tiny (17 rows) next to `projects`, and it is what
-        // lets a launch survive a cold/slow/dead Apps Script. NOT billingProject — the
+        // lets a launch survive a cold/slow/dead Apps Script. NOT billingProjectKey — the
         // selection stays session-only on purpose (see the field's comment).
         billingProjects: state.billingProjects,
         theme: state.theme,
@@ -2268,7 +2350,10 @@ export const useAppStore = create<AppState>()(
           })();
           const theme: Theme = savedTheme ?? useAppStore.getState().theme;
           applyTheme(theme);
-          useAppStore.setState({ projects: patched, theme, _hasHydrated: true });
+          // 저장된 프로젝트 목록은 key·id 가 생기기 전 모양일 수 있다 — 채워 둔다. 첫 목록 수신
+          // 때 통째로 바뀌지만, 그 전(트래커가 느린 시동)에도 선택창과 권한 확인이 key 로 돌아야 한다.
+          const billingProjects = (state.billingProjects || []).map(p => ({ ...p, id: p.id || '', key: p.key || billingKeyOf(p) }));
+          useAppStore.setState({ projects: patched, theme, billingProjects, _hasHydrated: true });
 
           // Element library loads from its own key (and migrates out of the legacy
           // blob on first run). Async, so the UI gates element-dependent surfaces on

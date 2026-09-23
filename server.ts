@@ -108,7 +108,9 @@ function signedTrackerUrl(base: string): string {
   return a ? `${base}&ts=${a.ts}&proof=${a.proof}` : base;
 }
 
-// Map: BytePlus task id → billing/tracking project name (from the app's dropdown).
+// Map: BytePlus task id → billing/tracking project (from the app's dropdown).
+// project 는 보낼 때의 이름(NCP 폴더 이름으로도 쓴다), projectId 는 PM 프로그램(POS)의 영구 ID —
+// 트래커는 projectId 로 프로젝트를 찾아 '지금 이름' 으로 기록한다. 트래커 전용 프로젝트는 ''.
 // Captured at task-create time (stripped from the BytePlus payload), read at
 // report time so the credit tracker can attribute usage to the project.
 //
@@ -121,7 +123,8 @@ function signedTrackerUrl(base: string): string {
 // Measured 2026-08-11: cgt-20260811142046-7zfj4 and -8tlnn (one send, output_count 2)
 // reported ~68 minutes after creation with an empty project, while sends from six
 // minutes later reported "TA Test" correctly — the batch boundary is the restart.
-const taskToProject = new Map<string, string>();
+type TaskProject = { project: string; projectId: string };
+const taskToProject = new Map<string, TaskProject>();
 // Same directory CACHE_DIR resolves to further down (userData/media-cache in the packaged
 // app), resolved independently because that constant is declared inside startServer().
 const TASK_PROJECT_DIR = process.env.MEDIA_CACHE_DIR || path.join(process.cwd(), 'media-cache');
@@ -133,12 +136,14 @@ const taskProjectAt = new Map<string, number>();
 
 function loadTaskProjects() {
   try {
-    const raw = JSON.parse(fs.readFileSync(TASK_PROJECT_FILE, 'utf8')) as Record<string, { project: string; at: number }>;
+    // 옛 모양({ project, at })도 읽는다 — 업데이트 순간 진행 중이던 작업의 보고가 프로젝트를
+    // 잃지 않게. 그때는 projectId 가 '' 이고, 트래커는 이름으로 찾는다.
+    const raw = JSON.parse(fs.readFileSync(TASK_PROJECT_FILE, 'utf8')) as Record<string, { project?: string; projectId?: string; at: number }>;
     const now = Date.now();
     let kept = 0;
     for (const [id, v] of Object.entries(raw || {})) {
-      if (!v?.project || now - (v.at || 0) > TASK_PROJECT_TTL_MS) continue;
-      taskToProject.set(id, v.project);
+      if ((!v?.project && !v?.projectId) || now - (v.at || 0) > TASK_PROJECT_TTL_MS) continue;
+      taskToProject.set(id, { project: String(v.project || ''), projectId: typeof v.projectId === 'string' ? v.projectId : '' });
       taskProjectAt.set(id, v.at);
       kept++;
     }
@@ -151,8 +156,8 @@ function loadTaskProjects() {
 // a task created seconds before the app quits is precisely the one that needs the write.
 function saveTaskProjects() {
   try {
-    const out: Record<string, { project: string; at: number }> = {};
-    for (const [id, project] of taskToProject) out[id] = { project, at: taskProjectAt.get(id) || Date.now() };
+    const out: Record<string, { project: string; projectId: string; at: number }> = {};
+    for (const [id, t] of taskToProject) out[id] = { project: t.project, projectId: t.projectId, at: taskProjectAt.get(id) || Date.now() };
     if (!fs.existsSync(TASK_PROJECT_DIR)) fs.mkdirSync(TASK_PROJECT_DIR, { recursive: true });
     fs.writeFileSync(TASK_PROJECT_FILE, JSON.stringify(out));
   } catch (e: any) {
@@ -1242,6 +1247,7 @@ async function startServer() {
       const _archiveProject = typeof body.project === 'string' ? body.project : '';
       const _archiveModel = typeof body.model === 'string' ? body.model : '';
       delete body.project;
+      delete body.project_id;   // 지금 앱은 보내지 않지만, 실려 오면 구글이 400 을 낸다
       // Resolve inline-uploaded media (Edit source video) → Files API uri, since the
       // resumable upload needs the server-held key. The client marks the video part
       // with `_uploadCacheId` (preferred — server reads the bytes straight off the
@@ -1371,23 +1377,29 @@ async function startServer() {
   app.post('/api/byteplus/tasks', async (req, res) => {
     console.log('[BytePlus API] Creating task...');
 
-    // Pull the app-only `project` (billing/tracking) out — BytePlus must never
-    // receive it (unknown top-level fields can 400). The rest is forwarded as-is.
-    const { project: billingProject, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
+    // Pull the app-only `project` / `project_id` (billing/tracking) out — BytePlus must never
+    // receive them (unknown top-level fields can 400). The rest is forwarded as-is.
+    const { project: billingProject, project_id: rawProjectId, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
+    const billingProjectId = typeof rawProjectId === 'string' ? rawProjectId.trim() : '';
 
     // Gated models (2.5) must be granted to the SELECTED billing project. Checked here,
     // against the tracker, so no amount of switching app projects / models / stored state
     // gets a request through.
+    // ★ id 가 있으면 id 로 찾는다 — 이름은 PM 프로그램에서 바뀔 수 있고, 이름으로만 찾던 때는
+    //   이름이 바뀐 직후(앱 목록이 아직 옛 이름) 권한 없음으로 막혔다. id 가 없거나(트래커 전용
+    //   프로젝트) 로스터에 아직 없으면 이름으로 찾는다.
     const grant = MODEL_GRANTS[byteplusBody.model as string];
     if (grant) {
       const roster = await getRoster();
       if (!roster) {
         return res.status(503).json({ error: { message: '크레딧 시트를 확인할 수 없어 이 모델을 사용할 수 없습니다. 잠시 후 다시 시도해주세요.' } });
       }
-      const row = roster.find((p: any) => String(p?.project) === String(billingProject));
+      const row = (billingProjectId && roster.find((p: any) => String(p?.id || p?.project_id || '').trim() === billingProjectId))
+        || roster.find((p: any) => String(p?.project) === String(billingProject));
       if (row?.[grant] !== true) {
-        console.warn(`[Grant] blocked ${byteplusBody.model} for project "${billingProject}" (${grant}=${row?.[grant]})`);
-        return res.status(403).json({ error: { message: `"${billingProject || '선택 없음'}" 프로젝트는 이 모델 권한이 없습니다.` } });
+        const shown = row?.project || billingProject || '선택 없음';   // 문구엔 지금 이름
+        console.warn(`[Grant] blocked ${byteplusBody.model} for project "${shown}" id=${billingProjectId || '-'} (${grant}=${row?.[grant]})`);
+        return res.status(403).json({ error: { message: `"${shown}" 프로젝트는 이 모델 권한이 없습니다.` } });
       }
     }
 
@@ -1431,11 +1443,12 @@ async function startServer() {
       }
 
       // Remember which billing project this task belongs to (read at report time).
-      if (response.ok && data?.id && typeof billingProject === 'string' && billingProject) {
-        taskToProject.set(data.id, billingProject);
+      const projName = typeof billingProject === 'string' ? billingProject : '';
+      if (response.ok && data?.id && (projName || billingProjectId)) {
+        taskToProject.set(data.id, { project: projName, projectId: billingProjectId });
         taskProjectAt.set(data.id, Date.now());
         saveTaskProjects();   // 재시작을 넘겨야 하므로 만든 즉시 디스크에 남긴다
-        console.log(`[Tracker] task ${data.id} → project "${billingProject}"`);
+        console.log(`[Tracker] task ${data.id} → project "${projName}"${billingProjectId ? ` (${billingProjectId})` : ''}`);
       }
 
       console.log(`[BytePlus API] Create (${response.status}):`, JSON.stringify(data).substring(0, 500));
@@ -1466,7 +1479,10 @@ async function startServer() {
           body: JSON.stringify({
             ...(trackerAuth() || {}),   // ts + proof
             team: TEAM_NAME,
-            project: taskToProject.get(req.params.id) || '', // billing project (may be '')
+            project: taskToProject.get(req.params.id)?.project || '', // billing project (may be '')
+            // 트래커가 이 id 로 프로젝트를 찾아 '지금 이름' 으로 적는다. 이름이 그 사이 바뀌었어도
+            // 기록이 한 프로젝트로 모인다. 없으면('') 트래커가 project(이름)로 찾는다.
+            project_id: taskToProject.get(req.params.id)?.projectId || '',
             task_id: req.params.id,
             total_tokens: data.usage.total_tokens,
             completion_tokens: data.usage.completion_tokens,
@@ -1495,7 +1511,9 @@ async function startServer() {
           taskId: req.params.id,
           // 폴더는 모델이 정한다 — 레인마다 상수를 박아두면 회사가 늘 때 또 갈라진다.
           provider: brandOf(data.model),
-          project: taskToProject.get(req.params.id) || '',
+          // NCP 폴더는 지금처럼 '보낼 때의 이름' 이다. 이름이 바뀐 뒤 만든 영상은 새 이름 폴더로
+          // 간다(옛 영상은 옛 폴더에 그대로, 앱은 메시지에 구워 둔 이름으로 찾는다).
+          project: taskToProject.get(req.params.id)?.project || '',
           ext,
           model: typeof data.model === 'string' ? data.model : '',
           sourceUrl: srcUrl,

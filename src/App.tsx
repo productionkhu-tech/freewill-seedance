@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { ChatArea } from './components/ChatArea';
 import { SettingsPanel } from './components/SettingsPanel';
-import { useAppStore } from './store';
+import { useAppStore, billingKeyOf, reconcileBillingSelection } from './store';
 
 export default function App() {
   const { projects, createProject, currentProjectId, _hasHydrated } = useAppStore();
@@ -165,25 +165,35 @@ export default function App() {
           // ("2.5 허용") — both axes independent of 진행/종료, so a project can be active
           // with neither. Strict === true keeps them fail-closed for older trackers that
           // don't send the fields at all.
-          .map((p: any) => ({ project: String(p.project), status: String(p.status), allow4k: p.allow4k === true, allow25: p.allow25 === true }));
+          // id = PM 프로그램(POS)의 영구 프로젝트 ID. 없는 항목(트래커 전용 프로젝트)은 '' 이고
+          // 이름으로 된 key 를 쓴다(billingKeyOf). project_id 는 같은 값의 옛 필드라 id 가 없을 때만 본다.
+          .map((p: any) => {
+            const id = String(p.id ?? p.project_id ?? '').trim();
+            const project = String(p.project);
+            return { key: billingKeyOf({ id, project }), id, project, status: String(p.status), allow4k: p.allow4k === true, allow25: p.allow25 === true };
+          });
         // Skip the store write (re-renders subscribers + re-serializes the persisted
         // blob) when the active list is unchanged — this runs every 60s.
-        // ★ EVERY permission flag MUST be in this comparison. Without it a pure permission
-        // flip leaves the list "unchanged", the write is skipped, and the grant/revoke never
-        // reaches the UI — the feature would silently never work. That is the whole bug this
-        // guard exists for, so any new flag added to the map above belongs here too.
+        // ★ EVERY field MUST be in this comparison. Without it a pure permission flip (or an
+        // id newly attached to a project) leaves the list "unchanged", the write is skipped,
+        // and the change never reaches the UI — the feature would silently never work. That
+        // is the whole bug this guard exists for, so any new field added to the map above
+        // belongs here too.
         const prev = useAppStore.getState().billingProjects;
         const changed = prev.length !== active.length ||
-          active.some((p: any, i: number) => p.project !== prev[i]?.project
+          active.some((p: any, i: number) => p.key !== prev[i]?.key
+            || p.id !== prev[i]?.id
+            || p.project !== prev[i]?.project
             || p.status !== prev[i]?.status
             || p.allow4k !== prev[i]?.allow4k
             || p.allow25 !== prev[i]?.allow25);
         if (changed) useAppStore.getState().setBillingProjects(active);
-        const sel = useAppStore.getState().billingProject;
-        if (sel && !active.some((p: any) => p.project === sel)) {
-          useAppStore.getState().setBillingProject('');
-          setProjectEndedNote(`선택했던 프로젝트 "${sel}"가 종료되어 해제되었습니다. 새 프로젝트를 선택해주세요.`);
-        }
+        // 선택은 이름이 아니라 key 로 유지한다. 이름만 바뀐 프로젝트는 선택된 채로 남고(알림만),
+        // 목록에서 정말 사라졌을 때(종료)만 풀린다. 규칙은 store.ts / reconcileBillingSelection.
+        const selKey = useAppStore.getState().billingProjectKey;
+        const { key, note } = reconcileBillingSelection(prev, active, selKey);
+        if (key !== selKey) useAppStore.getState().setBillingProjectKey(key);
+        if (note) setProjectEndedNote(note);
       } catch {
         // network / abort / parse fail → keep current selection + list, retry sooner
         useAppStore.getState().setTrackerReachable(false);

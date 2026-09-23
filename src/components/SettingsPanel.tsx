@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -220,8 +220,8 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProject, billingProjects, setBillingProject, trackerReachable } = useAppStore();
-  const needsBillingSelection = !billingProject; // strict: no project → block generation
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjectKey, billingProjects, setBillingProjectKey, trackerReachable } = useAppStore();
+  const needsBillingSelection = !billingProjectKey; // strict: no project → block generation
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
@@ -260,7 +260,7 @@ export function SettingsPanel() {
   const omniRatioFromSource = isOmni && (omniTask === 'edit' || omniTask === 'extend');
   // Live 4k permission for the selected billing project (sheet column F). Derived every
   // render, so a grant/revoke lands as soon as the poll updates billingProjects.
-  const allow4k = isFourKAllowed({ billingProject, billingProjects });
+  const allow4k = isFourKAllowed({ billingProjectKey, billingProjects });
   const resOptions = RESOLUTIONS.filter(r => allowedResolutions(settings.model, allow4k).includes(r.id));
   // '4k' is still the saved setting but isn't currently permitted. We deliberately do NOT
   // rewrite settings here — that would mutate the project out from under someone who may
@@ -331,19 +331,19 @@ export function SettingsPanel() {
   // handleSend applies applyTaskConstraints() to the PAYLOAD. Leave the mode, get your
   // ratio and duration back exactly as you set them.
   // Two very different situations, and calling both "권한 해제" would be wrong. On a fresh
-  // launch billingProject is always empty (session-only), so a saved 4k setting lands here
+  // launch billingProjectKey is always empty (session-only), so a saved 4k setting lands here
   // every single restart — telling the user their access was revoked would be alarming and
   // false. Picking their project restores 4k immediately.
-  const fourKBlockedReason = !billingProject ? 'no-project' : 'no-permission';
+  const fourKBlockedReason = !billingProjectKey ? 'no-project' : 'no-permission';
   // Model-level grant (2.5). Derived every render like allow4k, so a sheet flip lands as
   // soon as the 60s poll updates billingProjects — no second copy of the truth to sync.
-  const modelAllowed = isModelAllowed(settings.model, { billingProject, billingProjects });
+  const modelAllowed = isModelAllowed(settings.model, { billingProjectKey, billingProjects });
   const modelLabel = MODELS.find(m => m.id === settings.model)?.name || '이 모델';
   // Models you can actually pick. A model this project isn't granted is FILTERED OUT, the
   // same treatment 4k gets in allowedResolutions() — a tier you don't have shouldn't be
   // selectable and then refused. Derived every render, so a sheet flip lands with the 60s poll.
   // ★ "No project picked yet" is NOT the same answer as "denied", and the list must not
-  // conflate them. billingProject is session-only, so it is empty on EVERY fresh launch —
+  // conflate them. billingProjectKey is session-only, so it is empty on EVERY fresh launch —
   // filtering on it would mean the app opens claiming 2.5 doesn't exist, before it has any
   // idea whether you have it. Nothing can be sent without a project anyway (handleSend
   // stops there first), so showing the full list while the answer is unknown gives nothing
@@ -352,7 +352,7 @@ export function SettingsPanel() {
   // knock every saved 2.5 project down to 2.0 on restart. The placeholder below covers the
   // gap instead; the send gate (client + server) is what actually enforces this.
   const selectableModels = MODELS.filter(m =>
-    !billingProject || isModelAllowed(m.id, { billingProject, billingProjects }));
+    !billingProjectKey || isModelAllowed(m.id, { billingProjectKey, billingProjects }));
   // Shown when the stored model isn't in the list above, so the control reads as "not
   // available to you" instead of silently displaying the first option as if it were picked.
   // Formats this model offers, and which one is in effect right now.
@@ -710,9 +710,10 @@ export function SettingsPanel() {
           ) : (
             <>
               <CustomSelect
-                value={billingProject}
-                onChange={(val) => setBillingProject(val)}
-                options={billingProjects.map(p => ({ id: p.project, name: p.project }))}
+                value={billingProjectKey}
+                onChange={(key) => setBillingProjectKey(key)}
+                // 값은 key(id 또는 'name:이름'), 화면에는 이름만 — id 는 보이지 않게.
+                options={billingProjects.map(p => ({ id: p.key || billingKeyOf(p), name: p.project }))}
                 placeholder="프로젝트 선택…"
               />
               {needsBillingSelection && <p className="text-[11px] text-amber-600">생성하려면 프로젝트를 선택하세요.</p>}
@@ -809,11 +810,11 @@ export function SettingsPanel() {
           {/* Model permission (tracker sheet column G → allow25). Mirrors the 4k chip:
               never rewrites the stored model, distinguishes "no project picked yet" from
               "this project isn't granted", and refreshes the grant when the user reaches
-              for the control. On a fresh launch billingProject is always empty, so without
+              for the control. On a fresh launch billingProjectKey is always empty, so without
               that distinction every restart would read as "your access was revoked". */}
           {!modelAllowed && (
             <p className="text-[11px] text-amber-600 leading-snug -mt-1">
-              {!billingProject
+              {!billingProjectKey
                 ? `프로젝트를 선택하면 ${modelLabel} 사용 가능 여부가 확인됩니다.`
                 : `이 프로젝트는 ${modelLabel} 권한이 없습니다`}
             </p>
