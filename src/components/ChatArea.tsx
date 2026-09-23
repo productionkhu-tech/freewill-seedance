@@ -591,11 +591,13 @@ const OMNI_TASK_LABELS: Record<string, string> = {
  * project/ext 를 쿼리로 함께 보내는 것은 서버가 색인을 잃었을 때(재설치 등)의 복구용이다.
  * 평소에는 서버 색인만으로 충분하다.
  */
-export function mediaSrcFor(m: { taskId?: string; videoUrl?: string; usedSettings?: any; videoStorage?: { project?: string; ext?: string } }): string {
+export function mediaSrcFor(m: { taskId?: string; videoUrl?: string; usedSettings?: any; videoStorage?: { project?: string; ext?: string; projectId?: string } }): string {
   if (!m.taskId || !m.videoUrl) return m.videoUrl || '';
   const q = new URLSearchParams();
   if (m.videoStorage?.ext) q.set('ext', m.videoStorage.ext);
   if (m.videoStorage?.project) q.set('project', m.videoStorage.project);
+  // 26.9.2306~ 영상은 NCP 에서 프로젝트 id 폴더에 있다 — 서버가 id 폴더를 먼저, 그다음 이름 폴더를 본다.
+  if (m.videoStorage?.projectId) q.set('projectId', m.videoStorage.projectId);
   // 보관 경로의 최상위 폴더. 모델에서 유도하므로 따로 저장할 필요가 없다.
   q.set('provider', archiveProviderOf(m.usedSettings?.model));
   const s = q.toString();
@@ -646,11 +648,12 @@ export function playbackChain(m: {
   ];
 }
 /** 목록 썸네일 주소. 없으면 서버가 404 를 주고, 카드가 그때 만들어 올린다. */
-export function posterSrcFor(m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } }): string {
+export function posterSrcFor(m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string; projectId?: string } }): string {
   if (!m.taskId) return '';
   const q = new URLSearchParams();
   q.set('provider', archiveProviderOf(m.usedSettings?.model));
   if (m.videoStorage?.project) q.set('project', m.videoStorage.project);
+  if (m.videoStorage?.projectId) q.set('projectId', m.videoStorage.projectId);
   return `/api/media/${encodeURIComponent(m.taskId)}/poster?${q.toString()}`;
 }
 
@@ -666,7 +669,7 @@ const posterTried = new Set<string>();
  *
  * 실패는 조용히 넘어간다. 썸네일이 없으면 지금처럼 영상을 띄우면 될 뿐, 잃는 데이터가 없다.
  */
-async function capturePoster(video: HTMLVideoElement, m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string } }) {
+async function capturePoster(video: HTMLVideoElement, m: { taskId?: string; usedSettings?: any; videoStorage?: { project?: string; projectId?: string } }) {
   const id = m.taskId;
   if (!id || posterTried.has(id) || !video.videoWidth) return;
   posterTried.add(id);
@@ -681,6 +684,8 @@ async function capturePoster(video: HTMLVideoElement, m: { taskId?: string; used
     const q = new URLSearchParams();
     q.set('provider', archiveProviderOf(m.usedSettings?.model));
     if (m.videoStorage?.project) q.set('project', m.videoStorage.project);
+    // 서버는 색인에 본 영상이 있으면 그 옆에, 없으면 id 폴더(없으면 이름 폴더)에 올린다.
+    if (m.videoStorage?.projectId) q.set('projectId', m.videoStorage.projectId);
     await fetch(`/api/media/${encodeURIComponent(id)}/poster?${q.toString()}`, {
       method: 'POST', headers: { 'Content-Type': 'image/webp' }, body: blob,
     });
@@ -2974,8 +2979,8 @@ export function ChatArea() {
         // fetch is fired unawaited, so a long wait holds one card open and nothing else.
         const timer = window.setTimeout(() => ctrl.abort(), 2400000);
         try {
-          // project 는 앱 전용 필드다 — 서버가 NCP 폴더 이름으로만 쓰고 구글로 보내기 전에 지운다.
-          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, project: omniStorage.project }), signal: ctrl.signal });
+          // project·project_id 는 앱 전용 필드다 — 서버가 NCP 보관 폴더(id 가 있으면 id, 없으면 이름)를 정하는 데만 쓰고 구글로 보내기 전에 지운다.
+          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, project: omniStorage.project, project_id: omniStorage.projectId }), signal: ctrl.signal });
           const t = await r.text();
           let d: any; try { d = JSON.parse(t); } catch { throw new Error(`서버 응답 오류 (${r.status})`); }
           if (!r.ok) throw new Error(d.error || `생성 오류 (${r.status})`);

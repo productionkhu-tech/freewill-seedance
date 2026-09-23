@@ -818,6 +818,8 @@ async function startServer() {
     if (!taskId) return res.status(400).end();
     const prov = typeof req.query.provider === 'string' ? req.query.provider : undefined;
     const proj = typeof req.query.project === 'string' ? req.query.project : undefined;
+    // 26.9.2306~ 메시지는 프로젝트 id 도 힌트로 싣는다 — id 폴더를 먼저, 그다음 만들 때 이름 폴더.
+    const projId = typeof req.query.projectId === 'string' ? req.query.projectId : undefined;
     // 1) 로컬 먼저. 영상이 NCP 에서 만료된 뒤에도 여기 남아 있는 것이 이 폴더의
     //    존재 이유다. 트래픽 0 이고 NCP 아웃바운드 과금도 피한다.
     const localPoster = localPosterPath(taskId);
@@ -825,7 +827,7 @@ async function startServer() {
       res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
       return res.sendFile(localPoster);
     }
-    const url = await presignPoster(taskId, prov, proj);
+    const url = await presignPoster(taskId, prov, proj, projId);
     if (!url) return res.status(404).json({ error: 'no poster' });
     try {
       const up = await fetch(url);
@@ -869,12 +871,13 @@ async function startServer() {
     const taskId = String(req.params.taskId).replace(/[^A-Za-z0-9._-]/g, '');
     const prov = typeof req.query.provider === 'string' && req.query.provider ? req.query.provider : 'seedance';
     const proj = typeof req.query.project === 'string' ? req.query.project : '';
+    const projId = typeof req.query.projectId === 'string' ? req.query.projectId : '';
     const buf = req.body as Buffer;
     if (!taskId || !Buffer.isBuffer(buf) || buf.length < 256) return res.status(400).json({ ok: false });
     // 로컬 저장은 NCP 상태와 무관하게 언제나 한다 — 이 PC 에 없으면 남겨야 한다.
     savePosterLocal(taskId, buf);
     if (hasPoster(taskId)) return res.json({ ok: true, already: true, local: true });
-    const ok = await putPoster(taskId, prov, proj, buf);
+    const ok = await putPoster(taskId, prov, proj, buf, projId);
     res.json({ ok });
   });
 
@@ -916,9 +919,12 @@ async function startServer() {
     // 2. 로컬에 없으면 NCP 에서. 색인이 없으면(재설치 등) 클라이언트가 들고 있던
     //    project/ext 로 되찾아본다.
     let url = await presignArchived(indexId);
-    if (!url && typeof req.query.project === 'string' && req.query.project) {
+    //    id 힌트가 있으면(26.9.2306~ 메시지) id 폴더를 먼저, 그다음 만들 때 이름 폴더를 본다.
+    const hintProject = typeof req.query.project === 'string' ? req.query.project : '';
+    const hintProjectId = typeof req.query.projectId === 'string' ? req.query.projectId : '';
+    if (!url && (hintProject || hintProjectId)) {
       const prov = typeof req.query.provider === 'string' && req.query.provider ? req.query.provider : 'seedance';
-      url = await recoverFromHints(taskId, prov, String(req.query.project), ext);
+      url = await recoverFromHints(taskId, prov, hintProject, ext, hintProjectId);
     }
     // 3. 아직 보관 중이라면(큐에 남아 있다면) 그동안은 원본에서 내보낸다. 생성 직후
     //    다운로드를 누르면 보관 전이라 404 였고, 다운로드는 조용히 실패했다.
@@ -1246,8 +1252,10 @@ async function startServer() {
       // Interactions API 는 모르는 필드에 400 을 낸다(BytePlus 쪽 `project` 와 같은 취급).
       const _archiveProject = typeof body.project === 'string' ? body.project : '';
       const _archiveModel = typeof body.model === 'string' ? body.model : '';
+      // 보관 폴더를 프로젝트 id 로 정하려고 받는다(없으면 이름 폴더). 구글로는 보내지 않는다.
+      const _archiveProjectId = typeof body.project_id === 'string' ? body.project_id.trim() : '';
       delete body.project;
-      delete body.project_id;   // 지금 앱은 보내지 않지만, 실려 오면 구글이 400 을 낸다
+      delete body.project_id;
       // Resolve inline-uploaded media (Edit source video) → Files API uri, since the
       // resumable upload needs the server-held key. The client marks the video part
       // with `_uploadCacheId` (preferred — server reads the bytes straight off the
@@ -1356,7 +1364,7 @@ async function startServer() {
       // Omni 도 같은 보관소로 보낸다. 24시간 만료 문제는 없지만 media-cache 는 30일
       // 프루너에 지워지고 그 PC 에서만 유효하다 — 결과물이 사라지는 건 마찬가지다.
       // 파일이 이미 로컬에 있으므로 다운로드 단계를 건너뛴다.
-      enqueueArchive({ taskId: data.id, provider: brandOf(_archiveModel), project: _archiveProject, ext: '.mp4', model: _archiveModel, localPath: cachePath });
+      enqueueArchive({ taskId: data.id, provider: brandOf(_archiveModel), project: _archiveProject, projectId: _archiveProjectId, ext: '.mp4', model: _archiveModel, localPath: cachePath });
       res.json({ id: data.id, status: data.status || 'completed', videoUrl: `/api/cache/${cacheId}`, usage: data.usage });
     } catch (error: any) {
       // node's fetch reports every transport failure as the bare string "fetch failed",
@@ -1514,6 +1522,8 @@ async function startServer() {
           // NCP 폴더는 지금처럼 '보낼 때의 이름' 이다. 이름이 바뀐 뒤 만든 영상은 새 이름 폴더로
           // 간다(옛 영상은 옛 폴더에 그대로, 앱은 메시지에 구워 둔 이름으로 찾는다).
           project: taskToProject.get(req.params.id)?.project || '',
+          // id 가 있으면 폴더가 id 가 된다(ncp.ts / archiveFolder). 없으면 지금처럼 이름 폴더.
+          projectId: taskToProject.get(req.params.id)?.projectId || '',
           ext,
           model: typeof data.model === 'string' ? data.model : '',
           sourceUrl: srcUrl,

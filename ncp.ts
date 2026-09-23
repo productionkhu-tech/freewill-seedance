@@ -160,12 +160,40 @@ export function objectKeyFor(provider: Provider, project: string, taskId: string
   return `${prov}/${p}/${t}${e}`;
 }
 
+/**
+ * 프로젝트 폴더 = projectId || 프로젝트명. (26.9.2306~)
+ *
+ * id 는 PM 프로그램(POS)의 영구 프로젝트 ID('PJ-' + 8자)라 이름이 몇 번 바뀌어도 새 영상이
+ * 같은 폴더로 모인다. 이름 폴더였을 때는 이름이 바뀌는 순간 한 프로젝트가 NCP 에서 두 폴더로
+ * 갈라졌다. id 가 없는 트래커 전용 프로젝트(TA Test 등)는 지금처럼 이름 폴더.
+ * ★ 이미 올라간 영상은 옮기지 않는다 — 모든 PC 의 색인과 메시지 힌트가 지금 경로를 가리킨다.
+ *   그래서 찾을 때(hintKeysFor)는 id 폴더와 이름 폴더를 둘 다 본다.
+ */
+export function archiveFolder(project: string, projectId?: string): string {
+  return String(projectId || '').trim() || project;
+}
+
+/**
+ * 색인이 없을 때(재설치 등) 힌트로 찾아볼 자리들, 먼저 볼 것부터.
+ *   1. id 폴더 — 패치 이후 영상
+ *   2. 만들 때 이름 폴더 — 패치 전 영상, 옛 버전 앱이 올린 영상, id 없는 프로젝트
+ * 메시지에 남은 project 는 '만들 때의 이름' 이다. 이름이 바뀌어도 고쳐 쓰지 않는 이유가 이것이다.
+ */
+function hintKeysFor(provider: Provider, project: string, projectId: string | undefined, taskId: string, ext: string): string[] {
+  const keys: string[] = [];
+  const id = String(projectId || '').trim();
+  if (id) keys.push(objectKeyFor(provider, id, taskId, ext));
+  if (project) keys.push(objectKeyFor(provider, project, taskId, ext));
+  return [...new Set(keys)];
+}
+
 // ── taskId → 보관 위치 색인 ──────────────────────────────────────────────────
 // 재생할 때 key 를 다시 계산하지 않기 위한 것이다. 계산은 불가능한 순간이 온다:
 // 확장자(.mp4 / 2.5 는 .mov)는 API 가 돌려준 URL 에서 뽑는데 그 URL 은 24시간 뒤 없다.
 // local: 로컬 사본의 실제 경로. Omni 는 파일 이름이 내용 해시라 taskId 로 유추할 수 없어서
 // 여기 적어 둔다 — 프리뷰가 NCP 를 안 타고 디스크에서 바로 나오는 경로다.
-type IndexRow = { key: string; bucket: string; size: number; at: number; project: string; local?: string;
+// projectId: 올릴 때의 프로젝트 id(없으면 없음). 경로는 key 가 말하므로 기록용이다.
+type IndexRow = { key: string; bucket: string; size: number; at: number; project: string; projectId?: string; local?: string;
   /** 목록 썸네일이 NCP 에 있는가. 없으면 카드가 볼 때 만들어 올린다. */
   poster?: boolean;
   /** 재생용 H.264 프록시가 있는가. 원본이 이미 H.264 면 'skipped' — 원본을 그대로 쓴다. */
@@ -217,8 +245,10 @@ export function lookupArchived(taskId: string): IndexRow | undefined {
 }
 
 // ── 아카이브 ────────────────────────────────────────────────────────────────
+// projectId 가 없는 작업(업데이트 전에 큐에 들어간 것 · 트래커 전용 프로젝트)은 이름 폴더로 올린다
+// — 지금까지와 똑같이. ncp-archive-queue.json 의 옛 모양도 그대로 읽힌다.
 type Job = {
-  taskId: string; provider: Provider; project: string; ext: string; model?: string;
+  taskId: string; provider: Provider; project: string; projectId?: string; ext: string; model?: string;
   sourceUrl?: string; localPath?: string; tries: number;
 };
 const queue = new Map<string, Job>();
@@ -361,7 +391,7 @@ async function archiveOne(job: Job) {
   const ncp = await ensureNcp();
   if (!ncp) return; // 다음 기회에. 큐에 그대로 남는다.
 
-  const key = objectKeyFor(job.provider, job.project, job.taskId, job.ext);
+  const key = objectKeyFor(job.provider, archiveFolder(job.project, job.projectId), job.taskId, job.ext);
   const t0 = Date.now();
 
   try {
@@ -409,10 +439,14 @@ async function archiveOne(job: Job) {
     // "이 객체가 원래 어느 프로젝트 것이었나"는 여기 남는다.
     // 모델은 여기에만 있다 — 파일 이름에 넣지 않기로 했다(이름순 = 시간순을 지키려고).
     // S3 메타데이터는 ASCII 만 안전하므로 인코딩해서 넣는다.
-    const meta = {
-      project: encodeURIComponent(job.project || ''),
+    // project-id 는 id 가 있을 때만 싣는다. 빈 값 헤더는 중간에서 떨어져 서명이 어긋날 수 있고,
+    // 서명된 메타데이터와 실제로 보내는 헤더가 하나라도 다르면 업로드가 403 이다.
+    const pid = String(job.projectId || '').trim();
+    const meta: Record<string, string> = {
+      project: encodeURIComponent(job.project || ''),   // 만들 때의 이름 — 이름이 바뀌어도 그대로
       task: job.taskId,
       model: encodeURIComponent(job.model || ''),
+      ...(pid ? { 'project-id': encodeURIComponent(pid) } : {}),
     };
     const putUrl = await getSignedUrl(ncp.client, new PutObjectCommand({
       Bucket: ncp.bucket, Key: key, ContentType: contentType, Metadata: meta,
@@ -431,6 +465,7 @@ async function archiveOne(job: Job) {
           'x-amz-meta-project': meta.project,
           'x-amz-meta-task': meta.task,
           'x-amz-meta-model': meta.model,
+          ...(meta['project-id'] ? { 'x-amz-meta-project-id': meta['project-id'] } : {}),
         },
         // tap 을 거치게 해서 실제로 바이트가 흐를 때마다 감시자 시계를 되돌린다.
         // 파일을 다 읽을 때까지 시간이 얼마가 걸리든, 흐르고 있으면 끊지 않는다.
@@ -445,7 +480,7 @@ async function archiveOne(job: Job) {
       throw new Error(`업로드 크기 불일치 (보낸 ${size}B / 저장된 ${head.ContentLength}B)`);
     }
 
-    mediaIndex.set(job.taskId, { key, bucket: ncp.bucket, size, at: Date.now(), project: job.project, local });
+    mediaIndex.set(job.taskId, { key, bucket: ncp.bucket, size, at: Date.now(), project: job.project, ...(pid ? { projectId: pid } : {}), local });
     saveIndex();
     queue.delete(job.taskId);
     saveQueue();
@@ -496,21 +531,27 @@ export async function presignArchived(taskId: string): Promise<string | null> {
  * 색인에 없을 때(재설치 등으로 색인을 잃었을 때) 클라이언트가 들고 있던
  * project/ext 로 직접 찾아본다. 있으면 색인을 되살린다.
  */
-export async function recoverFromHints(taskId: string, provider: Provider, project: string, ext: string): Promise<string | null> {
+export async function recoverFromHints(
+  taskId: string, provider: Provider, project: string, ext: string, projectId?: string,
+): Promise<string | null> {
   const ncp = await ensureNcp();
   if (!ncp) return null;
-  const key = objectKeyFor(provider, project, taskId, ext);
-  try {
-    const head = await ncp.client.send(new HeadObjectCommand({ Bucket: ncp.bucket, Key: key }));
-    mediaIndex.set(taskId, {
-      key, bucket: ncp.bucket, size: Number(head.ContentLength) || 0, at: Date.now(), project,
-    });
-    saveIndex();
-    console.log(`[NCP] 색인 복구 ${key}`);
-    return getSignedUrl(ncp.client, new GetObjectCommand({ Bucket: ncp.bucket, Key: key }), {
-      expiresIn: ncp.presignExpires,
-    });
-  } catch { return null; }
+  // id 폴더(패치 이후) → 만들 때 이름 폴더(패치 전 · 옛 버전 앱 · id 없는 프로젝트) 순으로 본다.
+  for (const key of hintKeysFor(provider, project, projectId, taskId, ext)) {
+    try {
+      const head = await ncp.client.send(new HeadObjectCommand({ Bucket: ncp.bucket, Key: key }));
+      mediaIndex.set(taskId, {
+        key, bucket: ncp.bucket, size: Number(head.ContentLength) || 0, at: Date.now(), project,
+        ...(projectId ? { projectId } : {}),
+      });
+      saveIndex();
+      console.log(`[NCP] 색인 복구 ${key}`);
+      return getSignedUrl(ncp.client, new GetObjectCommand({ Bucket: ncp.bucket, Key: key }), {
+        expiresIn: ncp.presignExpires,
+      });
+    } catch { /* 여기엔 없다 — 다음 자리 */ }
+  }
+  return null;
 }
 
 /**
@@ -577,7 +618,7 @@ export function archiveStats() {
 //   저장소에 두면 코덱이 있는 팀원 PC 가 한 번만 만들어도 전원이 본다. 코덱을 나중에
 //   깔아도 마찬가지다 — 실패는 영구적이지 않고, 다음에 볼 때 다시 시도한다.
 //
-// 키는 영상과 나란히 둔다: {brand}/{프로젝트}/{taskId}.webp
+// 키는 영상과 나란히 둔다: {brand}/{폴더}/{taskId}.webp — 폴더는 archiveFolder(id || 이름)
 
 /** 이 영상의 포스터가 이미 있는가 (색인 기준). */
 export function hasPoster(taskId: string): boolean {
@@ -589,11 +630,17 @@ export function hasPoster(taskId: string): boolean {
  * 데이터가 사라지는 게 아니고, 다음에 볼 때 다시 만들면 된다.
  */
 export async function putPoster(
-  taskId: string, provider: Provider, project: string, body: Buffer,
+  taskId: string, provider: Provider, project: string, body: Buffer, projectId?: string,
 ): Promise<boolean> {
   const ncp = await ensureNcp();
   if (!ncp) return false;
-  const key = objectKeyFor(provider, project, taskId, '.webp');
+  // ★ 썸네일은 본 영상 옆에 둔다. 색인에 본 영상이 있으면 그 경로에서 확장자만 바꾼다 — 힌트
+  //   이름으로 새로 계산하면 본 영상은 id 폴더에 있는데 썸네일만 이름 폴더로 가는 일이 생긴다.
+  //   색인이 없을 때만 폴더 규칙(id || 이름)으로 계산한다.
+  const indexed = mediaIndex.get(taskId);
+  const key = indexed
+    ? indexed.key.replace(/\.[A-Za-z0-9]+$/, '.webp')
+    : objectKeyFor(provider, archiveFolder(project, projectId), taskId, '.webp');
   try {
     // 작아서(수십 KB) 스트리밍이 필요 없다 — Buffer 로 바로 올린다.
     await ncp.client.send(new PutObjectCommand({
@@ -604,8 +651,8 @@ export async function putPoster(
     else {
       // 영상 보관이 아직/영영 안 된 경우에도 포스터는 남을 수 있다. 그 자리를 만들어 둔다.
       mediaIndex.set(taskId, {
-        key: objectKeyFor(provider, project, taskId, '.mp4'),
-        bucket: ncp.bucket, size: 0, at: Date.now(), project, poster: true,
+        key: objectKeyFor(provider, archiveFolder(project, projectId), taskId, '.mp4'),
+        bucket: ncp.bucket, size: 0, at: Date.now(), project, ...(projectId ? { projectId } : {}), poster: true,
       });
       saveIndex();
     }
@@ -619,19 +666,24 @@ export async function putPoster(
 
 /** 포스터 서명 URL. 색인에 없으면 힌트(provider/project)로 직접 찾아본다. */
 export async function presignPoster(
-  taskId: string, provider?: Provider, project?: string,
+  taskId: string, provider?: Provider, project?: string, projectId?: string,
 ): Promise<string | null> {
   const ncp = await ensureNcp();
   if (!ncp) return null;
   const row = mediaIndex.get(taskId);
-  const key = row
-    ? row.key.replace(/\.[A-Za-z0-9]+$/, '.webp')
-    : (provider && project ? objectKeyFor(provider, project, taskId, '.webp') : null);
-  if (!key) return null;
-  if (!row?.poster) {
-    // 색인이 모르는 경우(재설치 등) 실제로 있는지 확인하고 색인을 되살린다.
-    try { await ncp.client.send(new HeadObjectCommand({ Bucket: ncp.bucket, Key: key })); }
-    catch { return null; }
+  // 색인이 있으면 본 영상 옆 한 자리, 없으면(재설치 등) id 폴더 → 만들 때 이름 폴더 순.
+  const candidates = row
+    ? [row.key.replace(/\.[A-Za-z0-9]+$/, '.webp')]
+    : (provider ? hintKeysFor(provider, project || '', projectId, taskId, '.webp') : []);
+  if (!candidates.length) return null;
+  let key: string | null = row?.poster ? candidates[0] : null;
+  if (!key) {
+    // 색인이 모르는 경우 실제로 있는지 확인하고 색인을 되살린다.
+    for (const k of candidates) {
+      try { await ncp.client.send(new HeadObjectCommand({ Bucket: ncp.bucket, Key: k })); key = k; break; }
+      catch { /* 다음 자리 */ }
+    }
+    if (!key) return null;
     if (row) { row.poster = true; saveIndex(); }
   }
   return getSignedUrl(ncp.client, new GetObjectCommand({ Bucket: ncp.bucket, Key: key }), {
