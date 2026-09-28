@@ -1205,6 +1205,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               </span>
             )}
             <div className="shrink-0 hidden group-hover/g:flex items-center gap-0.5">
+              {/* 이 그룹 안에 새 프로젝트. 이름은 맨 위 New Project 와 같은 규칙 — 이 그룹 안에서
+                  비어 있는 가장 작은 'Project N'(하위 그룹 이름까지 같은 목록으로 본다). 하위 그룹에도
+                  있다. 나중에 밖으로 옮기다 이름이 겹치면 그때 (1) 이 붙는 것도 끌어서 옮길 때와 같다. */}
+              <button onClick={(e) => { e.stopPropagation(); createProject(g.id); }}
+                title="이 그룹에 새 프로젝트" className="p-0.5 text-white/40 hover:text-white transition-colors"><Plus size={12} /></button>
               {depth === 0 ? (
                 // Only top-level folders can hold folders, so only they offer it. An
                 // always-present button that refuses on a subfolder would be worse than
@@ -1251,7 +1256,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                   Keeping it is also just correct: "프로젝트를 끌어다 놓으세요" is exactly
                   what you want to read while dragging a project. */}
               {all.length === 0 && kids.length === 0 && (
-                <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓으세요</div>
+                <div className="px-3 py-1.5 text-[11px] text-white/25">비어 있음 — 프로젝트를 끌어다 놓거나 + 로 새로 만드세요</div>
               )}
               {/* With no children yet, this is the only way in by drag. It has to exist
                   before the folder has anything in it, which is exactly when it's needed. */}
@@ -1274,7 +1279,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         <button onClick={onToggle} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="Expand sidebar">
           <PanelLeftOpen size={18} />
         </button>
-        <button onClick={createProject} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="New Project">
+        <button onClick={() => createProject()} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="New Project">
           <Plus size={18} />
         </button>
         <button onClick={() => setGalleryOpen(true)} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="전체 갤러리">
@@ -1312,7 +1317,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           {/* whitespace-nowrap + min-w-0: adding the group button next to this stole enough
               width to wrap "New Project" onto two lines. The label should shrink its padding,
               never break. */}
-          <button onClick={createProject} className="flex-1 min-w-0 flex items-center justify-center gap-1.5 bg-[#2a2a2d] hover:bg-[#3a3a3d] text-white px-2 py-2 rounded-[8px] font-medium transition-colors text-[15px] whitespace-nowrap">
+          <button onClick={() => createProject()} className="flex-1 min-w-0 flex items-center justify-center gap-1.5 bg-[#2a2a2d] hover:bg-[#3a3a3d] text-white px-2 py-2 rounded-[8px] font-medium transition-colors text-[15px] whitespace-nowrap">
             <Plus size={17} className="shrink-0" />
             New Project
           </button>

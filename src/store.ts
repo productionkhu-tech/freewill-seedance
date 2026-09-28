@@ -789,7 +789,8 @@ interface AppState {
   mentionedElementImages: number;
   setMentionedElementImages: (n: number) => void;
   setCurrentProjectId: (id: string) => void;
-  createProject: () => void;
+  // groupId 를 주면 그 그룹 안에 만든다(사이드바 그룹 머리의 +). 없거나 모르는 값이면 최상위.
+  createProject: (groupId?: string) => void;
   renameProject: (id: string, name: string) => void;
   setProjectIcon: (id: string, icon: string | undefined) => void;
   markProjectSeen: (projectId: string) => void;
@@ -1670,22 +1671,35 @@ export const useAppStore = create<AppState>()(
         currentProjectId: id,
         projectGroups: revealProject(state.projectGroups, state.projects, id),
       })),
-      createProject: () => {
-        // New projects land at the top level, so that is the list they must be unique in.
-        const existing = namesInContainer(get().projectGroups, get().projects, undefined);
+      createProject: (groupId) => {
+        // 어디에 만드나. 사이드바 그룹 머리의 + 는 그 그룹 id 를 넘긴다. 맨 위 New Project 버튼은
+        // onClick 에 그대로 물려 있어 마우스 이벤트가 들어온다 — 문자열일 때만 그룹으로 받는다.
+        // 지금 없는 그룹이면 최상위로: 없는 그룹 id 를 단 프로젝트는 최상위에 그려지므로(dangling
+        // 규칙), 번호도 그 목록에서 뽑아야 둘이 어긋나지 않는다.
+        const groups = get().projectGroups;
+        const home = typeof groupId === 'string' && groups.some(g => g.id === groupId) ? groupId : undefined;
+        // 새 프로젝트가 실제로 놓이는 그 목록(최상위 또는 그 그룹 안)에서 비어 있는 가장 작은 번호.
+        // 중복 검사와 같은 목록을 본다 — 번호가 꼬이지 않는 이유가 이것이다(§6, nextNumberedName).
+        // 그룹 안은 하위 그룹 이름도 같은 이름공간이다(한 목록에 같이 그려지므로).
+        const existing = namesInContainer(groups, get().projects, home);
         const newProject: Project = {
           id: uuidv4(),
-          // Lowest free number in THIS container — see nextNumberedName.
           name: nextNumberedName('Project', existing),
           messages: [],
           settings: { ...defaultSettings },
           assets: [],
           updatedAt: Date.now(),
+          ...(home ? { groupId: home } : {}),
         };
-        set((state) => ({
-          projects: [newProject, ...state.projects],
-          currentProjectId: newProject.id,
-        }));
+        set((state) => {
+          const projects = [newProject, ...state.projects];
+          return {
+            projects,
+            currentProjectId: newProject.id,
+            // 접힌 그룹(또는 접힌 상위 그룹) 안에 만들면 새 프로젝트가 화면에 안 보인다 — 펼친다.
+            projectGroups: revealProject(state.projectGroups, projects, newProject.id),
+          };
+        });
       },
       renameProject: (id, name) => {
         set((state) => {
@@ -1775,14 +1789,29 @@ export const useAppStore = create<AppState>()(
       // are different calls — never a flag with a default, where the destructive branch
       // could be reached by forgetting to pass something. The UI asks which one.
       deleteProjectGroup: (id) => {
-        set((state) => ({
-          projectGroups: state.projectGroups
+        set((state) => {
+          const me = state.projectGroups.find(g => g.id === id);
+          if (!me) return state;
+          // 안에 있던 것들이 나가는 곳 = 이 그룹이 실제로 그려지던 목록. 하위 그룹을 지우면 부모
+          // 그룹 안으로 남는다 — "그룹만 삭제 (프로젝트는 남김)" 을 누른 사람은 프로젝트가 부모 그룹
+          // 밖, 맨 위까지 튀어나갈 거라고 생각하지 않는다(예전엔 그렇게 튀어나갔다).
+          const dest = groupTree(state.projectGroups).isSub(me) ? me.parentId : undefined;
+          // ★ 나가는 것들은 도착한 목록에서 이름이 겹치면 (1) 이 붙는다 — 끌어서 옮길 때와 같은 규칙.
+          //   예전엔 이 경로만 검사를 안 해서, 그룹 안의 'Project 1' 이 밖의 'Project 1' 옆에 똑같은
+          //   이름으로 나란히 섰다. 원래 거기 있던 것은 이름을 그대로 두고, 나오는 쪽이 바뀐다.
+          //   나오는 것들끼리는 원래 한 목록(지우는 그룹 안)에 있었으므로 서로 겹치지 않는다.
+          const taken = namesInContainer(state.projectGroups, state.projects, dest, { groupId: id });
+          const land = (name: string) => { const n = uniqueName(name, taken); taken.push(n); return n; };
+          // Subfolders are promoted, not destroyed. "그룹만 삭제" promises the contents
+          // survive, and a subfolder is contents. (하위 그룹은 최상위 그룹에만 있으므로 dest 는 최상위.)
+          const projectGroups = state.projectGroups
             .filter(g => g.id !== id)
-            // Subfolders are promoted, not destroyed. "그룹만 삭제" promises the contents
-            // survive, and a subfolder is contents.
-            .map(g => g.parentId === id ? { ...g, parentId: undefined } : g),
-          projects: state.projects.map(p => p.groupId === id ? { ...p, groupId: undefined } : p),
-        }));
+            .map(g => g.parentId === id ? { ...g, parentId: undefined, name: land(g.name) } : g);
+          const projects = state.projects.map(p => p.groupId === id
+            ? { ...p, groupId: dest, name: land(p.name) }
+            : p);
+          return { projectGroups: openChain(projectGroups, dest), projects };
+        });
       },
       deleteProjectGroupWithProjects: (id) => {
         set((state) => {
