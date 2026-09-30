@@ -3,6 +3,8 @@ build/
 dist/
 dist-server/
 media-cache/
+# 어셋 라이브러리 원본(개발 모드에서 여기에 생긴다). 사용자 그림이라 저장소에 들어가면 안 된다.
+element-library/
 release/
 # 임시 출력 폴더(release-2.5 등)도 함께 제외 — 하나가 73MB 라 실수로 한 번 들어가면 되돌리기 어렵다
 release-*/

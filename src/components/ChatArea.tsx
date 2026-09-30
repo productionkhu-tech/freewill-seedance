@@ -6,19 +6,24 @@ import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as I
 import { getAssetNames } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
-import { formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
+import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
 
-// Resolve one element-library image to a fresh R2 URL for the API payload. Tries
-// the opportunistic media-cache id first; on miss (30-day LRU eviction) rebuilds
-// from the durable base64 → re-caches → re-uploads. Same R2 path panel assets
-// use, so element images reach the API identically to manual references.
+// Resolve one element-library image to a fresh R2 URL for the API payload — always the
+// ORIGINAL bytes, never the JPG preview. 26.9.3001~ the original is a file in the server
+// library (libId) and the server uploads that file untouched. Older assets may still carry
+// a media-cache id, or the base64 original itself while it is being moved to disk — both
+// still work. Same R2 path panel assets use, so element images reach the API identically.
 async function resolveElementImageUrl(img: ElementImage): Promise<string> {
-  if (img.cacheId) {
-    try { return await reuploadFromCache(img.cacheId); } catch { /* evicted → rebuild from base64 below */ }
+  for (const id of [img.libId, img.cacheId]) {
+    if (!id) continue;
+    try { return await reuploadFromCache(id); } catch { /* next source */ }
   }
-  const file = await dataUrlToFile(img.url, img.file_name || 'element.png');
-  const cacheId = await cacheFile(file);
-  return await reuploadFromCache(cacheId);
+  if (img.url && img.url.startsWith('data:')) {
+    const file = await dataUrlToFile(img.url, img.file_name || 'element.png');
+    const cacheId = await cacheFile(file);
+    return await reuploadFromCache(cacheId);
+  }
+  throw new Error('원본 이미지를 찾을 수 없습니다');
 }
 
 /* ─── Korean error translation ─── */
@@ -1330,9 +1335,10 @@ export function ChatArea() {
   // O(1) full-res URL lookup by "${elementId}__${imageId}" (== usedElementImages[].id) so
   // message/preview cards don't linear-scan elementAssets.find().images.find() per image
   // per render (which re-ran on every store write, worst when many elements are in use).
+  // 26.9.3001~ 둘로 나뉜다: 크게 보기는 JPG 미리보기(화면용), 복사는 원본 그대로.
   const elementImageUrlById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const e of elementAssets) for (const im of e.images) m.set(`${e.id}__${im.id}`, im.url);
+    const m = new Map<string, { preview: string; original: string }>();
+    for (const e of elementAssets) for (const im of e.images) m.set(`${e.id}__${im.id}`, { preview: libraryPreviewSrc(im), original: libraryOriginalSrc(im) });
     return m;
   }, [elementAssets]);
 
@@ -2616,7 +2622,7 @@ export function ChatArea() {
     // usedAssets (panel refs) because reuse restores usedAssets to the panel,
     // whereas element images must ride the mention, not the panel. Thumbnails only.
     const usedElementImages = mentionedElements.flatMap(el =>
-      el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, url: img.thumbnailUrl || img.url }))
+      el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, libId: img.libId, url: img.thumbnailUrl || img.url }))
     );
 
     for (let i = 0; i < outputCount; i++) {
@@ -2841,7 +2847,8 @@ export function ChatArea() {
       setIsGenerating(true);
       const imageParts: any[] = [];
       try {
-        for (const src of imgSources) { const b = await readCacheB64(src.asset?.cacheId || src.img?.cacheId, src.asset?.url || src.img?.url || src.img?.thumbnailUrl); if (b) imageParts.push({ type: 'image', data: b.data, mime_type: b.mime }); }
+        // 원본만 보낸다. 못 읽으면 멈춘다 — 예전에는 빠뜨리고 보내거나(<IMAGE_REF_N> 번호가 밀린다) 썸네일을 대신 보냈다.
+        for (const src of imgSources) { const b = await readCacheB64(src.asset?.cacheId || src.img?.libId || src.img?.cacheId, src.asset?.url || src.img?.url); if (!b) throw new Error(`'${src.asset?.file_name || src.img?.file_name || '레퍼런스'}' 원본을 읽지 못했습니다. 다시 넣어주세요.`); imageParts.push({ type: 'image', data: b.data, mime_type: b.mime }); }
       } catch (e: any) { warn('이미지 읽기 실패: ' + e.message); setIsGenerating(false); return; }
       if (imgSources.length > 0 && imageParts.length === 0) { warn('첨부 이미지를 읽지 못했습니다. 다시 넣어주세요.'); setIsGenerating(false); return; }
 
@@ -2943,7 +2950,7 @@ export function ChatArea() {
         generation_config: { video_config: { task: effTask }, thinking_level: 'high' },
       };
       usedImgAssets = [firstFrame, lastFrame, ...refImgs, ...refVideos].filter(Boolean).map((a: any) => ({ ...a, url: a.thumbnailUrl || a.url }));
-      usedElementImages = mentionedElements.flatMap(el => el.images.map(img => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, url: img.thumbnailUrl || img.url })));
+      usedElementImages = mentionedElements.flatMap(el => el.images.map(img => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, libId: img.libId, url: img.thumbnailUrl || img.url })));
     }
 
     const settingsSnapshot = { ...s };
@@ -3300,12 +3307,12 @@ export function ChatArea() {
                       return (
                         <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
                           onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
-                                      { src: full, original: true },
+                                      { src: full?.original, original: true }, { src: ei.libId && `/api/library/${ei.libId}`, original: true },
                                       { src: ei.cacheId && `/api/cache/${ei.cacheId}`, original: true },
                                       { src: ei.url },
                                     ], ei.name || '이미지'); }}
                           className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50" style={{ border: `2px solid ${meta.border}` }}>
-                          <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full && full !== ei.url ? full : undefined}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                          <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                         </div>
                       );
                     })}
@@ -3528,12 +3535,12 @@ export function ChatArea() {
                                 return (
                                   <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
                                     onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
-                                      { src: full, original: true },
+                                      { src: full?.original, original: true }, { src: ei.libId && `/api/library/${ei.libId}`, original: true },
                                       { src: ei.cacheId && `/api/cache/${ei.cacheId}`, original: true },
                                       { src: ei.url },
                                     ], ei.name || '이미지'); }}
                                     className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
-                                    <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full && full !== ei.url ? full : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                                    <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                                     <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
                                   </div>
                                 );

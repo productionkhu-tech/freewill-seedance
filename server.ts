@@ -323,6 +323,19 @@ async function startServer() {
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
   console.log(`[Cache] Using ${CACHE_DIR}`);
 
+  // ── 어셋 라이브러리 원본 (26.9.3001~) ────────────────────────────────────────
+  // 라이브러리 이미지의 원본 바이트는 여기에 파일로 한 번만 둔다. 이름 = 내용 md5 앞 12자리 + 확장자
+  // (media-cache 의 cacheId 와 같은 꼴) — 같은 그림은 컬렉션이 몇 개든 파일 하나다.
+  // 예전에는 원본을 base64 로 화면(렌더러) 메모리에 통째로 들고 있었다. 2026-09-28 에 112개가
+  // 1.38GB 였고, 백업이 돌 때마다 그걸 한 벌 더 만들다 렌더러가 죽었다(최대 5.5GB).
+  // ★ media-cache 와 다른 폴더인 이유: 거기는 30일 프루너·"캐시 비우기" 가 통째로 지운다.
+  //   이 폴더는 아무도 자동으로 지우지 않는다. 원본이 사는 유일한 곳이기 때문이다.
+  // ★ 전송·복사·공유 팩은 언제나 이 원본 바이트 그대로 나간다. preview/ 의 JPG 는 화면용일 뿐이다.
+  const LIB_DIR = process.env.ELEMENT_LIBRARY_DIR || path.join(process.cwd(), 'element-library');
+  const LIB_PREVIEW_DIR = path.join(LIB_DIR, 'preview');
+  fs.mkdirSync(LIB_PREVIEW_DIR, { recursive: true });
+  console.log(`[Library] Using ${LIB_DIR}`);
+
   // ★ media-cache 에는 캐시 파일만 있는 게 아니다. 앱의 작은 원장 네 개가 같이 산다.
   //   30일 프루너와 "캐시 비우기" 버튼은 디렉터리를 통째로 훑어 지우기 때문에, 막아두지
   //   않으면 이것들까지 함께 사라진다. 각각 잃었을 때 실제로 일어나는 일:
@@ -621,7 +634,10 @@ async function startServer() {
   // These routes are the same four operations the IPC handlers expose, so the client can
   // keep one code path and just swap the transport. Same directory, same filenames, same
   // atomic write — a backup written on one platform restores on the other.
-  const BACKUP_DIR = path.join(os.homedir(), 'Documents', 'Freewill Seedance Backup');
+  // 설치된 앱은 main.cjs 가 자기 폴더(app.getPath('documents') 기준)를 넘겨준다 — IPC 로 쓰는
+  // 백업과 이 서버가 쓰는 라이브러리 원본이 같은 폴더에 있어야 복원이 된다. Documents 가 OneDrive
+  // 로 옮겨진 PC 에서는 os.homedir()/Documents 와 그 폴더가 다르다(HANDOFF §9).
+  const BACKUP_DIR = process.env.SEEDANCE_BACKUP_DIR || path.join(os.homedir(), 'Documents', 'Freewill Seedance Backup');
   const BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-backup.json');
   const ELEMENTS_BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-elements.json');
   const LEGACY_COMBINED_PATH = path.join(BACKUP_DIR, 'seedance-backup-combined-legacy.json');
@@ -702,9 +718,13 @@ async function startServer() {
       if (index === total - 1) {
         // Manifest last — until it lands, a partial run is simply not a valid backup.
         writeAtomic(ELEMENTS_MANIFEST_PATH, JSON.stringify({ v: 2, chunks: total, count, savedAt: Date.now() }));
-        for (let i = total; i < total + 40; i++) {
-          try { if (fs.existsSync(elementsChunkPath(i))) fs.unlinkSync(elementsChunkPath(i)); } catch {}
-        }
+        // 남은 조각은 전부 — 40개만 지우면 큰 축소(26.9.3001 원본 옮기기: 53 → 1)에서 뒤가 남는다.
+        try {
+          for (const f of fs.readdirSync(BACKUP_DIR)) {
+            const m = /^seedance-elements-(\d{3,})\.json$/.exec(f);
+            if (m && Number(m[1]) >= total) { try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch {} }
+          }
+        } catch {}
         try { if (fs.existsSync(ELEMENTS_BACKUP_PATH)) fs.unlinkSync(ELEMENTS_BACKUP_PATH); } catch {}
       }
       res.json({ ok: true, bytes: content.length });
@@ -754,6 +774,149 @@ async function startServer() {
     } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+  // ── 어셋 라이브러리: 원본 파일 · JPG 미리보기 · 백업 (26.9.3001~) ─────────────
+  // 원본은 LIB_DIR 에, 백업 폴더에는 element-library/ 로 같은 이름 그대로 복사해 둔다. 이름이 곧
+  // 내용이라 한 번 복사한 파일은 다시 바뀌지 않는다 — 새 그림만 복사하면 된다. userData 가 날아간
+  // PC(재설치·AppData 정리)에서는 처음 쓰일 때 백업 폴더에서 되가져온다(libraryFile).
+  const BACKUP_LIB_DIR = path.join(BACKUP_DIR, 'element-library');
+  const BACKUP_LIB_PREVIEW_DIR = path.join(BACKUP_LIB_DIR, 'preview');
+  const LIB_ID = /^[0-9a-f]{12}\.[a-z0-9]{2,5}$/;
+
+  // 머리 바이트로 형식을 정한다. 옛 어셋에는 파일 이름이 없는 것도 있고, 이름의 확장자가 틀린
+  // 파일도 있다. 원본 바이트는 그대로 두고, 이름(→ 보낼 때의 Content-Type)만 실제 형식을 따른다.
+  function sniffImageExt(buf: Buffer): string | null {
+    if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
+    if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+    if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return '.webp';
+    if (buf.length >= 6 && buf.toString('ascii', 0, 3) === 'GIF') return '.gif';
+    if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return '.bmp';
+    return null;
+  }
+
+  async function copyAtomic(src: string, dst: string) {
+    await fs.promises.mkdir(path.dirname(dst), { recursive: true });
+    const tmp = dst + '.tmp';
+    await fs.promises.copyFile(src, tmp);
+    await fs.promises.rename(tmp, dst);
+  }
+
+  // 원본을 백업 폴더에서 되가져올 때는 동기로 한다 — 요청 하나가 파일 하나를 기다리는 것이고,
+  // 되가져온 뒤에는 다시 일어나지 않는다.
+  function restoreFromBackup(src: string, dst: string): string {
+    try {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst + '.tmp');
+      fs.renameSync(dst + '.tmp', dst);
+      console.log(`[Library] restored ${path.basename(dst)} from backup`);
+      return dst;
+    } catch { return src; }                // 되가져오기에 실패해도 백업 쪽을 그대로 읽으면 된다
+  }
+
+  function libraryFile(id: string): string | null {
+    if (!LIB_ID.test(id)) return null;
+    const p = path.join(LIB_DIR, id);
+    if (fs.existsSync(p)) return p;
+    const b = path.join(BACKUP_LIB_DIR, id);
+    return fs.existsSync(b) ? restoreFromBackup(b, p) : null;
+  }
+  function libraryPreviewFile(id: string): string | null {
+    if (!LIB_ID.test(id)) return null;
+    const p = path.join(LIB_PREVIEW_DIR, id + '.jpg');
+    if (fs.existsSync(p)) return p;
+    const b = path.join(BACKUP_LIB_PREVIEW_DIR, id + '.jpg');
+    return fs.existsSync(b) ? restoreFromBackup(b, p) : null;
+  }
+
+  // media-cache id 로도, 라이브러리 id 로도 원본을 찾는다. 요청에서 온 값이라 폴더를 벗어나는
+  // 이름(../ · 경로 구분자 · 드라이브 문자)은 여기서 막는다 — 이 서버는 0.0.0.0 에 떠 있다.
+  function resolveMediaFile(raw: unknown): string | null {
+    const id = String(raw ?? '');
+    if (!id || /[\\/:\0]/.test(id) || id.includes('..')) return null;
+    const c = path.join(CACHE_DIR, id);
+    try { if (fs.statSync(c).isFile()) return c; } catch { /* 캐시에 없음 */ }
+    return libraryFile(id);
+  }
+
+  // 원본 저장. 받은 바이트를 한 바이트도 바꾸지 않고 쓴다. 내용이 같으면 id 도 같다 — 이미 있으면 둔다.
+  app.post('/api/library', express.raw({ type: '*/*', limit: '64mb' }), (req, res) => {
+    try {
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (!buf.length) return res.status(400).json({ ok: false, error: 'empty body' });
+      const named = path.extname(decodeURIComponent((req.headers['x-filename'] as string) || '')).toLowerCase();
+      const ext = sniffImageExt(buf) || (/^\.[a-z0-9]{2,5}$/.test(named) ? named : '.bin');
+      const libId = crypto.createHash('md5').update(buf).digest('hex').slice(0, 12) + ext;
+      const p = path.join(LIB_DIR, libId);
+      if (!fs.existsSync(p)) {
+        fs.writeFileSync(p + '.tmp', buf);
+        fs.renameSync(p + '.tmp', p);
+      }
+      // 쓴 뒤의 실제 크기를 돌려준다 — 클라이언트는 이게 보낸 크기와 같을 때만 메모리의 원본을 놓는다.
+      res.json({ ok: true, libId, bytes: fs.statSync(p).size });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // 화면용 JPG 미리보기(클라이언트가 만든다 — 긴 변 제한, 투명은 검정). 원본이 있어야 받는다.
+  app.put('/api/library/:id/preview', express.raw({ type: '*/*', limit: '24mb' }), (req, res) => {
+    try {
+      const id = String(req.params.id);
+      if (!libraryFile(id)) return res.status(404).json({ ok: false, error: 'no such original' });
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (buf.length < 3 || buf[0] !== 0xff || buf[1] !== 0xd8) return res.status(400).json({ ok: false, error: 'preview must be a JPEG' });
+      const p = path.join(LIB_PREVIEW_DIR, id + '.jpg');
+      fs.writeFileSync(p + '.tmp', buf);
+      fs.renameSync(p + '.tmp', p);
+      res.json({ ok: true, bytes: buf.length });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // 원본 그대로 (복사·공유 팩·옴니). 이름이 곧 내용이라 영원히 캐시해도 된다.
+  app.get('/api/library/:id', (req, res) => {
+    const f = libraryFile(String(req.params.id));
+    if (!f) return res.status(404).json({ error: 'not found' });
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(f);
+  });
+
+  // 미리보기. 아직 없으면(만드는 중이거나, 옛 백업에서 막 되살린 경우) 원본을 대신 보여 주되 캐시는
+  // 막는다 — 미리보기가 생기면 다음부터 그걸 받아야 하니까.
+  app.get('/api/library/:id/preview', (req, res) => {
+    const id = String(req.params.id);
+    const pv = libraryPreviewFile(id);
+    if (pv) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.sendFile(pv);
+    }
+    const f = libraryFile(id);
+    if (!f) return res.status(404).json({ error: 'not found' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(f);
+  });
+
+  // 백업 폴더에 원본(과 미리보기)을 채운다. 클라이언트가 라이브러리 목록을 백업하기 직전에 부른다 —
+  // 목록이 가리키는 원본이 백업에 없는 채로 목록만 새로 쓰면, 그 백업으로 되살린 라이브러리는 그림이
+  // 없다. 이미 있는 파일은 건너뛰므로 처음 한 번만 무겁고(약 1GB) 그 뒤로는 새 그림만 복사한다.
+  app.post('/api/library/backup-sync', async (req, res) => {
+    try {
+      const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+      let copied = 0, present = 0, previews = 0;
+      const missing: string[] = [];
+      for (const id of ids) {
+        if (!LIB_ID.test(id)) { missing.push(id); continue; }
+        const dst = path.join(BACKUP_LIB_DIR, id);
+        if (fs.existsSync(dst)) present++;
+        else if (fs.existsSync(path.join(LIB_DIR, id))) { await copyAtomic(path.join(LIB_DIR, id), dst); copied++; }
+        else { missing.push(id); continue; }
+        const pvSrc = path.join(LIB_PREVIEW_DIR, id + '.jpg');
+        const pvDst = path.join(BACKUP_LIB_PREVIEW_DIR, id + '.jpg');
+        if (!fs.existsSync(pvDst) && fs.existsSync(pvSrc)) { await copyAtomic(pvSrc, pvDst); previews++; }
+      }
+      if (copied || previews || missing.length) {
+        console.log(`[Library] backup: +${copied} original(s), +${previews} preview(s), ${present} already there${missing.length ? `, ${missing.length} MISSING` : ''}`);
+      }
+      res.json({ ok: true, copied, present, previews, missing });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
   // Wipe the ENTIRE media-cache. Wired to the sidebar cleanup button — explicit
   // cleanup means full cleanup (user decision). Old messages' clipboard
   // references become unrecoverable; file references can still recover via
@@ -782,9 +945,10 @@ async function startServer() {
 
   // Read cached file
   app.get('/api/cache/:cacheId', (req, res) => {
-    const cachePath = path.join(CACHE_DIR, req.params.cacheId);
-    if (!fs.existsSync(cachePath)) return res.status(404).json({ error: 'File not found in cache' });
-    touchCache(cachePath); // 읽기도 사용 → 30일 시계 리셋
+    // 캐시에 없으면 어셋 라이브러리 원본에서 찾는다 — 옴니가 어셋 이미지를 이 경로로 읽는다.
+    const cachePath = resolveMediaFile(req.params.cacheId);
+    if (!cachePath) return res.status(404).json({ error: 'File not found in cache' });
+    if (cachePath.startsWith(CACHE_DIR)) touchCache(cachePath); // 읽기도 사용 → 30일 시계 리셋
     res.sendFile(cachePath);
   });
 
@@ -970,16 +1134,18 @@ async function startServer() {
   // Called at send time (handleSend / handleReuse). Each call produces a
   // unique R2 key, mapped to its task in POST /api/byteplus/tasks below.
   app.post('/api/reupload/:cacheId', async (req, res) => {
-    const cachePath = path.join(CACHE_DIR, req.params.cacheId);
+    // 어셋 라이브러리 이미지는 라이브러리 id 로 온다 — 캐시에 없으면 원본 폴더에서 찾는다.
+    // 어느 쪽이든 파일 바이트를 그대로 R2 에 올린다(변환 없음).
+    const cachePath = resolveMediaFile(req.params.cacheId);
     console.log(`[Re-upload] ${req.params.cacheId}...`);
 
     try {
-      if (!fs.existsSync(cachePath)) {
+      if (!cachePath) {
         return res.status(404).json({ error: 'Cached file not found. Please re-attach the file.' });
       }
-      touchCache(cachePath); // 전송에 쓰임 → 30일 시계 리셋
+      if (cachePath.startsWith(CACHE_DIR)) touchCache(cachePath); // 전송에 쓰임 → 30일 시계 리셋
       const fileBuffer = fs.readFileSync(cachePath);
-      const publicUrl = await uploadToR2(fileBuffer, req.params.cacheId);
+      const publicUrl = await uploadToR2(fileBuffer, path.basename(cachePath));
       console.log(`[Re-upload] R2 OK → ${publicUrl.substring(0, 80)}...`);
       res.json({ url: publicUrl });
     } catch (error: any) {
@@ -1267,9 +1433,8 @@ async function startServer() {
           if (cacheRef || dataRef) {
             let buf: Buffer | null = null;
             if (cacheRef) {
-              const safe = String(cacheRef).replace(/[^a-zA-Z0-9._-]/g, '');
-              const p = path.join(CACHE_DIR, safe);
-              if (safe && fs.existsSync(p)) buf = fs.readFileSync(p);
+              const p = resolveMediaFile(cacheRef);
+              if (p) buf = fs.readFileSync(p);
             } else if (dataRef) {
               buf = Buffer.from(dataRef, 'base64');
             }

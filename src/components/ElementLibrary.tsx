@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useCallback, memo } from 'react';
 import { useAppStore, AssetCategory, ElementAsset, ElementImage, MODELS, modelImageMax, mentionKey, uniqueElementName, groupElementFiles } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Search, Trash2, Image as ImageIcon, Upload, Check, Link2, Pencil, Layers, User, MapPin, Package, AlertTriangle, Share2, Copy, Loader2 } from 'lucide-react';
-import { validateImageFile, validateImageDimensions, createThumbnail, readFileAsDataUrl, cacheFile, createElementPackLink, fetchElementPackByLink } from '../lib/utils';
+import { validateImageFile, validateImageDimensions, createThumbnail, createElementPackLink, fetchElementPackByLink, storeLibraryImage, libraryPreviewSrc, libraryImageDataUrl } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
 
 // Category visuals — shared with ChatArea mention pills. `accent` is the solid
@@ -29,12 +29,15 @@ const MAX_ELEMENT_IMAGES = 30;
 const BUNDLE_FORMAT = 'freewill-seedance-elements';
 type Bundle = { format: string; version: number; kind: 'collection' | 'asset'; collectionName?: string; assets: any[] };
 
-// Keep durable full-res base64 url + thumbnail so the bundle is self-contained
-// (recipient gets the actual images). Volatile ids/cacheId are dropped.
-const stripAssetForExport = (a: ElementAsset) => ({
-  category: a.category, name: a.name, description: a.description,
-  images: a.images.map(im => ({ url: im.url, thumbnailUrl: im.thumbnailUrl, file_name: im.file_name })),
-});
+// Keep the full-res ORIGINAL + thumbnail so the bundle is self-contained (recipient gets
+// the actual images). Volatile ids/cacheId/libId are dropped. 26.9.3001~ 원본은 라이브러리
+// 폴더에 있으므로 여기서 읽어 base64 로 담는다 — 팩 형식은 예전 그대로라 업데이트 안 한 앱과도
+// 주고받는다. 한 장씩 읽는다(한꺼번에 읽으면 큰 컬렉션이 통째로 메모리에 뜬다).
+const stripAssetForExport = async (a: ElementAsset) => {
+  const images: { url: string; thumbnailUrl: string; file_name?: string }[] = [];
+  for (const im of a.images) images.push({ url: await libraryImageDataUrl(im), thumbnailUrl: im.thumbnailUrl, file_name: im.file_name });
+  return { category: a.category, name: a.name, description: a.description, images };
+};
 
 // Parse + sanitize a bundle. Only data: image URLs are accepted (never remote/
 // script URLs); fresh image ids are assigned. Returns null if invalid/empty.
@@ -63,21 +66,20 @@ function parseBundle(text: string): { kind: 'collection' | 'asset'; collectionNa
   return { kind: b.kind === 'asset' ? 'asset' : 'collection', collectionName: typeof b.collectionName === 'string' ? b.collectionName : undefined, assets };
 }
 
-// Process a picked/dropped file into a durable ElementImage: small thumbnail (for
-// tiny prompt pills) + FULL-RES lossless base64 in `url` (durable source AND what
-// the cards/hover/editor display, so previews stay crisp) + opportunistic cacheId.
+// Process a picked/dropped file into an ElementImage: small thumbnail (for prompt pills
+// and the editor grid) + the ORIGINAL bytes stored as a file in the server library
+// (libId). 26.9.3001~ the original is never held in memory as base64 — cards and hover
+// load a JPG preview by URL (libraryPreviewSrc), and send/copy/share read the original
+// file untouched. storeLibraryImage verifies the server wrote every byte.
 async function fileToElementImage(file: File): Promise<ElementImage> {
   const sizeErr = validateImageFile(file);
   if (sizeErr) throw new Error(sizeErr);
   const dimErr = await validateImageDimensions(file);
   if (dimErr) throw new Error(dimErr);
   // 256, not the 80 default: the thumbnail is what the editor grid and the drop dialog
-  // actually paint now, and 80px was sized for prompt pills. Costs ~15KB per image in the
-  // persisted blob, against a full-res `url` measured in megabytes — noise.
-  const [thumbnailUrl, url] = await Promise.all([createThumbnail(file, 256), readFileAsDataUrl(file)]);
-  let cacheId: string | undefined;
-  try { cacheId = await cacheFile(file); } catch { /* cache is opportunistic — base64 is the durable source */ }
-  return { id: crypto.randomUUID(), url, thumbnailUrl, cacheId, ...(file.name ? { file_name: file.name } : {}) };
+  // actually paint, and 80px was sized for prompt pills. ~15KB per image — noise.
+  const [thumbnailUrl, libId] = await Promise.all([createThumbnail(file, 256), storeLibraryImage(file, file.name)]);
+  return { id: crypto.randomUUID(), libId, thumbnailUrl, ...(file.name ? { file_name: file.name } : {}) };
 }
 
 /* ─── Drag & drop intake: OS files → assets named after the files ─── */
@@ -436,7 +438,7 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, shareSec, on
             <div className="grid grid-cols-4 gap-2">
               {images.map(img => (
                 <div key={img.id} className="relative aspect-square rounded-[10px] overflow-hidden border border-gray-200 bg-gray-50 group">
-                  <HoverZoom className="block w-full h-full" src={img.thumbnailUrl || img.url} fullSrc={img.url}>
+                  <HoverZoom className="block w-full h-full" src={img.thumbnailUrl || img.url} fullSrc={libraryPreviewSrc(img)}>
                     <img src={img.thumbnailUrl || img.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover cursor-zoom-in" />
                   </HoverZoom>
                   <button onClick={() => setImages(prev => prev.filter(i => i.id !== img.id))}
@@ -612,12 +614,14 @@ const AssetCard = memo(function AssetCard({ asset, sharing, imagesReady, onOpen,
     <div onClick={() => onOpen(asset)} role="button"
       style={{ contentVisibility: 'auto', containIntrinsicSize: '260px 300px' } as any}
       className="text-left bg-white dark:bg-[#1c1c1e] rounded-xl border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all group cursor-pointer">
-      {/* Cover uses the FULL-RES url: the 80px/q0.5 thumbnailUrl was far too small for this
-          ~270px card and rendered visibly mushy (v26.7.2101 regression). loading="lazy" +
-          decoding="async" keeps only on-screen covers decoding, off the main thread. */}
+      {/* Cover uses the JPG preview, not the thumbnail: the 80px/q0.5 thumbnailUrl was far too
+          small for this ~270px card and rendered visibly mushy (v26.7.2101 regression). It used
+          to be the full-res original — a 5504px PNG decodes to 65MB per card. The preview
+          (long side 2048) is just as crisp here and loads by URL, so nothing sits in memory.
+          loading="lazy" + decoding="async" keeps only on-screen covers decoding. */}
       <div className="aspect-square bg-gray-50 relative overflow-hidden">
         {cover && imagesReady
-          ? <img src={cover.url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
+          ? <img src={libraryPreviewSrc(cover)} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200" />
           : <div className="w-full h-full flex items-center justify-center text-gray-300"><ImageIcon size={28} /></div>}
         <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ background: meta.bg, color: meta.text }}><CatIcon size={10} /> {meta.name}</span>
         {asset.images.length > 1 && <span className="absolute bottom-1.5 right-1.5 text-[10px] font-medium text-white bg-black/55 px-1.5 py-0.5 rounded-full">{asset.images.length}장</span>}
@@ -798,14 +802,16 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   // memo 가 매번 깨져서, 애초에 memo 를 단 이유(거대한 base64 diff 회피)가 사라진다.
   const openEditor = useCallback((a: ElementAsset) => setEditing(a), []);
   const removeAsset = useCallback((a: ElementAsset) => {
-    if (confirm(`'${a.name}' 어셋을 삭제할까요? (앱에 저장된 이미지도 함께 삭제)`)) deleteElementAsset(a.id);
+    if (confirm(`'${a.name}' 어셋을 삭제할까요?`)) deleteElementAsset(a.id);
   }, [deleteElementAsset]);
 
-  const shareBundle = useCallback(async (bundle: Bundle, key: string) => {
+  // build 는 원본을 라이브러리 폴더에서 읽어 팩을 만든다 — 시간이 걸리므로 '만드는 중' 표시 안에서 부른다.
+  const shareBundle = useCallback(async (build: () => Promise<Bundle>, key: string) => {
     setShareBusy(key); setShareMB(0); setShareSec(0);
     const t0 = Date.now();
     const tick = setInterval(() => setShareSec(Math.round((Date.now() - t0) / 1000)), 1000);
     try {
+      const bundle = await build();
       const url = await createElementPackLink(JSON.stringify(bundle), setShareMB);
       try { await navigator.clipboard.writeText(url); } catch { /* banner shows the link for manual copy */ }
       setShareLink(url);
@@ -819,10 +825,14 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   const shareCollection = (col: { id: string; name: string }) => {
     const assets = elementAssets.filter(a => a.collectionId === col.id);
     if (assets.length === 0) { alert('공유할 어셋이 없습니다.'); return; }
-    shareBundle({ format: BUNDLE_FORMAT, version: 1, kind: 'collection', collectionName: col.name, assets: assets.map(stripAssetForExport) }, 'col-' + col.id);
+    shareBundle(async (): Promise<Bundle> => {
+      const out = [];
+      for (const a of assets) out.push(await stripAssetForExport(a));   // 한 어셋씩
+      return { format: BUNDLE_FORMAT, version: 1, kind: 'collection', collectionName: col.name, assets: out };
+    }, 'col-' + col.id);
   };
   const shareAsset = useCallback((a: ElementAsset) => {
-    shareBundle({ format: BUNDLE_FORMAT, version: 1, kind: 'asset', collectionName: a.name, assets: [stripAssetForExport(a)] }, 'asset-' + a.id);
+    shareBundle(async (): Promise<Bundle> => ({ format: BUNDLE_FORMAT, version: 1, kind: 'asset', collectionName: a.name, assets: [await stripAssetForExport(a)] }), 'asset-' + a.id);
   }, [shareBundle]);
 
   // ─── Import (receiving end of a share link): link or file → placement choice ───
@@ -1063,7 +1073,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
               key="asset-editor"
               initial={editing === 'new' ? null : editing}
               onSave={commitSave}
-              onDelete={editing !== 'new' ? () => { if (confirm(`'${editing.name}' 어셋을 삭제할까요? (앱에 저장된 이미지도 함께 삭제)`)) { deleteElementAsset(editing.id); setEditing(null); } } : null}
+              onDelete={editing !== 'new' ? () => { if (confirm(`'${editing.name}' 어셋을 삭제할까요?`)) { deleteElementAsset(editing.id); setEditing(null); } } : null}
               onShare={editing !== 'new' ? () => shareAsset(editing) : null}
               sharing={editing !== 'new' && shareBusy === 'asset-' + editing.id}
               shareSec={shareSec}

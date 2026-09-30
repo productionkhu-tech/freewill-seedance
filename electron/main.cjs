@@ -26,7 +26,8 @@ function startServer() {
     const { spawn } = require('child_process');
     const proc = spawn('npx', ['tsx', 'server.ts'], {
       cwd: path.join(__dirname, '..'),
-      env: { ...process.env, NODE_ENV: 'development' },
+      // 백업 폴더는 아래 IPC 핸들러와 같은 곳이어야 한다(라이브러리 원본 백업을 서버가 쓴다).
+      env: { ...process.env, NODE_ENV: 'development', SEEDANCE_BACKUP_DIR: BACKUP_DIR },
       shell: true,
       stdio: 'pipe',
     });
@@ -42,6 +43,11 @@ function startServer() {
     // wipes on every install — that broke prompt-reuse for any reference older
     // than the most recent update.
     process.env.MEDIA_CACHE_DIR = path.join(app.getPath('userData'), 'media-cache');
+    // 어셋 라이브러리 원본도 userData 에 — media-cache 와 달리 아무도 자동으로 지우지 않는 폴더다.
+    process.env.ELEMENT_LIBRARY_DIR = path.join(app.getPath('userData'), 'element-library');
+    // 서버가 쓰는 백업(라이브러리 원본 복사)을 IPC 백업과 같은 폴더로. 서버 혼자 두면 os.homedir()
+    // 기준이라 Documents 가 OneDrive 로 옮겨진 PC 에서 두 곳으로 갈린다.
+    process.env.SEEDANCE_BACKUP_DIR = BACKUP_DIR;
     try {
       require(path.join(process.resourcesPath, 'server.cjs'));
       console.log('[Server] Started in production mode, cache at', process.env.MEDIA_CACHE_DIR);
@@ -124,10 +130,18 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error('[Renderer] gone:', details?.reason, details?.exitCode);
     if (app.isQuitting || details?.reason === 'clean-exit') return;
+    const m = lastRendererMem;
+    crashLog(`renderer gone: ${details?.reason} (exit ${details?.exitCode})`
+      + (m ? ` · 직전 메모리 ${m.priv || m.ws}MB, 최대 ${m.peak}MB (${Math.round((Date.now() - m.at) / 1000)}초 전 측정)` : '')
+      + ' → 창을 새로 만듦');
     try { mainWindow?.destroy(); } catch { /* 이미 사라졌으면 그대로 진행 */ }
     mainWindow = null;
     createWindow();
   });
+
+  // 멈춤도 같이 남긴다 — 죽지는 않았는데 한참 응답이 없는 것도 "꺼졌다 켜졌다" 로 보인다.
+  mainWindow.on('unresponsive', () => crashLog('window unresponsive'));
+  mainWindow.on('responsive', () => crashLog('window responsive again'));
 
   // The page failing to load leaves a window that is present but empty, which reads as
   // "the app opened and did nothing". Retry the local server rather than sit on it.
@@ -138,6 +152,40 @@ function createWindow() {
     setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(`http://localhost:${PORT}`); }, 1000);
   });
 }
+
+// ─── 화면 프로세스가 죽은 기록 ──────────────────────────────────────────────
+// 2026-09-28 "앱이 꺼졌다 켜진다" 는 렌더러가 죽고 위 핸들러가 창을 새로 만든 것이었다. 그런데 죽은
+// 이유(details.reason)는 console 로만 나가서, 패키지 앱에서는 아무 데도 남지 않았다 — 원인을 정황
+// (최대 5.5GB)으로만 말할 수 있었던 이유다. 이제 userData/crash.log 에 남긴다. updater.log 와 같은 모양.
+const CRASH_LOG_MAX = 256 * 1024;
+function crashLog(msg) {
+  try {
+    const p = path.join(app.getPath('userData'), 'crash.log');
+    try { if (fs.statSync(p).size > CRASH_LOG_MAX) fs.unlinkSync(p); } catch {}
+    fs.appendFileSync(p, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {}
+  console.error('[Crash]', msg);
+}
+// 죽은 뒤에는 잴 수 없으므로 살아 있을 때 재 둔 값을 함께 남긴다(MB).
+let lastRendererMem = null;
+function sampleRendererMemory() {
+  try {
+    const pid = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getOSProcessId() : 0;
+    const m = pid && app.getAppMetrics().find((p) => p.pid === pid);
+    if (m && m.memory) {
+      lastRendererMem = {
+        at: Date.now(),
+        ws: Math.round(m.memory.workingSetSize / 1024),
+        peak: Math.round(m.memory.peakWorkingSetSize / 1024),
+        priv: Math.round((m.memory.privateBytes || 0) / 1024),
+      };
+    }
+  } catch {}
+}
+app.on('child-process-gone', (_e, d) => {
+  if (!d || d.reason === 'clean-exit' || app.isQuitting) return;
+  crashLog(`child gone: ${d.type}${d.name ? '/' + d.name : ''} ${d.reason} (exit ${d.exitCode})`);
+});
 
 // ─── Tray ───
 function createTray() {
@@ -463,10 +511,14 @@ ipcMain.handle('backup-save-elements-chunk', async (_e, index, content, total, c
     if (index === total - 1) {
       // Manifest last — until it lands, a partial run is simply not a valid backup.
       writeAtomic(ELEMENTS_MANIFEST_PATH, JSON.stringify({ v: 2, chunks: total, count, savedAt: Date.now() }));
-      // Sweep chunk files left over from a previously larger library.
-      for (let i = total; i < total + 40; i++) {
-        try { if (fs.existsSync(elementsChunkPath(i))) fs.unlinkSync(elementsChunkPath(i)); } catch {}
-      }
+      // Sweep chunk files left over from a previously larger library — ALL of them, not just
+      // the next 40: 26.9.3001 의 원본 옮기기는 53조각 → 1조각으로 한 번에 줄인다(server.ts 도 같다).
+      try {
+        for (const f of fs.readdirSync(BACKUP_DIR)) {
+          const m = /^seedance-elements-(\d{3,})\.json$/.exec(f);
+          if (m && Number(m[1]) >= total) { try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch {} }
+        }
+      } catch {}
       // The old single-file library backup is now redundant (~500MB reclaimed).
       try { if (fs.existsSync(ELEMENTS_BACKUP_PATH)) fs.unlinkSync(ELEMENTS_BACKUP_PATH); } catch {}
     }
@@ -604,6 +656,7 @@ app.on('ready', () => {
   createWindow();
   createTray();
   setupAutoUpdater();
+  setInterval(sampleRendererMemory, 30 * 1000);   // crash.log 에 남길 직전 메모리
 });
 
 // Launching again while an instance holds the lock must ALWAYS put a window on screen —

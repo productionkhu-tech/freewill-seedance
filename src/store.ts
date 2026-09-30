@@ -1,8 +1,8 @@
 import { create } from 'zustand';
 import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
-import { get, set, del } from 'idb-keyval';
-import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS } from './lib/utils';
+import { get, set, del, keys } from 'idb-keyval';
+import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail } from './lib/utils';
 import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
@@ -86,10 +86,16 @@ async function writeElementsChunked(assets: ElementAsset[]): Promise<void> {
   // reader keeps using whatever was there before.
   const man: ElementsManifest = { v: 2, chunks: parts.length, count: assets.length, savedAt: Date.now() };
   await set(ELEMENTS_MANIFEST, JSON.stringify(man));
-  // Drop chunks left over from a previously longer library.
-  for (let i = parts.length; i < parts.length + 40; i++) {
-    try { await del(ELEMENTS_CHUNK + i); } catch { /* absent is fine */ }
-  }
+  // Drop chunks left over from a previously longer library — ALL of them. This used to sweep
+  // only the next 40 indices, which was enough while the library only ever grew or shrank a
+  // little. 26.9.3001 의 원본 옮기기는 목록을 53조각 → 1조각으로 한 번에 줄인다 — 40개만 지우면
+  // 41~52번(약 300MB)이 영영 남았다(격리 실측 2026-09-30). 키 목록을 한 번 읽어 전부 지운다.
+  try {
+    for (const k of await keys()) {
+      const m = typeof k === 'string' ? /^seedance-elements-chunk-(\d+)$/.exec(k) : null;
+      if (m && Number(m[1]) >= parts.length) await del(k);
+    }
+  } catch { /* 다음 저장 때 다시 */ }
   // Only now is the v1 blob redundant. Removing it reclaims ~500MB and stops the next
   // launch from having two sources of truth.
   try { if (await get(ELEMENTS_KEY)) await del(ELEMENTS_KEY); } catch { /* leave it */ }
@@ -124,7 +130,87 @@ function scheduleElementsSave(assets: ElementAsset[]) {
   elementsTimer = setTimeout(() => {
     const a = pendingElements; pendingElements = null;
     if (a) void saveElements(a);
-  }, DEBOUNCE_MS);
+  // 원본 옮기는 중에는 어셋 하나 끝날 때마다 목록이 바뀐다. 그때마다 아직 base64 가 남은 무거운
+  // 목록을 통째로 쓰지 않도록, 옮기기가 잠잠해진 뒤(=대개 다 끝난 뒤) 한 번만 쓴다.
+  }, libMigrating ? 10_000 : DEBOUNCE_MS);
+}
+
+// ─── 어셋 라이브러리 원본 → 파일 (26.9.3001~) ───────────────────────────────────
+// 옛 어셋은 원본을 base64(url)로 스토어에 들고 있다 — 112개에 1.38GB, 그게 렌더러를 죽였다
+// (2026-09-28, 최대 5.5GB). 하나씩 서버 라이브러리 폴더에 파일로 넣고, 서버가 받은 크기가 보낸
+// 크기와 같을 때만 url 을 뗀다. 중간에 앱을 꺼도 안 옮겨진 것은 url 이 그대로라 다음 실행에 이어서
+// 한다. 공유 팩을 가져와도 같은 길로 들어온다(가져온 어셋은 url 을 들고 온다).
+// 백업: 원본 파일이 백업 폴더에 먼저 들어가야(syncLibraryBackup) 목록 백업이 새 모양으로 바뀐다
+// (runBackup). 그 전까지 백업 폴더의 옛 목록(원본 base64 포함)은 그대로 남아 있다.
+const isLegacyImage = (im: ElementImage) => !im.libId && typeof im.url === 'string' && im.url.startsWith('data:');
+// 썸네일이 이보다 크면 원본이 썸네일 자리에 들어앉은 것이다(썸네일 없는 공유 팩) — 새로 만든다.
+const THUMB_SANE_MAX = 300 * 1024;
+
+let libMigrating = false;
+let libMigrateAgain = false;
+let libMigrateTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleLibraryMigration(delay = 1500) {
+  if (libMigrateTimer) clearTimeout(libMigrateTimer);
+  libMigrateTimer = setTimeout(() => { libMigrateTimer = null; void migrateLibraryImages(); }, delay);
+}
+
+function extForMime(type: string): string {
+  if (type === 'image/jpeg') return '.jpg';
+  if (type === 'image/webp') return '.webp';
+  if (type === 'image/gif') return '.gif';
+  if (type === 'image/bmp') return '.bmp';
+  return '.png';
+}
+
+async function migrateLibraryImages(): Promise<void> {
+  if (libMigrating) { libMigrateAgain = true; return; }
+  libMigrating = true;
+  let moved = 0, failed = 0;
+  try {
+    do {
+      libMigrateAgain = false;
+      const pending = useAppStore.getState().elementAssets.filter(a => a.images.some(isLegacyImage));
+      for (const a of pending) {
+        const done = new Map<string, ElementImage>();
+        for (const im of a.images) {
+          if (!isLegacyImage(im)) continue;
+          try {
+            const blob = await (await fetch(im.url!)).blob();
+            const name = im.file_name || `element${extForMime(blob.type)}`;
+            const libId = await storeLibraryImage(blob, name);   // 원본 저장 + 크기 확인 + 미리보기
+            let thumbnailUrl = im.thumbnailUrl;
+            if (!thumbnailUrl || thumbnailUrl.length > THUMB_SANE_MAX) {
+              thumbnailUrl = await createThumbnail(new File([blob], name, { type: blob.type }), 256);
+            }
+            const { url: _movedToDisk, ...rest } = im;
+            done.set(im.id, { ...rest, libId, thumbnailUrl });
+            moved++;
+          } catch (err) {
+            failed++;
+            console.warn(`[Library] '${a.name}' 이미지 옮기기 실패 — 원본을 그대로 두고 다음에 다시 한다:`, err);
+          }
+        }
+        if (done.size) {
+          // 옮기는 사이 사용자가 이 어셋을 고쳤을 수 있다 — 지금 상태에서 옮긴 이미지만 바꾼다.
+          useAppStore.setState(s => ({
+            elementAssets: s.elementAssets.map(x => x.id !== a.id ? x
+              : { ...x, images: x.images.map(im => done.get(im.id) ?? im) }),
+          }));
+        }
+      }
+    } while (libMigrateAgain);
+  } finally {
+    libMigrating = false;
+  }
+  if (moved || failed) {
+    console.log(`[Library] 원본 ${moved}장을 파일로 옮김${failed ? `, ${failed}장 실패(다음에 다시)` : ''}`);
+    // 옮긴 원본을 바로 백업 폴더에도 넣는다 — 다음 백업 주기(최대 15분)까지 한 곳에만 있지 않게.
+    const ids = [...new Set(useAppStore.getState().elementAssets.flatMap(x => x.images.map(i => i.libId).filter(Boolean) as string[]))];
+    if (ids.length) void syncLibraryBackup(ids);
+    // 옮기는 동안 미뤄 둔 목록 저장을 지금 한다(가벼워진 목록으로).
+    if (pendingElements) scheduleElementsSave(pendingElements);
+  }
 }
 
 // The one write path. Chunked, serialized against itself, and loud on failure — the v1
@@ -292,10 +378,23 @@ function runBackup() {
   // ── The library second, chunked, best-effort ───────────────────────────────
   // Same chunking as IDB: no whole-library string is ever built, so the library can
   // grow past 512MB without the backup quietly dying the way it did before.
-  // Skipped when unchanged — this is half a gigabyte of disk writes.
+  // Skipped when unchanged. 26.9.3001~ 목록에는 원본이 없어(libId 만) 작다 — 원본 파일은 따로
+  // 백업 폴더의 element-library/ 로 간다(아래 sync).
   void (async () => {
     try {
       const els = st.elementAssets || [];
+      // ★ 원본 파일이 백업 폴더에 먼저 있어야 한다. 목록은 libId 만 들고 있으므로, 원본이 백업에 없는
+      //   채로 목록만 새로 쓰면 그 백업으로 되살린 라이브러리는 그림이 없다. 채우지 못하면 이번에는
+      //   목록을 쓰지 않는다 — 백업 폴더의 이전 목록(옛 모양이면 원본 base64 포함)이 남는 편이 낫다.
+      const libIds: string[] = [...new Set<string>((els as ElementAsset[]).flatMap(a => a.images.map(i => i.libId).filter(Boolean) as string[]))];
+      if (libIds.length) {
+        const sync = await syncLibraryBackup(libIds);
+        if (!sync?.ok || (sync.missing && sync.missing.length)) {
+          console.warn('[Backup] library originals not all in the backup folder — keeping the previous library backup:',
+            sync?.error || `${sync?.missing?.length} missing`);
+          return;
+        }
+      }
       const parts = buildElementChunks(els);
       const sig = parts.length + ':' + parts.reduce((n, p) => n + p.length, 0);
       if (sig === lastBackedUpElements) return;
@@ -475,9 +574,15 @@ export type AssetCategory = 'character' | 'location' | 'prop';
 
 export interface ElementImage {
   id: string;
-  url: string;          // full-res base64 data URL — durable source (backed up)
+  // 원본. 26.9.3001~ 서버 라이브러리 폴더의 파일 이름(내용 md5 앞 12자리 + 확장자). 보내기·복사·
+  // 공유는 이 파일 바이트 그대로 나간다. 화면은 JPG 미리보기(libraryPreviewSrc)를 주소로 불러온다.
+  libId?: string;
+  // 옛 방식의 원본 base64 data URL. 옮기기(migrateLibraryImages)가 원본을 파일로 넣은 뒤 지운다 —
+  // 이게 스토어에 남아 있으면 그만큼 화면 메모리를 먹는다(2026-09-28 렌더러 사망의 원인).
+  // 새로 만드는 이미지에는 넣지 않는다. 공유 팩을 가져올 때 잠깐 들고 오는 것만 있다.
+  url?: string;
   thumbnailUrl: string; // small base64 preview for the UI
-  cacheId?: string;     // opportunistic media-cache id for the fast send path
+  cacheId?: string;     // opportunistic media-cache id (옛 어셋의 보내기 대체 경로)
   file_name?: string;
 }
 
@@ -2392,6 +2497,8 @@ export const useAppStore = create<AppState>()(
           void loadElementAssets(legacy).then(assets => {
             lastElements = assets;             // seed BEFORE the flag so the subscriber
             useAppStore.setState({ elementAssets: assets, _elementsHydrated: true });
+            // 옛 어셋의 원본을 파일로 옮긴다(한 번). 첫 화면이 뜬 뒤에 천천히.
+            if (assets.some(a => a.images.some(isLegacyImage))) scheduleLibraryMigration(3000);
           }).catch(err => {
             console.error('[Elements] load failed — keeping legacy copy in memory:', err);
             lastElements = legacy;
@@ -2412,4 +2519,6 @@ useAppStore.subscribe((state) => {
   if (state.elementAssets === lastElements) return;
   lastElements = state.elementAssets;
   scheduleElementsSave(state.elementAssets);
+  // 공유 팩 가져오기처럼 원본 base64 를 들고 들어온 어셋이 있으면 파일로 옮긴다.
+  if (state.elementAssets.some(a => a.images.some(isLegacyImage))) scheduleLibraryMigration();
 });

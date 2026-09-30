@@ -517,6 +517,94 @@ export async function dataUrlToFile(dataUrl: string, name: string): Promise<File
   return new File([blob], name, { type: blob.type || 'image/png' });
 }
 
+// ─── 어셋 라이브러리 원본 · 미리보기 (26.9.3001~) ─────────────────────────────────
+// 원본은 서버의 라이브러리 폴더에 파일로 산다(libId = 내용 md5 앞 12자리 + 확장자). 화면(렌더러)
+// 메모리에는 작은 썸네일만 두고, 크게 보여 줄 때는 JPG 미리보기를 주소로 불러온다 — 필요할 때만
+// 디코딩되고 안 보이면 버려진다. 예전처럼 원본 base64 를 스토어에 들고 있으면 112개에 1.38GB 였고,
+// 백업이 그걸 한 벌 더 만들다 렌더러가 죽었다(2026-09-28, 최대 5.5GB).
+// ★ 보내기·복사·공유 팩은 언제나 원본 바이트 그대로다. 미리보기는 화면용일 뿐이다.
+type LibraryImageRef = { libId?: string; url?: string; file_name?: string };
+
+// 미리보기 크기. 카드(~270px)·마우스 확대에 충분하고, 원본(5504px PNG 한 장 디코딩 65MB)보다
+// 훨씬 가볍다. 바꾸면 PREVIEW_VERSION 도 올릴 것 — 주소가 같으면 캐시된 옛 미리보기가 나온다.
+export const LIBRARY_PREVIEW_MAX = 2048;
+const LIBRARY_PREVIEW_QUALITY = 0.9;
+const PREVIEW_VERSION = 1;
+
+export function libraryPreviewSrc(img: LibraryImageRef | undefined | null): string {
+  if (!img) return '';
+  if (img.libId) return `/api/library/${img.libId}/preview?v=${PREVIEW_VERSION}`;
+  return img.url || '';                                 // 아직 옮기기 전인 옛 어셋
+}
+
+export function libraryOriginalSrc(img: LibraryImageRef | undefined | null): string {
+  if (!img) return '';
+  if (img.libId) return `/api/library/${img.libId}`;
+  return img.url || '';
+}
+
+// 화면용 JPG. 투명한 부분은 검정으로 채운다(JPG 에는 투명이 없다). 원본 픽셀은 건드리지 않는다.
+export async function makeJpegPreview(src: Blob, maxSide = LIBRARY_PREVIEW_MAX): Promise<Blob> {
+  const probe = await createImageBitmap(src);
+  const k = Math.min(1, maxSide / Math.max(probe.width, probe.height));
+  const w = Math.max(1, Math.round(probe.width * k));
+  const h = Math.max(1, Math.round(probe.height * k));
+  probe.close();
+  const bmp = await createImageBitmap(src, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
+  try {
+    const canvas = new OffscreenCanvas(w, h);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas 2d unavailable');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bmp, 0, 0);
+    return await canvas.convertToBlob({ type: 'image/jpeg', quality: LIBRARY_PREVIEW_QUALITY });
+  } finally { bmp.close(); }
+}
+
+// 원본을 라이브러리에 넣고 libId 를 돌려준다. 서버가 쓴 크기가 보낸 크기와 같아야 성공이다 —
+// 부르는 쪽(옮기기)은 이게 성공한 뒤에만 메모리의 원본을 놓는다. 미리보기는 실패해도 괜찮다
+// (서버가 원본을 대신 보여 준다).
+export async function storeLibraryImage(blob: Blob, name: string): Promise<string> {
+  const res = await fetch('/api/library', {
+    method: 'POST',
+    headers: { 'Content-Type': blob.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(name || 'image') },
+    body: blob,
+  });
+  const j = await res.json().catch(() => null);
+  if (!res.ok || !j?.ok || !j.libId) throw new Error(j?.error || `원본 저장 실패 (${res.status})`);
+  if (j.bytes !== blob.size) throw new Error(`원본 저장 확인 실패 (보낸 ${blob.size}B, 저장 ${j.bytes}B)`);
+  try {
+    const pv = await makeJpegPreview(blob);
+    await fetch(`/api/library/${j.libId}/preview`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: pv });
+  } catch (e) { console.warn('[Library] preview failed (원본은 저장됨):', e); }
+  return j.libId as string;
+}
+
+// 공유 팩용: 원본을 data URL 로. 팩 형식은 예전 그대로라 업데이트 안 한 앱과도 주고받는다.
+export async function libraryImageDataUrl(img: LibraryImageRef): Promise<string> {
+  if (!img.libId) return img.url || '';
+  const res = await fetch(`/api/library/${img.libId}`);
+  if (!res.ok) throw new Error(`원본을 읽지 못했습니다 (${res.status})`);
+  const blob = await res.blob();
+  return await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+// 백업 폴더에 원본을 채운다(서버가 이미 있는 건 건너뛴다). 라이브러리 목록 백업보다 먼저.
+export async function syncLibraryBackup(ids: string[]): Promise<{ ok: boolean; copied?: number; missing?: string[]; error?: string }> {
+  try {
+    const r = await fetch('/api/library/backup-sync', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
 // Upload an element asset-pack JSON bundle to R2 (via the server) and get back a
 // time-limited (7-day) download link to share. Content-Type octet-stream so the
 // server's route-level raw parser handles it (not the json parser).
