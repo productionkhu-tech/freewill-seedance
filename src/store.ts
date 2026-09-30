@@ -2514,6 +2514,51 @@ export const useAppStore = create<AppState>()(
 // path at once (addElementAsset / updateElementAsset / deleteElementAsset /
 // deleteCollection / 가져오기), because each rebuilds the array. Gated on
 // _elementsHydrated so the empty pre-load state can never overwrite stored assets.
+// ─── 프로젝트 뒤로/앞으로 — 마우스 MB4/MB5 (26.9.3002~) ─────────────────────────────
+// 마지막으로 오간 두 프로젝트 사이만 오간다(프리미어·일러스트의 언두/리두처럼, 와리가리).
+//   A → B 로 옮기면 쌍은 [A, B], 지금 B.  뒤로 → A.  A 에서 또 뒤로 → 아무 일 없음.
+//   앞으로 → B.  B 에서 또 앞으로 → 아무 일 없음.  몇 번을 오가든 쌍은 마지막 한 번의 이동이다.
+// 쌍을 만드는 것은 사용자가 프로젝트를 바꾼 모든 경우(목록 클릭·새 프로젝트·갤러리에서 이동)다.
+// 뒤로/앞으로 자체는 쌍을 바꾸지 않고 자리(navAt)만 옮긴다. 켜질 때 되살린 선택, 지운 프로젝트
+// 때문에 바뀐 선택은 이동으로 치지 않는다. 저장하지 않는다 — 앱을 새로 켜면 비어 있다.
+let navPair: [string, string] | null = null;
+let navAt: 0 | 1 = 1;
+// 방금 뒤로/앞으로로 간 프로젝트. ChatArea 가 이걸 보고 맨 아래 대신 보던 자리로 스크롤한다.
+let navByHistory: { id: string; at: number } | null = null;
+let navLastProjectId: string | null = null;
+
+export function navigateProjectHistory(dir: -1 | 1): boolean {
+  if (!navPair) return false;
+  if ((dir === -1 && navAt !== 1) || (dir === 1 && navAt !== 0)) return false;   // 끝이면 아무 일 없음
+  const st = useAppStore.getState();
+  const target = navPair[dir === -1 ? 0 : 1];
+  if (!st.projects.some(p => p.id === target)) return false;                     // 그새 지워졌다
+  navAt = dir === -1 ? 0 : 1;
+  if (target === st.currentProjectId) return false;
+  navByHistory = { id: target, at: Date.now() };
+  st.setCurrentProjectId(target);
+  return true;
+}
+
+// ChatArea 가 프로젝트를 그린 직후 한 번 묻는다: 이번 전환이 뒤로/앞으로였나.
+export function consumeHistoryNav(projectId: string | null): boolean {
+  const hit = !!projectId && !!navByHistory && navByHistory.id === projectId && Date.now() - navByHistory.at < 3000;
+  navByHistory = null;
+  return hit;
+}
+
+useAppStore.subscribe((state) => {
+  const cur = state.currentProjectId;
+  if (cur === navLastProjectId) return;
+  const prev = navLastProjectId;
+  navLastProjectId = cur;
+  if (navByHistory && navByHistory.id === cur) return;       // 뒤로/앞으로가 만든 전환 — 쌍은 그대로
+  if (!state._hasHydrated || !prev || !cur) return;          // 켜질 때 되살린 선택
+  if (!state.projects.some(p => p.id === prev) || !state.projects.some(p => p.id === cur)) return;
+  navPair = [prev, cur];
+  navAt = 1;
+});
+
 useAppStore.subscribe((state) => {
   if (!state._elementsHydrated) return;
   if (state.elementAssets === lastElements) return;

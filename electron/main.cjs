@@ -139,6 +139,13 @@ function createWindow() {
     createWindow();
   });
 
+  // 마우스 옆 버튼(MB4/MB5)이 드라이버에 따라 마우스 이벤트가 아니라 앱 명령으로 온다 — 화면으로
+  // 넘겨서 프로젝트 뒤로/앞으로에 쓴다(ChatArea). 마우스 이벤트로도 오면 두 번 오지만 괜찮다.
+  mainWindow.on('app-command', (_e, cmd) => {
+    if (cmd !== 'browser-backward' && cmd !== 'browser-forward') return;
+    try { mainWindow?.webContents.send('app-command', cmd); } catch { /* 창이 닫히는 중 */ }
+  });
+
   // 멈춤도 같이 남긴다 — 죽지는 않았는데 한참 응답이 없는 것도 "꺼졌다 켜졌다" 로 보인다.
   mainWindow.on('unresponsive', () => crashLog('window unresponsive'));
   mainWindow.on('responsive', () => crashLog('window responsive again'));

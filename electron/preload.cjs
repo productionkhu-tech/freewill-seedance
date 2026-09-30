@@ -20,6 +20,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onDownloadStarted: (cb) => ipcRenderer.on('download-started', (_e, payload) => cb(payload)),
   onDownloadProgress: (cb) => ipcRenderer.on('download-progress', (_e, payload) => cb(payload)),
   onDownloadDone: (cb) => ipcRenderer.on('download-done', (_e, payload) => cb(payload)),
+  // 마우스 옆 버튼이 Windows '앱 명령'(browser-backward/forward)으로 오는 경우 — 프로젝트 뒤로/앞으로.
+  // 해제 함수를 돌려준다(창이 새로 만들어질 때 겹쳐 쌓이지 않게).
+  onAppCommand: (cb) => {
+    const h = (_e, cmd) => cb(cmd);
+    ipcRenderer.on('app-command', h);
+    return () => ipcRenderer.removeListener('app-command', h);
+  },
   // External backup mirror — Documents/Freewill Seedance Backup/seedance-backup.json
   // kind: 'state' (default, the work history — small, must never fail) | 'elements'
   backupSave: (content, kind) => ipcRenderer.invoke('backup-save', content, kind),

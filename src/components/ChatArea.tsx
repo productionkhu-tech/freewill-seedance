@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft } from '../store';
+import { useAppStore, navigateProjectHistory, consumeHistoryNav, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -1367,6 +1367,35 @@ export function ChatArea() {
     syncMentionCount();
   }, [elementById]);
 
+  // ─── 뒤로/앞으로(MB4/MB5)로 돌아왔을 때 '보던 자리' (26.9.3002~) ────────────────
+  // 프로젝트마다 보던 자리를 기억한다: 화면 맨 위에 걸친 메시지와, 그 메시지가 화면 위에서 얼마나
+  // 떨어져 있었는지. 픽셀(scrollTop)만 기억하면 카드의 포스터·영상이 늦게 로드되며 높이가 바뀔 때
+  // 엉뚱한 곳으로 간다. 바닥에 있었으면 '바닥' 으로 기억한다(그 사이 새 컷이 생겼으면 그것까지 보이게).
+  // 클릭으로 옮길 때는 쓰지 않는다 — 그때는 예전처럼 맨 아래다.
+  type ScrollMemo = { atBottom: boolean; anchorId?: string; offset: number; top: number };
+  const scrollMemoRef = useRef(new Map<string, ScrollMemo>());
+  const shownProjectIdRef = useRef<string | null>(null);   // 지금 목록에 그려진 프로젝트
+  const memoRafRef = useRef(0);
+  const rememberScroll = useCallback(() => {
+    if (memoRafRef.current) return;                        // 한 프레임에 한 번만
+    memoRafRef.current = requestAnimationFrame(() => {
+      memoRafRef.current = 0;
+      const el = messagesScrollRef.current, pid = shownProjectIdRef.current;
+      if (!el || !pid) return;
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < 40) {
+        scrollMemoRef.current.set(pid, { atBottom: true, offset: 0, top: el.scrollTop });
+        return;
+      }
+      const top = el.getBoundingClientRect().top;
+      let anchorId: string | undefined, offset = 0;
+      for (const node of el.querySelectorAll<HTMLElement>('[id^="msg-"]')) {
+        const r = node.getBoundingClientRect();
+        if (r.bottom > top + 1) { anchorId = node.id.slice(4); offset = r.top - top; break; }
+      }
+      scrollMemoRef.current.set(pid, { atBottom: false, anchorId, offset, top: el.scrollTop });
+    });
+  }, []);
+
   const handleMessagesScroll = useCallback(() => {
     if (messagesScrollRef.current) {
       const el = messagesScrollRef.current;
@@ -1375,7 +1404,8 @@ export function ChatArea() {
       const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       setShowScrollBottom(distFromBottom > 300);
     }
-  }, []);
+    rememberScroll();
+  }, [rememberScroll]);
 
   // 잠깐 동안 바닥에 붙여둔다. 한 번만 맞추면 모자라다 — 카드의 포스터와 영상이
   // 뒤늦게 로드되며 높이가 계속 자라서, 그 순간 맞춘 위치가 곧 중간이 된다.
@@ -1422,15 +1452,97 @@ export function ChatArea() {
     requestAnimationFrame(step);
   }, []);
 
+  // 기억해 둔 자리로 되돌린다. 카드가 뒤늦게 로드되며 높이가 바뀌어도 잠깐 그 자리를 붙든다 —
+  // pinToBottom 과 같은 방식이고, 사용자가 휠을 굴리거나 손가락을 대면 즉시 놓는다.
+  const restoreScroll = useCallback((memo: ScrollMemo, ms = 700) => {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    pinReleaseRef.current?.();
+    let stop = false;
+    const release = () => { stop = true; };
+    const done = () => {
+      el.removeEventListener('wheel', release);
+      el.removeEventListener('touchstart', release);
+    };
+    pinReleaseRef.current = () => { stop = true; done(); };
+    el.addEventListener('wheel', release, { once: true, passive: true });
+    el.addEventListener('touchstart', release, { once: true, passive: true });
+    const apply = () => {
+      const cur = messagesScrollRef.current;
+      if (!cur) return;
+      const node = memo.anchorId ? document.getElementById(`msg-${memo.anchorId}`) : null;
+      if (node && cur.contains(node)) {
+        const delta = (node.getBoundingClientRect().top - cur.getBoundingClientRect().top) - memo.offset;
+        if (Math.abs(delta) > 0.5) cur.scrollTo({ top: cur.scrollTop + delta, behavior: 'instant' as ScrollBehavior });
+      } else {
+        // 그 메시지가 그새 지워졌거나 검색으로 가려졌으면 픽셀 위치로라도.
+        cur.scrollTo({ top: memo.top, behavior: 'instant' as ScrollBehavior });
+      }
+    };
+    apply();
+    const t0 = Date.now();
+    const step = () => {
+      if (stop || !messagesScrollRef.current) { done(); return; }
+      apply();
+      if (Date.now() - t0 < ms) requestAnimationFrame(step);
+      else done();
+    };
+    requestAnimationFrame(step);
+  }, []);
+
   // 그려지기 전에 먼저 바닥으로 보낸다. useEffect 는 그린 뒤에 돌기 때문에, 거기서
   // 옮기면 '위에 있다가 아래로 내려가는' 한 프레임이 실제로 보인다. useLayoutEffect
   // 는 페인트 전이라 처음부터 맨 아래로 그려진다 — 켜면 이미 맨 아래인 상태가 된다.
+  // ★ 예외 하나: 뒤로/앞으로(MB4/MB5)로 온 것이면 맨 아래가 아니라 보던 자리로 간다.
   useLayoutEffect(() => {
     const el = messagesScrollRef.current;
+    shownProjectIdRef.current = currentProjectId;
+    const memo = consumeHistoryNav(currentProjectId) && currentProjectId
+      ? scrollMemoRef.current.get(currentProjectId) : undefined;
+    if (el && memo && !memo.atBottom) { restoreScroll(memo); return; }
     if (el) jumpToBottom(el);
     pinToBottom();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProjectId]);
+
+  // ─── 마우스 뒤로(MB4)/앞으로(MB5) — 마지막 두 프로젝트 사이 와리가리 (26.9.3002~) ───
+  // 같은 동작을 Alt+←/→ 로도 한다(옆 버튼 없는 마우스·노트북, 그리고 시험용). 마우스 드라이버에
+  // 따라(로지텍 소프트웨어 등) 옆 버튼이 마우스 이벤트가 아니라 Windows '앱 명령'
+  // (browser-backward)으로 오기도 해서 그것도 받는다(main.cjs → preload). 한 번 누른 게 두 경로로
+  // 두 번 와도 괜찮다 — 뒤로 끝에서 또 뒤로는 아무 일도 없다. 규칙은 store.ts navigateProjectHistory.
+  useEffect(() => {
+    const go = (dir: -1 | 1) => { navigateProjectHistory(dir); };
+    const onMouse = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      e.preventDefault();                  // 페이지 자체의 뒤로가기 같은 기본 동작은 막는다
+      if (e.type === 'mouseup') go(e.button === 3 ? -1 : 1);
+    };
+    const isMac = /Mac/i.test(navigator.platform || navigator.userAgent);
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.repeat) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      // 맥의 Option+←/→ 는 단어 단위 커서 이동이다 — 글을 쓰는 중에는 건드리지 않는다.
+      const t = e.target as HTMLElement | null;
+      if (isMac && t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      e.preventDefault();
+      go(e.key === 'ArrowLeft' ? -1 : 1);
+    };
+    window.addEventListener('mousedown', onMouse, true);
+    window.addEventListener('mouseup', onMouse, true);
+    window.addEventListener('auxclick', onMouse, true);
+    window.addEventListener('keydown', onKey, true);
+    const off = (window as any).electronAPI?.onAppCommand?.((cmd: string) => {
+      if (cmd === 'browser-backward') go(-1);
+      else if (cmd === 'browser-forward') go(1);
+    });
+    return () => {
+      window.removeEventListener('mousedown', onMouse, true);
+      window.removeEventListener('mouseup', onMouse, true);
+      window.removeEventListener('auxclick', onMouse, true);
+      window.removeEventListener('keydown', onKey, true);
+      if (typeof off === 'function') off();
+    };
+  }, []);
 
   const scrollToTop = () => { pinReleaseRef.current?.(); messagesScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' }); };
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
