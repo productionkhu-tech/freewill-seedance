@@ -175,7 +175,8 @@ export function buildAgentManual(appVersion: string): AgentManual {
     rules: RULES,
     models,
   };
-  const version = `${appVersion}+${fingerprint(JSON.stringify(manual))}`;
+  // 구분자는 - — + 는 주소(쿼리)에 넣으면 공백으로 바뀌어 버전이 어긋난다(PowerShell 로 시험하다 걸림).
+  const version = `${appVersion}-${fingerprint(JSON.stringify(manual))}`;
   return { version, manual: { ...manual, version }, text: manualText(manual, version) };
 }
 
