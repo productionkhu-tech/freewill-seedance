@@ -561,7 +561,10 @@ ipcMain.handle('backup-load', async () => {
     const stateSize = fs.statSync(path_).size;
     if (stateSize > STATE_RESTORE_MAX) {
       console.warn(`[Backup] ${path_} is ${(stateSize / 1048576).toFixed(0)}MB — too large to load safely; skipping restore.`);
-      return { ok: true, content: null, stateSkipped: true, stateBytes: stateSize, path: path_ };
+      // 상태는 못 넘겨도 어셋 목록은 조각이라 넘길 수 있다 — 클라이언트가 따로 되살린다(26.10.201~).
+      let elementsChunks = 0, elementsCount = 0;
+      try { const man = JSON.parse(fs.readFileSync(ELEMENTS_MANIFEST_PATH, 'utf8')); if (man && man.chunks > 0) { elementsChunks = man.chunks; elementsCount = man.count || 0; } } catch {}
+      return { ok: true, content: null, stateSkipped: true, stateBytes: stateSize, path: path_, elementsChunks, elementsCount };
     }
     const content = fs.readFileSync(path_, 'utf8');
     // ★ The library is only handed over when it is SMALL ENOUGH TO SURVIVE THE TRIP.

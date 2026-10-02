@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del, keys } from 'idb-keyval';
-import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail } from './lib/utils';
+import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail, makeJpegPreview } from './lib/utils';
 import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
@@ -217,6 +217,7 @@ async function migrateLibraryImages(): Promise<void> {
 // version threw synchronously inside a timer, which no .catch could see, so saving just
 // stopped without a word.
 function saveElements(assets: ElementAsset[]): Promise<void> {
+  if (persistBlocked) return elementsWriteChain;   // 읽지 못한 기록을 지키는 중
   elementsWriteChain = elementsWriteChain
     .catch(() => {})                       // a previous failure must not block later saves
     .then(() => writeElementsChunked(assets))
@@ -331,6 +332,7 @@ let lastBackupAt = 0;
 
 // 백업을 실제로 수행한다. 타이머가 부르거나, 창을 숨길 때 flushBackup 이 부른다.
 function runBackup() {
+  if (persistBlocked) return;   // 빈 상태로 Documents 백업까지 덮지 않게
   if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
   const v = pendingBackup;
   if (!v) return;
@@ -418,18 +420,92 @@ export function flushBackup(): void {
   if (pendingBackup) runBackup();
 }
 
+// ─── '못 읽음' 은 '비어 있음' 이 아니다 (26.10.201~) ─────────────────────────────────
+// 예전에는 작업 기록을 읽다 실패해도(IDB 오류 · 해석 실패 · 백업이 너무 큼) 빈 상태로 시작했고, 앱이
+// 곧바로 'Project 1' 을 만들어 그 빈 상태를 저장했다 — 읽지 못한 기록 위에. 2026-10-01 팀원 PC 가 8월 초
+// 업데이트 직후 이렇게 프로젝트 17개를 잃었다(백업 폴더의 7/30 합본에 남아 있었다).
+//   · IDB 읽기 오류 → 이번 실행은 저장을 멈춘다(persistBlocked) + 빨간 띠. 다시 켜면 대개 읽힌다.
+//   · 해석 실패 → 원본을 백업 폴더에 UNREADABLE 로 남기고 백업에서 되살린다. 백업도 없으면 저장을 멈춘다.
+//   · 백업이 너무 커서 통째로 못 불러옴 → 빈 상태로 시작하되 곧바로 그 백업에서 프로젝트를 꺼내 붙인다
+//     (runBackupRecovery). 어셋 목록은 조각이라 크기와 상관없이 그대로 되살린다.
+let persistBlocked = false;
+let restoreSkippedThisLaunch = false;
+let persistTroubleMsg: string | null = null;
+function blockPersist(msg: string) {
+  persistBlocked = true;
+  persistTroubleMsg = msg;
+  console.error('[Persist] saving disabled for this session:', msg);
+  // 스토어가 아직 만들어지는 중이면(TDZ) 실패한다 — onRehydrateStorage 가 persistTroubleMsg 로 다시 넣는다.
+  try { useAppStore.setState({ persistTrouble: msg }); } catch { /* 위 주석 */ }
+}
+
+// 백업 폴더의 어셋 목록 조각을 IDB 로. 상태 복원과 따로 — 상태가 너무 커서 건너뛰어도 어셋은 되살린다.
+// IDB 에 어셋 목록이 이미 있으면 그대로 둔다: 작업 기록만 깨진 경우 어셋 목록은 멀쩡하고 백업보다 새롭다.
+// (있는지는 keys 로만 본다 — 옛 한 덩어리 키는 수백 MB 라 읽어서 확인하면 안 된다.)
+async function restoreElementChunksFromBackup(api: BackupApi, result: any): Promise<void> {
+  try {
+    const ks = await keys();
+    if (ks.includes('seedance-elements-manifest') || ks.includes(ELEMENTS_KEY)) {
+      console.log('[Backup] library already in IndexedDB — keeping it (newer than the backup)');
+      return;
+    }
+  } catch { /* 못 보면 예전처럼 되살린다 */ }
+  if (result.elementsChunks > 0 && api.backupLoadElementsChunk) {
+    try {
+      for (let i = 0; i < result.elementsChunks; i++) {
+        const part = await api.backupLoadElementsChunk(i);
+        if (!part?.ok || typeof part.content !== 'string') throw new Error(`chunk ${i} unreadable`);
+        await set('seedance-elements-chunk-' + i, part.content);
+      }
+      await set('seedance-elements-manifest', JSON.stringify({
+        v: 2, chunks: result.elementsChunks, count: result.elementsCount || 0, savedAt: Date.now(),
+      }));
+      console.log(`[Backup] library restored from ${result.elementsChunks} chunk(s)`);
+    } catch (e) {
+      console.warn('[Backup] library restore failed — work history is unaffected:', e);
+    }
+  } else if (result.elements) {
+    // Older single-file library backup.
+    try { await set(ELEMENTS_KEY, result.elements); } catch (e) { console.warn('[Backup] legacy library restore failed:', e); }
+  }
+}
+
 const idbPersistStorage: PersistStorage<unknown> = {
   getItem: async (name: string): Promise<StorageValue<unknown> | null> => {
     const parse = (raw: string): StorageValue<unknown> | null => {
-      try { return JSON.parse(raw); } catch { console.warn('[Persist] corrupt JSON — starting empty'); return null; }
+      try { return JSON.parse(raw); } catch (e) { console.error('[Persist] stored state is unreadable:', e); return null; }
     };
-    const fromIdb = await get(name);
-    if (fromIdb) return parse(fromIdb);
-    // IDB empty — likely fresh install OR userData was wiped. Try external backup.
+    let fromIdb: string | undefined;
+    try {
+      fromIdb = await get(name);
+    } catch (err) {
+      console.error('[Persist] IndexedDB read failed:', err);
+      blockPersist('작업 기록을 읽지 못했어요. 기록을 지키려고 이번 실행에서는 저장을 멈췄어요 — 트레이 아이콘에서 Quit 으로 완전히 끄고 다시 켜 주세요.');
+      return null;
+    }
+    let unreadable = false, keptUnreadable = false;
+    if (fromIdb) {
+      const parsed = parse(fromIdb);
+      if (parsed) return parsed;
+      unreadable = true;
+      // 아래에서 백업으로 덮기 전에, 읽지 못한 원본을 백업 폴더에 남긴다(실패해도 백업 복원은 한다 —
+      // 백업은 같은 기록의 몇 분 전 사본이다).
+      try {
+        const r = await fetch('/api/backup/unreadable', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: fromIdb });
+        keptUnreadable = r.ok;
+        if (!r.ok) console.warn('[Persist] could not keep the unreadable copy: HTTP', r.status);
+      } catch (e) { console.warn('[Persist] could not keep the unreadable copy:', e); }
+    }
+    // IDB empty (fresh install / userData wiped) or unreadable — try external backup.
     try {
       const api = getBackupApi();
       if (api?.backupLoad) {
         const result = await api.backupLoad();
+        if (result?.ok && !result.content && result.stateSkipped) {
+          // 너무 커서 통째로는 못 불러왔다. 어셋은 조각이라 되살리고, 프로젝트는 켜진 뒤 그 백업에서 꺼낸다.
+          restoreSkippedThisLaunch = true;
+          await restoreElementChunksFromBackup(api, result);
+        }
         if (result?.ok && result.content) {
           // Seed IDB so subsequent reads hit the fast path and the next setItem
           // doesn't race the restored state.
@@ -445,33 +521,27 @@ const idbPersistStorage: PersistStorage<unknown> = {
           // released before the next one; nothing ever holds the whole library as one
           // value. That is what makes an arbitrarily large library restorable — the
           // previous version tried it in one piece and killed the renderer on startup.
-          if (result.elementsChunks > 0 && api.backupLoadElementsChunk) {
-            try {
-              for (let i = 0; i < result.elementsChunks; i++) {
-                const part = await api.backupLoadElementsChunk(i);
-                if (!part?.ok || typeof part.content !== 'string') throw new Error(`chunk ${i} unreadable`);
-                await set('seedance-elements-chunk-' + i, part.content);
-              }
-              await set('seedance-elements-manifest', JSON.stringify({
-                v: 2, chunks: result.elementsChunks, count: result.elementsCount || 0, savedAt: Date.now(),
-              }));
-              console.log(`[Backup] library restored from ${result.elementsChunks} chunk(s)`);
-            } catch (e) {
-              console.warn('[Backup] library restore failed — work history is unaffected:', e);
-            }
-          } else if (result.elements) {
-            // Older single-file library backup.
-            try { await set(ELEMENTS_KEY, result.elements); } catch (e) { console.warn('[Backup] legacy library restore failed:', e); }
-          }
-          return parse(result.content);
+          await restoreElementChunksFromBackup(api, result);
+          const restored = parse(result.content);
+          if (restored) return restored;
         }
       }
     } catch (err) {
       console.warn('[Backup] Load failed:', err);
     }
+    // 읽지 못한 기록이 있었는데 백업으로도 못 되살렸다 — 빈 상태로 시작하되 저장은 하지 않는다(덮어쓰지 않게).
+    // 백업이 너무 커서 건너뛴 경우는 예외: 그 백업에서 프로젝트를 곧 꺼내 붙이므로 저장해도 된다 — 단 읽지
+    // 못한 원본을 파일로 남겼을 때만(저장이 시작되면 IDB 의 원본은 덮인다).
+    if (unreadable && !(restoreSkippedThisLaunch && keptUnreadable)) {
+      blockPersist(keptUnreadable
+        ? '작업 기록이 손상돼 읽지 못했고 백업에서도 되살리지 못했어요. 기록을 지키려고 저장을 멈췄어요 — 읽지 못한 원본은 문서\\Freewill Seedance Backup 에 UNREADABLE 파일로 남겼어요. 개발 담당에게 알려 주세요.'
+        : '작업 기록이 손상돼 읽지 못했고 백업에서도 되살리지 못했어요. 기록을 지키려고 저장을 멈췄어요 — 읽지 못한 원본은 앱 안에 그대로 두었어요. 개발 담당에게 알려 주세요.');
+    }
     return null;
   },
   setItem: (name: string, value: StorageValue<unknown>): void => {
+    // 읽지 못한 기록을 지키는 중이면 아무것도 쓰지 않는다(위 '못 읽음' 주석). 백업 미러도 같이 멈춘다.
+    if (persistBlocked) { pendingWrite = null; return; }
     // `value.state` is zustand's immutable snapshot — safe to hold by reference
     // until the timer fires (updates replace objects, never mutate them).
     pendingWrite = { name, value };
@@ -519,6 +589,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
     backupTimer = setTimeout(runBackup, overdue ? 0 : BACKUP_DEBOUNCE_MS);
   },
   removeItem: async (name: string): Promise<void> => {
+    if (persistBlocked) return;   // 읽지 못한 기록을 지키는 중
     await del(name);
   },
 };
@@ -528,6 +599,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
 // within DEBOUNCE_MS can't drop the write. Idempotent — no-op when nothing
 // is pending.
 export function flushPersist(): Promise<void> {
+  if (persistBlocked) return Promise.resolve();   // 읽지 못한 기록을 지키는 중
   if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
   if (!pendingWrite) return Promise.resolve();
   const w = pendingWrite;
@@ -855,6 +927,14 @@ interface AppState {
   // true the library may still be empty — element-dependent UI (@mention list, send)
   // must wait on it rather than act on a half-loaded library.
   _elementsHydrated: boolean;
+  // 이번 실행에서 작업 기록을 지키려고 저장을 멈췄을 때의 안내(App.tsx 빨간 띠). 저장하지 않는다.
+  persistTrouble: string | null;
+  // 백업에서 되살리기로 이미 살펴본 백업 파일(이름|크기|시각 — 서버는 크기|시각으로 알아본다). 저장한다 —
+  // 큰 파일을 매번 다시 훑지 않고, 되살린 걸 지운 뒤 다시 살아나지도 않게.
+  recoveryScanned: string[];
+  // 이 PC 에서 사용자가 직접 지운 프로젝트 id(최근 500개). 되살리기는 이것을 '있는 것'으로 친다 — 일부러
+  // 다 지운 기록이 옛 백업에서 되살아나지 않게(파일 이름·시각이 바뀌어도).
+  deletedProjectIds: string[];
   projects: Project[];
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
@@ -1716,6 +1796,9 @@ export const useAppStore = create<AppState>()(
       theme: 'light',
       setTheme: (t) => { applyTheme(t); set({ theme: t }); },
       _elementsHydrated: false,
+      persistTrouble: null,
+      recoveryScanned: [],
+      deletedProjectIds: [],
       projects: [],
       currentProjectId: null,
       autoDownload: false,
@@ -1940,7 +2023,8 @@ export const useAppStore = create<AppState>()(
           // Unfold the whole chain down to wherever we landed — an open subfolder inside
           // a folded parent is just as invisible as a folded one.
           projectGroups = revealProject(projectGroups, projects, currentProjectId);
-          return { projectGroups, projects, currentProjectId, projectCollectionId: binding };
+          return { projectGroups, projects, currentProjectId, projectCollectionId: binding,
+            deletedProjectIds: [...(state.deletedProjectIds || []), ...doomed].slice(-500) };
         });
       },
       // Reorder folders themselves. Same "insert before the target" rule as projects, so
@@ -2077,6 +2161,7 @@ export const useAppStore = create<AppState>()(
           return {
             projects: newProjects, currentProjectId: newCurrentId, projectCollectionId: binding,
             projectGroups: revealProject(state.projectGroups, newProjects, newCurrentId),
+            deletedProjectIds: [...(state.deletedProjectIds || []), id].slice(-500),
           };
         });
       },
@@ -2420,12 +2505,13 @@ export const useAppStore = create<AppState>()(
         // lets a launch survive a cold/slow/dead Apps Script. NOT billingProjectKey — the
         // selection stays session-only on purpose (see the field's comment).
         billingProjects: state.billingProjects,
+        recoveryScanned: state.recoveryScanned,
+        deletedProjectIds: state.deletedProjectIds,
         theme: state.theme,
       }),
       onRehydrateStorage: () => {
         return () => {
           // Migrate: fill missing settings fields with defaults + clamp invalid values
-          const validModelIds = MODELS.map(m => m.id);
           const state = useAppStore.getState();
           // 한 번만: 2.5 는 이제 Draft 가 기본이다(draft 가 비어 있으면 모델 기본값). 그 전 시험 빌드
           // (26.9.2301~2303)는 기본값을 false 로 저장했기 때문에, 그 빌드를 거친 PC 에는 사용자가
@@ -2434,41 +2520,8 @@ export const useAppStore = create<AppState>()(
           const DRAFT_DEFAULT_KEY = 'seedance-draft-default-v1';
           let resetStaleDraft = false;
           try { resetStaleDraft = localStorage.getItem(DRAFT_DEFAULT_KEY) !== '1'; } catch { /* 못 읽으면 건드리지 않는다 */ }
-          const patched = state.projects.map(p => {
-            const s = { ...defaultSettings, ...p.settings };
-            // Retired ids → their replacement, BEFORE anything reads the model. This has
-            // to run first: the unknown-model fallback further down would send a demo
-            // project to 2.0, and the duration/resolution clamps just below would then
-            // trim settings that were perfectly valid for it (30s → 15s, 30 → 9 images).
-            s.model = resolveModelId(s.model);
-            // Clamp duration to the provider's range: Omni 3–10, Seedance 4–15.
-            // -1 = Auto (Seedance only; model picks the length — valid, don't clamp).
-            // Range is per-model now; for 2.0/Omni modelDurationRange returns exactly the
-            // numbers that were hardcoded here, so their stored settings are untouched.
-            // ★ Like the resolution clamp, this must stay STRUCTURAL — a saved 30s on 2.5
-            // has to survive a restart even before any capability/permission is known.
-            if (s.duration !== -1) {
-              const [lo, hi] = modelDurationRange(s.model);
-              s.duration = Math.max(lo, Math.min(hi, s.duration));
-            }
-            // Unknown/legacy model → flagship default
-            if (!validModelIds.includes(s.model)) s.model = defaultSettings.model;
-            // A format this model doesn't offer is dropped rather than carried — same rule
-            // as the resolution clamp right below, and it keeps the send path honest.
-            if (s.output_format && !modelOutputFormats(s.model).includes(s.output_format)) delete s.output_format;
-            // Clamp resolution to what THIS model supports (Fast/Mini: no 1080p)
-            if (!modelResolutions(s.model).includes(s.resolution)) s.resolution = '720p';
-            // Same rule for the Omni task. A project saved on 1.1 with 'extend' that is then
-            // switched to the Flash preview has a task the preview never offered, and the API
-            // would NOT reject it (it validates the schema, not the model) — it would just
-            // generate something the user didn't ask for. Structural, like the two above.
-            s.omniTask = resolveOmniTask(s.model, s.omniTask);
-            // Draft 도 같은 규칙. 초안을 모르는 모델에 남은 값은 비운다(= 모델 기본값을 따름).
-            if (s.draft !== undefined && !modelSupportsDraft(s.model)) delete s.draft;
-            if (resetStaleDraft && s.draft === false) delete s.draft;
-            // Clear in-progress draft prompts on app restart (session-only persistence)
-            return { ...p, settings: s, draftPrompt: '' };
-          });
+          // 프로젝트마다 설정 정리 — 백업에서 되살린 옛 프로젝트에도 같은 함수를 쓴다(patchLoadedProject).
+          const patched = state.projects.map(p => patchLoadedProject(p, resetStaleDraft));
           if (resetStaleDraft) { try { localStorage.setItem(DRAFT_DEFAULT_KEY, '1'); } catch { /* 다음 실행에 다시 시도 */ } }
           // Re-apply the saved theme. localStorage is the AUTHORITATIVE live copy — applyTheme
           // writes it synchronously on every change, while this store's copy only reaches
@@ -2488,6 +2541,7 @@ export const useAppStore = create<AppState>()(
           // 때 통째로 바뀌지만, 그 전(트래커가 느린 시동)에도 선택창과 권한 확인이 key 로 돌아야 한다.
           const billingProjects = (state.billingProjects || []).map(p => ({ ...p, id: p.id || '', key: p.key || billingKeyOf(p) }));
           useAppStore.setState({ projects: patched, theme, billingProjects, _hasHydrated: true });
+          if (persistTroubleMsg) useAppStore.setState({ persistTrouble: persistTroubleMsg });
 
           // Element library loads from its own key (and migrates out of the legacy
           // blob on first run). Async, so the UI gates element-dependent surfaces on
@@ -2499,6 +2553,13 @@ export const useAppStore = create<AppState>()(
             useAppStore.setState({ elementAssets: assets, _elementsHydrated: true });
             // 옛 어셋의 원본을 파일로 옮긴다(한 번). 첫 화면이 뜬 뒤에 천천히.
             if (assets.some(a => a.images.some(isLegacyImage))) scheduleLibraryMigration(3000);
+            // 백업 폴더에 통째로 잃은 옛 기록이 있으면 되살린다(한 번). 그다음 빠진 미리보기·썸네일을
+            // 메운다(방금 되살린 것 포함). 첫 화면이 뜬 뒤에.
+            setTimeout(() => {
+              void runBackupRecovery()
+                .catch(err => console.warn('[Recovery] failed:', err))
+                .then(() => backfillLibraryImages());
+            }, 4000);
           }).catch(err => {
             console.error('[Elements] load failed — keeping legacy copy in memory:', err);
             lastElements = legacy;
@@ -2567,3 +2628,162 @@ useAppStore.subscribe((state) => {
   // 공유 팩 가져오기처럼 원본 base64 를 들고 들어온 어셋이 있으면 파일로 옮긴다.
   if (state.elementAssets.some(a => a.images.some(isLegacyImage))) scheduleLibraryMigration();
 });
+
+// ─── 켜질 때 프로젝트 설정 정리 (hydration 과 백업 되살리기가 같이 쓴다) ──────────────
+function patchLoadedProject(p: Project, resetStaleDraft: boolean): Project {
+  const validModelIds = MODELS.map(m => m.id);
+  const s = { ...defaultSettings, ...p.settings };
+  // Retired ids → their replacement, BEFORE anything reads the model. This has
+  // to run first: the unknown-model fallback further down would send a demo
+  // project to 2.0, and the duration/resolution clamps just below would then
+  // trim settings that were perfectly valid for it (30s → 15s, 30 → 9 images).
+  s.model = resolveModelId(s.model);
+  // Clamp duration to the provider's range: Omni 3–10, Seedance 4–15.
+  // -1 = Auto (Seedance only; model picks the length — valid, don't clamp).
+  // Range is per-model now; for 2.0/Omni modelDurationRange returns exactly the
+  // numbers that were hardcoded here, so their stored settings are untouched.
+  // ★ Like the resolution clamp, this must stay STRUCTURAL — a saved 30s on 2.5
+  // has to survive a restart even before any capability/permission is known.
+  if (s.duration !== -1) {
+    const [lo, hi] = modelDurationRange(s.model);
+    s.duration = Math.max(lo, Math.min(hi, s.duration));
+  }
+  // Unknown/legacy model → flagship default
+  if (!validModelIds.includes(s.model)) s.model = defaultSettings.model;
+  // A format this model doesn't offer is dropped rather than carried — same rule
+  // as the resolution clamp right below, and it keeps the send path honest.
+  if (s.output_format && !modelOutputFormats(s.model).includes(s.output_format)) delete s.output_format;
+  // Clamp resolution to what THIS model supports (Fast/Mini: no 1080p)
+  if (!modelResolutions(s.model).includes(s.resolution)) s.resolution = '720p';
+  // Same rule for the Omni task. A project saved on 1.1 with 'extend' that is then
+  // switched to the Flash preview has a task the preview never offered, and the API
+  // would NOT reject it (it validates the schema, not the model) — it would just
+  // generate something the user didn't ask for. Structural, like the two above.
+  s.omniTask = resolveOmniTask(s.model, s.omniTask);
+  // Draft 도 같은 규칙. 초안을 모르는 모델에 남은 값은 비운다(= 모델 기본값을 따름).
+  if (s.draft !== undefined && !modelSupportsDraft(s.model)) delete s.draft;
+  if (resetStaleDraft && s.draft === false) delete s.draft;
+  // Clear in-progress draft prompts on app restart (session-only persistence)
+  return { ...p, settings: s, draftPrompt: '' };
+}
+
+// ─── 백업에서 프로젝트·어셋 되살리기 (26.10.201~) ──────────────────────────────────
+// 백업 폴더의 옛 파일(7월 이전 합본 · AUTOPREV · PREV) 가운데 지금 기록과 프로젝트가 '하나도' 겹치지 않는
+// 것 = 통째로 잃은 기록이다(2026-10-01 팀원 PC: 7/30 합본에 17개). 그런 파일이 있으면 그 프로젝트를
+// '되살린 프로젝트 (M/D 백업)' 그룹으로, 지금 없는 어셋을 원래 컬렉션째로 붙인다. 지금 기록은 하나도
+// 바꾸지 않는다. 일부라도 겹치는 파일은 지금 기록의 과거일 뿐이라 건드리지 않는다(없는 건 지운 것).
+// 한 번 본 파일은 기억한다(recoveryScanned) — 큰 파일을 실행마다 다시 훑지 않게. 사용자가 이 PC 에서
+// 지운 프로젝트(deletedProjectIds)는 '있는 것'으로 친다 — 되살린 걸 지우거나 일부러 다 지운 뒤, 같은 기록이
+// 이름만 바뀐 백업(legacy·AUTOPREV)으로 다시 보여도 살아나지 않게.
+// 판정·추출은 서버가 바이트로 한다(server.ts recovery-scan / recovery-import).
+let recoveryRan = false;
+async function runBackupRecovery(): Promise<void> {
+  if (recoveryRan || persistBlocked) return;
+  const st0 = useAppStore.getState();
+  if (!st0._hasHydrated || !st0._elementsHydrated) return;
+  recoveryRan = true;
+  const post = async (url: string, body: any) => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return r.json();
+  };
+  let scan: any;
+  try {
+    scan = await post('/api/backup/recovery-scan', {
+      have: [...st0.projects.map(p => p.id), ...(st0.deletedProjectIds || [])],
+      skip: st0.recoveryScanned || [], includeCurrent: restoreSkippedThisLaunch,
+    });
+  } catch { return; }
+  const files: any[] = Array.isArray(scan?.files) ? scan.files.filter((f: any) => !f.error) : [];
+  if (!files.length) return;
+  const remember = () => useAppStore.setState(s => ({
+    recoveryScanned: [...new Set([...(s.recoveryScanned || []), ...files.map(f => String(f.sig))])].slice(-100),
+  }));
+  const pick = files.filter(f => f.projects > 0 && f.overlap === 0).sort((a, b) => b.mtime - a.mtime)[0];
+  if (!pick) { remember(); return; }
+  let got: any;
+  try {
+    const cur = useAppStore.getState();
+    got = await post('/api/backup/recovery-import', {
+      sig: pick.sig, haveElements: cur.elementAssets.map(e => e.id), haveCollections: cur.assetCollections.map(c => c.id),
+    });
+  } catch { return; }                      // 기억하지 않는다 — 다음 실행에 다시
+  if (!got?.ok) return;
+  const s = useAppStore.getState();
+  const haveP = new Set([...s.projects.map(p => p.id), ...(s.deletedProjectIds || [])]);
+  const projects = (Array.isArray(got.projects) ? got.projects : []).filter((p: any) => p?.id && !haveP.has(p.id)) as Project[];
+  if (!projects.length) { remember(); return; }
+  const d = new Date(got.mtime || pick.mtime);
+  const label = `${d.getMonth() + 1}/${d.getDate()}`;
+  const groupId = s.createProjectGroup(`되살린 프로젝트 (${label} 백업)`);
+  const elements: ElementAsset[] = Array.isArray(got.elements) ? got.elements : [];
+  useAppStore.setState(st => {
+    const haveE = new Set(st.elementAssets.map(e => e.id));
+    const haveC = new Set(st.assetCollections.map(c => c.id));
+    return {
+      projects: [...st.projects, ...projects.filter(p => !st.projects.some(q => q.id === p.id)).map(p => ({ ...patchLoadedProject(p, false), groupId }))],
+      assetCollections: [...st.assetCollections, ...(Array.isArray(got.collections) ? got.collections : []).filter((c: any) => c?.id && !haveC.has(c.id))],
+      elementAssets: [...st.elementAssets, ...elements.filter(e => e?.id && !haveE.has(e.id))],
+      // 그 프로젝트들이 쓰던 어셋 컬렉션 연결도 되살린다(지금 연결이 있으면 지금 것이 이긴다).
+      projectCollectionId: { ...(got.bindings || {}), ...st.projectCollectionId },
+    };
+  });
+  remember();
+  console.log(`[Recovery] ${got.name}: 프로젝트 ${projects.length}개 · 어셋 ${elements.length}개 되살림`);
+  window.dispatchEvent(new CustomEvent('seedance:toast', { detail: {
+    msg: `${label} 백업에서 프로젝트 ${projects.length}개${elements.length ? `와 어셋 ${elements.length}개` : ''}를 되살렸어요 — 사이드바 '되살린 프로젝트 (${label} 백업)'`,
+    ok: true,
+  } }));
+}
+
+// ─── 빠진 미리보기·썸네일 메우기 (26.10.201~) ────────────────────────────────────
+// 켜질 때마다 한 번: 원본은 있는데 화면용 JPG 미리보기가 없는 이미지, 썸네일이 없거나 원본이
+// 들어앉은(THUMB_SANE_MAX 초과) 이미지를 찾아 뒤에서 하나씩 만든다. 방금 되살린 어셋, 옮기기 도중에
+// 앱을 끈 경우, 만들기가 한 번 실패한 경우가 모두 이 한 곳에서 다음 실행에 스스로 메워진다.
+// 미리보기가 없어도 화면은 원본으로 보이지만(서버가 대신 준다) 그만큼 메모리를 먹는다 — 3001 이 막은 그것.
+let libBackfillRan = false;
+async function backfillLibraryImages(): Promise<void> {
+  if (libBackfillRan || persistBlocked) return;
+  libBackfillRan = true;
+  // 옮기기와 겹치면 큰 원본 디코딩이 두 배가 된다 — 끝나길 잠깐 기다린다(옮긴 것은 옮기기가 직접 만든다).
+  for (let i = 0; i < 60 && libMigrating; i++) await new Promise(r => setTimeout(r, 2000));
+  const imgs = useAppStore.getState().elementAssets
+    .flatMap(e => e.images.filter(im => im.libId).map(im => ({ eid: e.id, im })));
+  if (!imgs.length) return;
+  let missing = new Set<string>();
+  try {
+    const r = await fetch('/api/library/missing-previews', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: [...new Set(imgs.map(x => x.im.libId!))] }),
+    });
+    const j = await r.json();
+    if (Array.isArray(j?.missing)) missing = new Set(j.missing.map(String));
+  } catch { /* 물어보지 못하면 썸네일만 */ }
+  const thumbBad = (t?: string) => !t || t.length > THUMB_SANE_MAX;
+  const todo = imgs.filter(x => missing.has(x.im.libId!) || thumbBad(x.im.thumbnailUrl));
+  if (!todo.length) return;
+  let previews = 0, thumbs = 0, failed = 0;
+  for (const { eid, im } of todo) {
+    const libId = im.libId!;
+    try {
+      const res = await fetch(`/api/library/${libId}`);
+      if (!res.ok) { failed++; continue; }              // 원본이 어디에도 없다 — 메울 수 없다
+      const blob = await res.blob();
+      if (missing.has(libId)) {
+        const pv = await makeJpegPreview(blob);
+        const put = await fetch(`/api/library/${libId}/preview`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: pv });
+        if (put.ok) { missing.delete(libId); previews++; } else failed++;   // 같은 그림이 여러 어셋에 있어도 한 번
+      }
+      if (thumbBad(im.thumbnailUrl)) {
+        const thumb = await createThumbnail(new File([blob], im.file_name || 'image', { type: blob.type }), 256);
+        if (thumb) {
+          thumbs++;
+          useAppStore.setState(st => ({
+            elementAssets: st.elementAssets.map(x => x.id !== eid ? x
+              : { ...x, images: x.images.map(y => y.id === im.id ? { ...y, thumbnailUrl: thumb } : y) }),
+          }));
+        }
+      }
+    } catch (err) { failed++; console.warn(`[Library] ${libId} 미리보기·썸네일 만들기 실패:`, err); }
+  }
+  console.log(`[Library] 빠진 미리보기 ${previews}개 · 썸네일 ${thumbs}개 채움${failed ? ` (실패 ${failed} — 다음 실행에 다시)` : ''}`);
+}

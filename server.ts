@@ -749,7 +749,10 @@ async function startServer() {
       const stateSize = fs.statSync(p).size;
       if (stateSize > STATE_RESTORE_MAX) {
         console.warn(`[Backup] ${p} is ${(stateSize / 1048576).toFixed(0)}MB — too large to load safely; skipping.`);
-        return res.json({ ok: true, content: null, stateSkipped: true, stateBytes: stateSize, path: p });
+        // 상태는 못 넘겨도 어셋 목록은 조각이라 넘길 수 있다 — 클라이언트가 따로 되살린다(26.10.201~).
+        let elementsChunks = 0, elementsCount = 0;
+        try { const man = JSON.parse(fs.readFileSync(ELEMENTS_MANIFEST_PATH, 'utf8')); if (man && man.chunks > 0) { elementsChunks = man.chunks; elementsCount = man.count || 0; } } catch {}
+        return res.json({ ok: true, content: null, stateSkipped: true, stateBytes: stateSize, path: p, elementsChunks, elementsCount });
       }
       const content = fs.readFileSync(p, 'utf8');
       let elementsChunks = 0, elementsCount = 0;
@@ -847,6 +850,7 @@ async function startServer() {
       const libId = crypto.createHash('md5').update(buf).digest('hex').slice(0, 12) + ext;
       const p = path.join(LIB_DIR, libId);
       if (!fs.existsSync(p)) {
+        fs.mkdirSync(LIB_DIR, { recursive: true });   // 켜져 있는 동안 폴더가 지워졌어도
         fs.writeFileSync(p + '.tmp', buf);
         fs.renameSync(p + '.tmp', p);
       }
@@ -863,6 +867,7 @@ async function startServer() {
       const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       if (buf.length < 3 || buf[0] !== 0xff || buf[1] !== 0xd8) return res.status(400).json({ ok: false, error: 'preview must be a JPEG' });
       const p = path.join(LIB_PREVIEW_DIR, id + '.jpg');
+      fs.mkdirSync(LIB_PREVIEW_DIR, { recursive: true });   // 켜져 있는 동안 폴더가 지워졌어도
       fs.writeFileSync(p + '.tmp', buf);
       fs.renameSync(p + '.tmp', p);
       res.json({ ok: true, bytes: buf.length });
@@ -890,6 +895,227 @@ async function startServer() {
     if (!f) return res.status(404).json({ error: 'not found' });
     res.setHeader('Cache-Control', 'no-store');
     res.sendFile(f);
+  });
+
+  // ── 백업 파일에서 프로젝트·어셋 되살리기 (26.10.201~) ───────────────────────────
+  // 2026-10-01 팀원 PC: 8월 초 업데이트 직후 앱이 빈 상태로 시작해 작업 기록을 덮어썼다. 옛 기록은 백업
+  // 폴더의 seedance-backup-combined-legacy.json(7/30, 프로젝트 17개)에 그대로 남아 있었다. 앱이 켜질 때
+  // 이런 파일을 찾아, 지금 기록과 프로젝트가 '하나도' 겹치지 않으면(= 통째로 잃은 것) 빠진 것을 붙인다.
+  // 일부라도 겹치면 그 파일은 지금 기록의 과거일 뿐이고, 없는 것은 사용자가 지운 것이다 — 건드리지 않는다.
+  // ★ 문자열로 읽지 않는다. 7월 이전 백업은 상태 + 어셋 원본이 한 덩어리라 수백 MB 이고(509MB 실측),
+  //   V8 문자열 한계(약 512MB)에 닿는다. 바이트를 직접 훑어 필요한 배열의 범위만 찾고 그 부분만 해석한다
+  //   (509MB 를 0.7초 · 어셋은 하나씩).
+  const isWs = (c: number) => c === 0x20 || c === 0x0a || c === 0x0d || c === 0x09;
+  const skipWs = (b: Buffer, i: number) => { while (i < b.length && isWs(b[i])) i++; return i; };
+  function skipString(b: Buffer, i: number): number {
+    i++;
+    while (i < b.length) { const c = b[i]; if (c === 0x5c) { i += 2; continue; } if (c === 0x22) return i + 1; i++; }
+    throw new Error('unterminated string');
+  }
+  function skipValue(b: Buffer, i: number): number {
+    i = skipWs(b, i);
+    const c = b[i];
+    if (c === 0x22) return skipString(b, i);
+    if (c === 0x7b || c === 0x5b) {
+      let depth = 0;
+      while (i < b.length) {
+        const d = b[i];
+        if (d === 0x22) { i = skipString(b, i); continue; }
+        if (d === 0x7b || d === 0x5b) depth++;
+        else if (d === 0x7d || d === 0x5d) { if (--depth === 0) return i + 1; }
+        i++;
+      }
+      throw new Error('unterminated container');
+    }
+    while (i < b.length && !(b[i] === 0x2c || b[i] === 0x7d || b[i] === 0x5d || isWs(b[i]))) i++;
+    return i;
+  }
+  // 객체를 훑으며 원하는 키의 값 범위만 모은다(나머지 값은 건너뛰기만).
+  function objectEntries(b: Buffer, i: number, want: string[]): Map<string, [number, number]> {
+    const out = new Map<string, [number, number]>();
+    i = skipWs(b, i);
+    if (b[i] !== 0x7b) throw new Error('not an object');
+    i++;
+    for (;;) {
+      i = skipWs(b, i);
+      if (b[i] === 0x7d) return out;
+      const ks = i; i = skipString(b, i);
+      const key = JSON.parse(b.toString('utf8', ks, i));
+      i = skipWs(b, i); if (b[i] !== 0x3a) throw new Error('expected colon'); i = skipWs(b, i + 1);
+      const vs = i; i = skipValue(b, i);
+      if (want.includes(key)) out.set(key, [vs, i]);
+      i = skipWs(b, i);
+      if (b[i] === 0x2c) { i++; continue; }
+      if (b[i] === 0x7d) return out;
+      throw new Error('bad object');
+    }
+  }
+  // 루트에서 "state" 값의 시작만 찾는다 — state 를 통째로 한 번 더 훑지 않으려고.
+  function stateStart(b: Buffer): number {
+    let i = skipWs(b, 0);
+    if (b[i] !== 0x7b) throw new Error('not an object');
+    i++;
+    for (;;) {
+      i = skipWs(b, i);
+      const ks = i; i = skipString(b, i);
+      const key = JSON.parse(b.toString('utf8', ks, i));
+      i = skipWs(b, skipWs(b, i) + 1);
+      if (key === 'state') return i;
+      i = skipWs(b, skipValue(b, i));
+      if (b[i] === 0x2c) { i++; continue; }
+      throw new Error('no state');
+    }
+  }
+  function forEachItem(b: Buffer, [s, e]: [number, number], cb: (s: number, e: number) => void) {
+    let i = skipWs(b, s); if (b[i] !== 0x5b) throw new Error('not an array'); i++;
+    while (i < e) {
+      i = skipWs(b, i);
+      if (b[i] === 0x5d) return;
+      const vs = i; i = skipValue(b, i); cb(vs, i);
+      i = skipWs(b, i);
+      if (b[i] === 0x2c) i++;
+    }
+  }
+  // 되살릴 후보: 7월 이전 합본(legacy), 기록이 절반 이하로 줄 때 남긴 AUTOPREV, 손으로 남긴 PREV.
+  // 지금 백업(seedance-backup.json)은 평소엔 지금 기록 그 자체라 보지 않는다 — 클라이언트가 이번 실행에서
+  // 그 백업을 '너무 커서 못 불러왔다' 고 할 때만(includeCurrent) 후보에 넣는다.
+  const RECOVERY_FILE = /^seedance-backup(-combined-legacy|\.AUTOPREV-[\w-]+|\.PREV-[\w-]+)?\.json$/;
+  function recoveryCandidates(includeCurrent: boolean) {
+    let names: string[] = [];
+    try { names = fs.readdirSync(BACKUP_DIR); } catch { return []; }
+    return names
+      .filter((n) => RECOVERY_FILE.test(n) && (includeCurrent || n !== 'seedance-backup.json'))
+      .map((n) => {
+        const st = fs.statSync(path.join(BACKUP_DIR, n));
+        return { name: n, file: path.join(BACKUP_DIR, n), mtime: st.mtimeMs, sig: `${n}|${st.size}|${Math.round(st.mtimeMs)}` };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  }
+  const readBackupKeys = (file: string, want: string[]) => {
+    const b = fs.readFileSync(file);
+    return { b, keys: objectEntries(b, stateStart(b), want) };
+  };
+
+  // 후보 파일마다: 프로젝트 몇 개, 지금 기록과 몇 개 겹치나. 클라이언트가 이미 본 파일(skip)은 건너뛴다 —
+  // 큰 파일을 실행할 때마다 다시 훑지 않게.
+  app.post('/api/backup/recovery-scan', (req, res) => {
+    try {
+      const have = new Set<string>((Array.isArray(req.body?.have) ? req.body.have : []).map(String));
+      // 이름은 빼고 크기·시각으로 알아본다. 너무 커서 건너뛴 지금 백업은 다음 저장 때 legacy 로 이름만 바뀌고,
+      // 줄어든 기록은 AUTOPREV 로 복사된다(윈도우 복사는 시각을 그대로 둔다) — 이름까지 보면 같은 파일을 새
+      // 파일로 알고, 사용자가 되살린 걸 지운 뒤라면 또 되살린다.
+      const body = (sig: string) => sig.split('|').slice(-2).join('|');
+      const skip = new Set<string>((Array.isArray(req.body?.skip) ? req.body.skip : []).map((x: unknown) => body(String(x))));
+      const files: any[] = [];
+      for (const c of recoveryCandidates(!!req.body?.includeCurrent)) {
+        if (skip.has(body(c.sig))) continue;
+        try {
+          const { b, keys } = readBackupKeys(c.file, ['projects', 'elementAssets']);
+          const pr = keys.get('projects');
+          const projects: any[] = pr ? JSON.parse(b.toString('utf8', pr[0], pr[1])) : [];
+          let elements = 0;
+          const er = keys.get('elementAssets');
+          if (er) forEachItem(b, er, () => { elements++; });
+          files.push({
+            sig: c.sig, name: c.name, mtime: c.mtime, projects: projects.length, elements,
+            overlap: projects.filter((p) => have.has(String(p?.id))).length,
+            names: projects.slice(0, 6).map((p) => String(p?.name || '')),
+          });
+        } catch (e: any) {
+          files.push({ sig: c.sig, name: c.name, mtime: c.mtime, error: e.message });
+        }
+      }
+      res.json({ ok: true, files });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // 한 파일에서 프로젝트 전부 + 지금 없는 어셋을 꺼낸다. 어셋 원본은 여기서 바로 라이브러리 폴더에 파일로
+  // 쓴다(base64 를 화면으로 보내지 않는다 — 26.9.3001 의 원칙 그대로). 미리보기는 클라이언트가 만든다.
+  app.post('/api/backup/recovery-import', (req, res) => {
+    try {
+      const sig = String(req.body?.sig || '');
+      const c = recoveryCandidates(true).find((x) => x.sig === sig);
+      if (!c) return res.status(404).json({ ok: false, error: '백업 파일이 그새 바뀌었거나 없습니다' });
+      const haveEl = new Set<string>((Array.isArray(req.body?.haveElements) ? req.body.haveElements : []).map(String));
+      const haveCol = new Set<string>((Array.isArray(req.body?.haveCollections) ? req.body.haveCollections : []).map(String));
+      const { b, keys } = readBackupKeys(c.file, ['projects', 'elementAssets', 'assetCollections', 'projectCollectionId']);
+      const pr = keys.get('projects');
+      const projects: any[] = pr ? JSON.parse(b.toString('utf8', pr[0], pr[1])) : [];
+      // 그때 '진행 중' 이던 작업은 이미 끝났다(BytePlus 기록은 7일). 그대로 두면 앱이 10초마다 조회한다.
+      for (const p of projects) for (const m of (p?.messages || [])) {
+        if (m && (m.status === 'running' || m.status === 'queued')) {
+          m.status = 'failed';
+          m.error = '백업에서 되살린 기록 — 그때 진행 중이던 작업은 결과를 찾을 수 없습니다';
+        }
+      }
+      const elements: any[] = [];
+      let images = 0, written = 0;
+      const er = keys.get('elementAssets');
+      if (er) {
+        const ranges: [number, number][] = [];
+        forEachItem(b, er, (s, e) => { ranges.push([s, e]); });
+        for (const [s, e] of ranges) {
+          const a = JSON.parse(b.toString('utf8', s, e));       // 어셋 하나(원본 포함 ~12MB)씩만
+          if (!a?.id || haveEl.has(String(a.id))) continue;
+          const imgs: any[] = [];
+          for (const im of (Array.isArray(a.images) ? a.images : [])) {
+            let libId = typeof im?.libId === 'string' && LIB_ID.test(im.libId) ? im.libId : '';
+            if (!libId && typeof im?.url === 'string' && im.url.startsWith('data:')) {
+              const bytes = Buffer.from(im.url.slice(im.url.indexOf(',') + 1), 'base64');
+              libId = crypto.createHash('md5').update(bytes).digest('hex').slice(0, 12) + (sniffImageExt(bytes) || '.png');
+              const p = path.join(LIB_DIR, libId);
+              if (!fs.existsSync(p)) { fs.mkdirSync(LIB_DIR, { recursive: true }); fs.writeFileSync(p + '.tmp', bytes); fs.renameSync(p + '.tmp', p); written++; }
+            }
+            if (!libId) continue;
+            images++;
+            const thumb = typeof im.thumbnailUrl === 'string' && im.thumbnailUrl.startsWith('data:') && im.thumbnailUrl.length <= 300 * 1024 ? im.thumbnailUrl : '';
+            imgs.push({
+              id: typeof im.id === 'string' ? im.id : crypto.randomUUID(), libId, thumbnailUrl: thumb,
+              ...(typeof im.file_name === 'string' ? { file_name: im.file_name } : {}),
+            });
+          }
+          if (imgs.length) elements.push({ ...a, images: imgs });
+        }
+      }
+      const usedCols = new Set(elements.map((e) => String(e.collectionId)));
+      const cr = keys.get('assetCollections');
+      const collections = cr
+        ? (JSON.parse(b.toString('utf8', cr[0], cr[1])) as any[]).filter((col) => usedCols.has(String(col?.id)) && !haveCol.has(String(col?.id)))
+        : [];
+      const br = keys.get('projectCollectionId');
+      const allBind = br ? JSON.parse(b.toString('utf8', br[0], br[1])) : {};
+      const pids = new Set(projects.map((p) => String(p?.id)));
+      const bindings = Object.fromEntries(Object.entries(allBind || {}).filter(([pid]) => pids.has(pid)));
+      console.log(`[Recovery] ${c.name}: 프로젝트 ${projects.length}개, 어셋 ${elements.length}개(이미지 ${images}장, 새 원본 파일 ${written}개)`);
+      res.json({ ok: true, name: c.name, mtime: c.mtime, projects, elements, collections, bindings });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // 앱이 읽긴 했는데 해석하지 못한 작업 기록을, 덮어쓰기 전에 백업 폴더에 남긴다(26.10.201~).
+  // 예전에는 이 경우 조용히 빈 상태로 시작해 그 기록을 덮어썼다 — 나중에 손으로라도 꺼낼 길을 남긴다.
+  app.post('/api/backup/unreadable', express.raw({ type: '*/*', limit: '600mb' }), (req, res) => {
+    try {
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (!buf.length) return res.status(400).json({ ok: false, error: 'empty' });
+      fs.mkdirSync(BACKUP_DIR, { recursive: true });
+      const d = new Date();
+      const p2 = (n: number) => String(n).padStart(2, '0');
+      const name = `seedance-backup.UNREADABLE-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}.json`;
+      fs.writeFileSync(path.join(BACKUP_DIR, name), buf);
+      console.warn(`[Persist] 읽지 못한 작업 기록을 남김: ${name} (${(buf.length / 1048576).toFixed(1)}MB)`);
+      res.json({ ok: true, name });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // 화면용 미리보기가 없는 원본들. 클라이언트가 켜질 때 물어 빠진 것만 만든다 — 되살린 어셋, 옮기기 도중에
+  // 앱을 끈 경우, 만들기가 한 번 실패한 경우 모두 다음 실행에 스스로 메워진다(store.ts backfillLibraryImages).
+  // 있는지만 본다: libraryFile() 처럼 백업 폴더에서 되가져오면 켜질 때마다 원본 전부를 복사하게 된다.
+  app.post('/api/library/missing-previews', (req, res) => {
+    const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+    const has = (dir: string, name: string) => fs.existsSync(path.join(dir, name));
+    res.json({ ok: true, missing: ids.filter((id) => LIB_ID.test(id)
+      && (has(LIB_DIR, id) || has(BACKUP_LIB_DIR, id))
+      && !has(LIB_PREVIEW_DIR, id + '.jpg') && !has(BACKUP_LIB_PREVIEW_DIR, id + '.jpg')) });
   });
 
   // 백업 폴더에 원본(과 미리보기)을 채운다. 클라이언트가 라이브러리 목록을 백업하기 직전에 부른다 —

@@ -6,6 +6,7 @@ import { useAppStore, billingKeyOf, reconcileBillingSelection } from './store';
 
 export default function App() {
   const { projects, createProject, currentProjectId, _hasHydrated } = useAppStore();
+  const persistTrouble = useAppStore((s) => s.persistTrouble);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // Non-blocking notice when a selected project is auto-cleared on 종료 (a native alert()
   // here would de-activate the window and drop the prompt caret mid-typing).
@@ -253,6 +254,16 @@ export default function App() {
           <span className="text-[13px] leading-snug flex-1">
             <b>사용량이 어느 팀에도 집계되지 않습니다.</b><br />
             {teamWarn} 팀 bat 파일을 실행한 뒤, 트레이 아이콘까지 완전히 종료하고 앱을 다시 켜주세요.
+          </span>
+        </div>
+      )}
+      {/* 작업 기록을 읽지 못해 이번 실행에서 저장을 멈췄다(store.ts '못 읽음' 주석). 닫기 버튼이 없다 —
+          이 상태로 작업하면 저장되지 않으니, 보이는 동안은 계속 보여야 한다. */}
+      {persistTrouble && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[95] w-[min(92%,36rem)] flex items-start gap-2.5 bg-red-50 border border-red-300 text-red-900 rounded-xl shadow-lg px-3.5 py-2.5">
+          <span className="text-[13px] leading-snug flex-1">
+            <b>작업 기록을 지키려고 저장을 멈췄습니다.</b><br />
+            {persistTrouble}
           </span>
         </div>
       )}
