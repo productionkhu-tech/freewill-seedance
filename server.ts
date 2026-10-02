@@ -1276,9 +1276,13 @@ async function startServer() {
   // 같은 PC 의 에이전트(Claude Code·Codex 의 freewill 커넥터)가 생성 요청을 넣는 곳. 서버는 받아 두기만
   // 하고, 실제로 보내는 건 앱 화면(ChatArea)이 사람이 전송 버튼을 누르는 것과 같은 길(handleSend)로 한다.
   // 그래서 생성 중 카드 · 권한 검사 · 트래커 보고 · NCP 보관 · 폴링이 전부 평소대로다.
-  //   에이전트: POST /api/agent/jobs → GET /api/agent/jobs/:id 로 진행을 본다. 상태는 GET /api/agent/status.
-  //   화면:     POST /api/agent/jobs/claim (2초마다 — 지금 프로젝트·과금 선택도 같이 알린다)
+  //   에이전트: GET /api/agent/manual(사용 설명서) → POST /api/agent/jobs → GET /api/agent/jobs/:id 로 진행을 본다.
+  //             상태는 GET /api/agent/status.
+  //   화면:     POST /api/agent/jobs/claim (2초마다 — 지금 프로젝트·과금 선택·권한도 같이 알린다)
   //             → 보낸 뒤 POST /api/agent/jobs/:id/report 로 카드 상태를 올린다.
+  //             POST /api/agent/manual — 설명서(src/lib/agent-inbox.ts, MODELS 에서 자동 생성)를 올린다.
+  // ★ 설명서 버전은 작업함 응답마다 붙인다. 에이전트는 읽은 버전을 요청의 manual 에 적어 보내고, 지금 앱의 버전과
+  //   다르면 받지 않고 "업데이트됐으니 다시 읽어" 로 돌려보낸다 — 한 채팅방을 오래 써도 보낼 때마다 지금 앱에 맞춰진다.
   // ★ 진행 확인을 /api/byteplus/tasks/:id 로 하게 만들지 마라 — 그 조회는 성공을 처음 본 순간 트래커 보고와
   //   NCP 보관을 하고 작업→프로젝트 기록을 지운다. 화면과 에이전트가 같이 조회하면 그 순서가 엇갈린다.
   // 이 라우트들도 위의 127.0.0.1 바인딩 + 다른 출처 거절 미들웨어 뒤에 있다. 메모리에만 둔다(앱을 껐다 켜면
@@ -1293,7 +1297,15 @@ async function startServer() {
     takenBy?: string; error?: string; projectName?: string; messages?: unknown[];
   };
   const agentJobs = new Map<string, AgentJob>();
-  let agentScreen: { at: number; project?: string; billing?: string | null; generating?: boolean; composer?: boolean } = { at: 0 };
+  let agentScreen: {
+    at: number; project?: string; billing?: string | null; generating?: boolean; composer?: boolean;
+    allowedModels?: string[]; fourK?: boolean;
+  } = { at: 0 };
+  let agentManual: { version: string; manual: unknown; text: string } | null = null;   // 화면이 올린 설명서
+  const manualVersionNow = () => agentManual?.version ?? null;
+  const staleNotice = (have: string) => `앱이 업데이트됐습니다(읽은 설명서 ${have} → 지금 ${manualVersionNow()}). `
+    + '설명서를 다시 읽고(GET /api/agent/manual · send-to-seedance.mjs --manual) 그 기준으로 확인 카드를 다시 보여 준 뒤, '
+    + 'manual 을 새 버전으로 바꿔 보내 주세요.';
   const agentScreenSeen = new Map<string, number>();   // 화면(창)마다 마지막으로 들른 시각
   const pruneAgentJobs = () => {
     const now = Date.now();
@@ -1318,21 +1330,49 @@ async function startServer() {
   };
   const openAgentJobs = () => [...agentJobs.values()].filter(j => j.status === 'pending' || j.status === 'taken');
 
-  app.get('/api/agent/status', (_req, res) => {
+  app.get('/api/agent/status', (req, res) => {
     pruneAgentJobs();
+    // ?manual=<에이전트가 읽은 버전> 을 주면 낡았는지 바로 알려 준다(보내기 전 확인 단계에서).
+    const have = typeof req.query.manual === 'string' ? req.query.manual : '';
+    const stale = !!have && !!agentManual && have !== agentManual.version;
     res.json({
       ok: true,
       screenAlive: Date.now() - agentScreen.at < 8000,   // 화면이 작업함을 들여다보고 있나 (2초마다 들른다)
       project: agentScreen.project ?? null,              // 지금 열린 프로젝트(사이드바)
       billing: agentScreen.billing ?? null,               // 과금 프로젝트 선택 — null 이면 아직 안 고름
+      allowedModels: agentScreen.allowedModels ?? null,   // 그 과금 프로젝트로 지금 쓸 수 있는 모델
+      fourK: !!agentScreen.fourK,                         // 4K 권한
       generating: !!agentScreen.generating,
       composer: agentScreen.composer !== false,           // false = 갤러리 화면(작성 칸이 없어 받지 못함)
       pending: openAgentJobs().length,
+      manualVersion: manualVersionNow(),
+      ...(have ? { manualStale: stale, ...(stale ? { notice: staleNotice(have) } : {}) } : {}),
     });
+  });
+
+  // 사용 설명서 — 화면이 자기 코드(MODELS · 패널 목록)에서 만들어 올리고, 에이전트가 읽는다.
+  app.post('/api/agent/manual', (req, res) => {
+    const b = req.body || {};
+    if (typeof b.version !== 'string' || !b.version || b.version.length > 80) return res.status(400).json({ error: 'version 이 없습니다' });
+    if (typeof b.text !== 'string' || b.text.length > 300000) return res.status(400).json({ error: 'text 가 없거나 너무 깁니다' });
+    if (!b.manual || typeof b.manual !== 'object') return res.status(400).json({ error: 'manual 이 없습니다' });
+    if (agentManual?.version !== b.version) console.log(`[Agent] 설명서 ${b.version}`);
+    agentManual = { version: b.version, manual: b.manual, text: b.text };
+    res.json({ ok: true });
+  });
+  app.get('/api/agent/manual', (_req, res) => {
+    if (!agentManual) return res.status(503).json({ error: '앱 화면이 아직 설명서를 올리지 않았습니다 — 시댄스 창이 열려 있는지 확인해 주세요.' });
+    res.json({ ok: true, version: agentManual.version, manual: agentManual.manual, text: agentManual.text });
   });
 
   app.post('/api/agent/jobs', (req, res) => {
     const b = req.body || {};
+    // 설명서 버전 확인 — 에이전트가 읽은 설명서가 지금 앱의 것이어야 받는다.
+    if (!agentManual) return res.status(503).json({ error: '앱 화면이 아직 준비되지 않았습니다(설명서 없음) — 시댄스 창이 열려 있는지 확인해 주세요.' });
+    if (typeof b.manual !== 'string' || !b.manual) {
+      return res.status(400).json({ error: '설명서 버전(manual)이 없습니다 — 설명서를 먼저 읽고(GET /api/agent/manual · send-to-seedance.mjs --manual) 그 version 을 manual 에 적어 보내 주세요.', needManual: true, manualVersion: manualVersionNow() });
+    }
+    if (b.manual !== agentManual.version) return res.status(409).json({ error: staleNotice(b.manual), stale: true, manualVersion: manualVersionNow() });
     const prompt = typeof b.prompt === 'string' ? b.prompt : '';
     if (!prompt.trim()) return res.status(400).json({ error: 'prompt 가 비었습니다' });
     if (prompt.length > 50000) return res.status(400).json({ error: 'prompt 가 너무 깁니다 (5만 자까지)' });
@@ -1358,7 +1398,7 @@ async function startServer() {
       },
     });
     console.log(`[Agent] job ${id} 받음 (레퍼런스 ${refs.length}개)`);
-    res.json({ ok: true, id });
+    res.json({ ok: true, id, manualVersion: manualVersionNow() });
   });
 
   app.post('/api/agent/jobs/claim', (req, res) => {
@@ -1373,14 +1413,18 @@ async function startServer() {
       billing: typeof b.billing === 'string' ? b.billing : null,
       generating: !!b.generating,
       composer: b.composer !== false,
+      allowedModels: Array.isArray(b.allowedModels) ? b.allowedModels.filter((x: unknown) => typeof x === 'string').slice(0, 50) : undefined,
+      fourK: b.fourK === true,
     };
     pruneAgentJobs();
+    // manualVersion: 화면은 자기 설명서와 다르면(서버가 다시 떴거나 처음) 올린다.
+    const manualVersion = manualVersionNow();
     // peek: 상태만 알리고 가져가지는 않는다 — 사용자가 입력 중 · 생성 중 · 다른 작업을 보내는 중일 때.
-    if (b.peek || !screen) return res.json({ job: null });
+    if (b.peek || !screen) return res.json({ job: null, manualVersion });
     const next = [...agentJobs.values()].filter(j => j.status === 'pending').sort((x, y) => x.createdAt - y.createdAt)[0];
-    if (!next) return res.json({ job: null });
+    if (!next) return res.json({ job: null, manualVersion });
     next.status = 'taken'; next.updatedAt = now; next.takenBy = screen;
-    res.json({ job: { id: next.id, ...next.spec } });
+    res.json({ job: { id: next.id, ...next.spec }, manualVersion });
   });
 
   app.post('/api/agent/jobs/:id/report', (req, res) => {
@@ -1402,7 +1446,7 @@ async function startServer() {
     pruneAgentJobs();
     const j = agentJobs.get(req.params.id);
     if (!j) return res.status(404).json({ error: '없는 작업입니다 (앱을 다시 켜면 작업함이 비워집니다)' });
-    res.json({ id: j.id, name: j.spec.name, status: j.status, error: j.error, project: j.projectName, messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt });
+    res.json({ id: j.id, name: j.spec.name, status: j.status, error: j.error, project: j.projectName, messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt, manualVersion: manualVersionNow() });
   });
 
   // ── 목록 썸네일(포스터) ───────────────────────────────────────────────────

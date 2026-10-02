@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -20,21 +20,12 @@ const RESOLUTIONS: { id: string; name: string }[] = [
 // 해상도 드롭다운 안의 '초안' 선택지. 해상도 값이 아니라 draft 플래그를 켜는 자리라서
 // 어떤 해상도 id 와도 겹치지 않는 값을 쓴다.
 const DRAFT_OPTION = '__draft__';
-const RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
-// Gemini Omni — display names for the API's task values. Which of these a given model
-// actually offers comes from modelOmniTasks(); this map is only the label lookup, so a
-// task added for one model can never appear on another just by living in this file.
-// "Unspecified" (omit task → model infers) is intentionally absent — see OMNI_DEFAULT_TASKS.
-const OMNI_TASK_NAMES: Record<string, string> = {
-  text_to_video: 'Text to Video',
-  image_to_video: 'Image to Video',
-  reference_to_video: 'Reference to Video',
-  edit: 'Edit Video',
-  extend: 'Extend Video',
-};
+// 모드 · 비율 · Omni 작업 이름 · 출력 형식 이름 · 마지막 프레임 모드 · 개수 상한은 store.ts 한 곳에 있다(26.10.302~).
+// 에이전트 설명서(src/lib/agent-inbox.ts)가 같은 목록을 읽는다 — 여기에 따로 적으면 패널과 설명서가 갈린다.
+const RATIOS = SEEDANCE_RATIOS;
 const omniTaskOptions = (model: string) =>
   modelOmniTasks(model).map(id => ({ id, name: OMNI_TASK_NAMES[id] || id }));
-const OMNI_RATIOS: { id: string; name: string }[] = [{ id: '16:9', name: '16:9' }, { id: '9:16', name: '9:16' }];
+const OMNI_RATIOS: { id: string; name: string }[] = OMNI_RATIO_IDS.map(id => ({ id, name: id }));
 
 // File picker accept filter per asset type (used by per-asset replace).
 const acceptFor = (type: 'image_url' | 'video_url' | 'audio_url') =>
@@ -138,31 +129,7 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
   );
 }
 
-const MODES: { id: GenerationMode; name: string }[] = [
-  { id: 'text_to_video', name: 'Text to Video' },
-  { id: 'image_to_video_first', name: 'Image to Video (First Frame)' },
-  { id: 'image_to_video_first_last', name: 'Image to Video (First & Last)' },
-  { id: 'multimodal_reference', name: 'Multimodal Reference' },
-  { id: 'edit_video', name: 'Edit Video' },
-  { id: 'extend_video', name: 'Extend Video' },
-];
-
-// Labels for the output-format picker. Codec details (4:4:4 vs 4:2:0, PCM vs AAC) stay out
-// of the UI on purpose — the choice people actually make is "editing" vs "share it around".
-// The measured difference is recorded on MODELS.outputFormats in store.ts if it's ever needed again.
-const OUTPUT_FORMAT_LABEL: Record<string, string> = {
-  mov: 'MOV · 편집용',
-  mp4: 'MP4 · 호환',
-};
-
-// Modes where return_last_frame makes sense. ChatArea 의 에이전트 작업함도 같은 목록으로 거른다.
-export const RETURN_LAST_FRAME_MODES: GenerationMode[] = [
-  'text_to_video',
-  'image_to_video_first',
-  'multimodal_reference',
-  'edit_video',
-  'extend_video',
-];
+const MODES = GENERATION_MODES;   // store.ts (위 주석)
 
 function CustomSelect({ value, options, onChange, placeholder }: { value: string, options: {id: string, name: string}[], onChange: (val: string) => void, placeholder?: string }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -924,7 +891,7 @@ export function SettingsPanel() {
               <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">Output Count</label>
               <span className="text-[12px] text-gray-500">{draftOutput ?? (settings.output_count || 1)}</span>
             </div>
-            <input type="range" min="1" max="3" value={draftOutput ?? (settings.output_count || 1)} onChange={(e) => setDraftOutput(parseInt(e.target.value))} onPointerUp={commitOutput} onKeyUp={commitOutput} onBlur={commitOutput} className="w-full accent-[#0071e3]" />
+            <input type="range" min="1" max={OUTPUT_COUNT_MAX} value={draftOutput ?? (settings.output_count || 1)} onChange={(e) => setDraftOutput(parseInt(e.target.value))} onPointerUp={commitOutput} onKeyUp={commitOutput} onBlur={commitOutput} className="w-full accent-[#0071e3]" />
           </div>
 
           {isOmni ? (

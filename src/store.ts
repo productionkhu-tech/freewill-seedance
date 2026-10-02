@@ -1219,6 +1219,50 @@ const SEEDANCE_25 = {
 // guess. Task is always an explicit user choice.
 export const OMNI_DEFAULT_TASKS = ['text_to_video', 'image_to_video', 'reference_to_video', 'edit'];
 
+// ── 설정 패널과 에이전트 설명서가 같이 읽는 목록 (26.10.302~) ─────────────────────────
+// 원래 SettingsPanel.tsx 안에 있던 것들이다. 에이전트 작업함의 설명서(src/lib/agent-inbox.ts)가 '패널에서 고를 수
+// 있는 것' 을 그대로 알려야 해서 여기 한 곳으로 옮겼다. 패널에 따로 적지 마라 — 설명서와 갈린다.
+export const GENERATION_MODES: { id: GenerationMode; name: string }[] = [
+  { id: 'text_to_video', name: 'Text to Video' },
+  { id: 'image_to_video_first', name: 'Image to Video (First Frame)' },
+  { id: 'image_to_video_first_last', name: 'Image to Video (First & Last)' },
+  { id: 'multimodal_reference', name: 'Multimodal Reference' },
+  { id: 'edit_video', name: 'Edit Video' },
+  { id: 'extend_video', name: 'Extend Video' },
+];
+export const SEEDANCE_RATIOS = ['adaptive', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16'];
+export const OMNI_RATIO_IDS = ['16:9', '9:16'];
+// Gemini Omni — display names for the API's task values. Which of these a given model
+// actually offers comes from modelOmniTasks(); this map is only the label lookup, so a
+// task added for one model can never appear on another just by living in this file.
+// "Unspecified" (omit task → model infers) is intentionally absent — see OMNI_DEFAULT_TASKS.
+export const OMNI_TASK_NAMES: Record<string, string> = {
+  text_to_video: 'Text to Video',
+  image_to_video: 'Image to Video',
+  reference_to_video: 'Reference to Video',
+  edit: 'Edit Video',
+  extend: 'Extend Video',
+};
+// Labels for the output-format picker. Codec details (4:4:4 vs 4:2:0, PCM vs AAC) stay out
+// of the UI on purpose — the choice people actually make is "editing" vs "share it around".
+// The measured difference is recorded on MODELS.outputFormats below if it's ever needed again.
+export const OUTPUT_FORMAT_LABEL: Record<string, string> = {
+  mov: 'MOV · 편집용',
+  mp4: 'MP4 · 호환',
+};
+// Modes where return_last_frame makes sense.
+export const RETURN_LAST_FRAME_MODES: GenerationMode[] = [
+  'text_to_video',
+  'image_to_video_first',
+  'multimodal_reference',
+  'edit_video',
+  'extend_video',
+];
+// 한 번에 만드는 개수 상한 — 패널 슬라이더와 에이전트 작업함.
+export const OUTPUT_COUNT_MAX = 3;
+// Omni 편집·연장·참조 영상의 크기 상한(MB) — 첨부(attachFiles 의 옴니 분기)와 설명서.
+export const OMNI_VIDEO_MAX_MB = 50;
+
 export const MODELS: {
   id: string; name: string; provider?: 'byteplus' | 'gemini';
   res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
@@ -1243,10 +1287,16 @@ export const MODELS: {
   // this field cannot change any model that doesn't declare it.
   omniTasks?: string[];
   defaults?: { resolution?: string; ratio?: string; duration?: number; draft?: boolean };
+  // 에이전트 설명서(26.10.302~, src/lib/agent-inbox.ts)에 그대로 나간다. guide = 이 모델 프롬프트를 쓸 때 따를 공식
+  // 가이드 이름(freewill 커넥터의 official/<guide>), notes = 위 숫자들로는 안 드러나는 사용법 한두 줄.
+  // ★ 모델을 추가하면 이 둘도 적는다 — 팀원 PC 의 에이전트는 이걸 읽고 그 모델을 쓴다(커넥터는 손댈 필요 없음).
+  guide?: string; notes?: string[];
 }[] = [
-  { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0' },
-  { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast' },
-  { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini' },
+  { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0', guide: 'sd2-pe',
+    notes: ['4K 는 과금 프로젝트에 4K 권한이 있을 때만 — 없으면 앱이 낮춰서 보낸다. 4K 는 HEVC 10-bit 라 코덱이 없는 PC 에서는 미리보기가 안 될 수 있다.'] },
+  { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast', guide: 'sd2-pe',
+    notes: ['빠른 시안용 — 1080p·4K 가 없다.'] },
+  { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini', guide: 'sd2-pe' },
   // Omni's reference-image cap is 10, not the Seedance default of 9. It used to live as a
   // literal `>= 10` in the panel; declaring it here is what lets the counter and the upload
   // button read the same number (they briefly disagreed — 9 vs 10 — when the literal was
@@ -1267,7 +1317,10 @@ export const MODELS: {
   // Schema validation does not reveal that — it accepts task:'extend' for both models
   // identically — which is the whole reason the two entries stay separate.
   { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10,
-    vidMax: 3, audMax: 0 },
+    vidMax: 3, audMax: 0, guide: 'gemini-omni-flash-api',
+    notes: ['해상도 설정을 무시하고 늘 720p 로 나온다.',
+      '끝 프레임은 비공식 — 참조 방식으로 유도할 뿐 정확한 보간이 아니다. 첫·끝 프레임이 필요하면 Omni 1.1.',
+      '생성이 한 번에 끝나는 방식이라 카드가 보통 1분 안팎 "생성 중" 으로 있다가 바로 완성된다.'] },
   // ── Gemini Omni 1.1 Flash ───────────────────────────────────────────────────────────
   // Deliberately does NOT share a capability object with the preview above. The API
   // validates the request SCHEMA, not the model's abilities — probed 2026-08-28, both
@@ -1301,14 +1354,19 @@ export const MODELS: {
   { id: 'gemini-omni-1.1-flash', name: 'Gemini Omni 1.1 Flash', provider: 'gemini', imgMax: 10,
     vidMax: 3, audMax: 0, dur: [3, 10], firstLastFrame: true, extendMaxSrcSec: 30,
     res: ['360p', '720p', '1080p', '4k'],
-    omniTasks: [...OMNI_DEFAULT_TASKS, 'extend'] },
+    omniTasks: [...OMNI_DEFAULT_TASKS, 'extend'], guide: 'gemini-omni-flash-api',
+    notes: ['첫·끝 프레임을 공식 지원한다(image_to_video 에 두 장).',
+      'extend 는 30초 이하 원본에 duration 초만큼 이어 붙인다 — 한 번에 최대 40초.',
+      '360p 는 1분 안팎, 1080p 는 2분 안팎, 4K 는 20분 넘게 걸리기도 한다.'] },
   // ── Seedance 2.5 (official, 2026-08-07) ─────────────────────────────────────────────
   // The demo endpoint that used to sit beside this row was retired 2026-08-14; projects
   // saved on it are moved here at hydration (LEGACY_MODEL_IDS in src/lib/model-access.ts),
   // which is safe because the two always had the identical capability set.
   // Permission lives in MODEL_GRANTS (src/lib/model-access.ts), not here — server.ts has
   // to read the same fact and must not import the store.
-  { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5', ...SEEDANCE_25 },
+  { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5', ...SEEDANCE_25, guide: 'sd25-pe',
+    notes: ['초안(draft)이 기본 — 480p 로 먼저 보고, 고른 것만 앱 카드의 \'본편\' 으로 1080p 를 만든다(같은 시드·구도를 키운 것). 바로 최종이면 draft:false 와 해상도를 정한다.',
+      '1080p 는 HEVC 10-bit — mov(기본)는 4:4:4 라 일부 편집기·플레이어가 못 열고, mp4 는 4:2:0 이라 더 잘 열린다.'] },
 ];
 
 // Capability lookups. Each returns the model's override when present, otherwise the
@@ -1405,6 +1463,26 @@ export function videoExtFor(url: string | undefined, model: string): string {
 }
 export function modelAllowsAudioOnly(model: string): boolean {
   return MODELS.find(m => m.id === model)?.audioOnly === true;
+}
+// 모드(시댄스) · 작업(Omni)별로 붙일 수 있는 레퍼런스 개수 (26.10.302~). 첨부(ChatArea attachFiles — 드래그와
+// 에이전트 작업함)와 에이전트 설명서가 같이 읽는다. 0 = 그 종류는 안 받음. 편집의 영상 1개는 '교체' 다.
+export function modeRefCaps(model: string, mode: GenerationMode): { image: number; video: number; audio: number } {
+  switch (mode) {
+    case 'multimodal_reference': return { image: modelImageMax(model), video: modelVideoMax(model), audio: modelAudioMax(model) };
+    case 'edit_video': return { image: modelImageMax(model), video: 1, audio: modelAudioMax(model) };
+    case 'extend_video': return { image: 0, video: 3, audio: 0 };
+    case 'image_to_video_first': return { image: 1, video: 0, audio: 0 };
+    case 'image_to_video_first_last': return { image: 2, video: 0, audio: 0 };
+    default: return { image: 0, video: 0, audio: 0 };
+  }
+}
+export function omniTaskRefCaps(model: string, task: string): { image: number; video: number; audio: number } {
+  switch (task) {
+    case 'image_to_video': return { image: 2, video: 0, audio: 0 };   // 시작(·끝) 프레임
+    case 'reference_to_video': return { image: modelImageMax(model), video: modelVideoMax(model), audio: 0 };
+    case 'edit': case 'extend': return { image: 0, video: 1, audio: 0 };
+    default: return { image: 0, video: 0, audio: 0 };
+  }
 }
 
 // ── 초안 모드 ────────────────────────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings } from '../store';
+import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
-import { getAssetNames, RETURN_LAST_FRAME_MODES } from './SettingsPanel';
+import { getAssetNames } from './SettingsPanel';
+import { agentSettings, buildAgentManual } from '../lib/agent-inbox';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
 import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
@@ -549,76 +550,9 @@ const rebindMentionPills = (html: string, named: { id: string; name: string }[])
   return temp.innerHTML;
 };
 
-// 에이전트가 준 설정을 프로젝트 설정 위에 얹는다. 설정 패널에서 고를 수 있는 값만 받고, 아니면 이유를 돌려준다.
-// 모델·모드가 바뀌면 패널에서 바꿀 때처럼 그 조합의 기본값에서 시작하고(settingsDefaultsFor), 준 값이 그 위에 덮인다.
-// 비율은 일부러 검사하지 않는다 — BytePlus 가 작업을 만들기 전에 검증해 과금 없이 거절한다(HANDOFF '무과금 API 프로브').
-const AGENT_MODES: GenerationMode[] = ['text_to_video', 'image_to_video_first', 'image_to_video_first_last', 'multimodal_reference', 'edit_video', 'extend_video'];
-function agentSettings(cur: GenerationSettings, req: Record<string, unknown>): { next?: GenerationSettings; error?: string } {
-  const next: GenerationSettings = { ...cur };
-  const has = (k: string) => req[k] !== undefined && req[k] !== null && req[k] !== '';
-  if (has('model')) {
-    const m = resolveModelId(String(req.model));
-    if (!MODELS.some(x => x.id === m)) return { error: `앱에 없는 모델입니다: ${req.model}\n(있는 모델: ${MODELS.map(x => x.id).join(', ')})` };
-    next.model = m;
-  }
-  const omni = modelProvider(next.model) === 'gemini';
-  if (has('mode') && !omni) {
-    if (!AGENT_MODES.includes(req.mode as GenerationMode)) return { error: `모르는 모드입니다: ${req.mode}\n(${AGENT_MODES.join(', ')})` };
-    next.mode = req.mode as GenerationMode;
-  }
-  if (omni) {
-    const tasks = modelOmniTasks(next.model);
-    if (has('omniTask') && !tasks.includes(String(req.omniTask))) return { error: `이 모델에 없는 작업입니다: ${req.omniTask}\n(${tasks.join(', ')})` };
-    next.omniTask = resolveOmniTask(next.model, has('omniTask') ? String(req.omniTask) : next.omniTask);
-  }
-  if (next.model !== cur.model || next.mode !== cur.mode) {
-    Object.assign(next, settingsDefaultsFor(next.model, next.mode));
-    if (!RETURN_LAST_FRAME_MODES.includes(next.mode)) next.return_last_frame = false;
-    if (next.output_format && !modelOutputFormats(next.model).includes(next.output_format)) next.output_format = undefined;
-    // Omni 는 16:9 · 9:16, 3~10초만 — 모델을 Omni 로 바꿀 때 패널이 하는 정리와 같다.
-    if (omni && next.ratio !== '16:9' && next.ratio !== '9:16') next.ratio = '16:9';
-    if (omni && (next.duration === -1 || next.duration < 3 || next.duration > 10)) next.duration = 5;
-  }
-  if (has('resolution')) {
-    const r = String(req.resolution);
-    const ok = modelResolutions(next.model);
-    if (!ok.includes(r)) return { error: `이 모델에 없는 해상도입니다: ${r}\n(${ok.join(', ')})` };
-    next.resolution = r;
-  }
-  if (has('ratio')) next.ratio = String(req.ratio);
-  if (has('duration')) {
-    const d = Number(req.duration);
-    const [lo, hi] = modelDurationRange(next.model);
-    if (!(d === -1 && !omni) && !(Number.isInteger(d) && d >= lo && d <= hi)) return { error: `길이는 ${lo}~${hi}초${omni ? '' : ' 또는 -1(자동)'}입니다: ${req.duration}` };
-    next.duration = d;
-  }
-  if (has('output_count')) {
-    const n = Number(req.output_count);
-    if (!Number.isInteger(n) || n < 1 || n > 3) return { error: `개수는 1~3입니다: ${req.output_count}` };
-    next.output_count = n;
-  }
-  if (has('generate_audio')) {
-    if (typeof req.generate_audio !== 'boolean') return { error: 'generate_audio 는 true/false 입니다' };
-    next.generate_audio = req.generate_audio;
-  }
-  if (has('return_last_frame')) {
-    if (typeof req.return_last_frame !== 'boolean') return { error: 'return_last_frame 는 true/false 입니다' };
-    if (req.return_last_frame && (omni || !RETURN_LAST_FRAME_MODES.includes(next.mode))) return { error: '이 모드에서는 마지막 프레임을 따로 받을 수 없습니다' };
-    next.return_last_frame = req.return_last_frame;
-  }
-  if (has('draft')) {
-    if (typeof req.draft !== 'boolean') return { error: 'draft 는 true/false 입니다' };
-    if (req.draft && (omni || !modelSupportsDraft(next.model))) return { error: '이 모델은 초안(Draft)이 없습니다' };
-    next.draft = req.draft;
-  }
-  if (has('output_format')) {
-    const f = String(req.output_format);
-    const ok = modelOutputFormats(next.model);
-    if (!ok.includes(f)) return { error: `이 모델에 없는 출력 형식입니다: ${f}${ok.length ? `\n(${ok.join(', ')})` : ''}` };
-    next.output_format = f;
-  }
-  return { next };
-}
+// 에이전트 설명서(src/lib/agent-inbox.ts) — 모듈 상수에서 만들므로 한 번만 만든다(바뀌려면 앱을 다시 켜야 한다).
+let agentManualCache: ReturnType<typeof buildAgentManual> | null = null;
+const agentManual = () => (agentManualCache ??= buildAgentManual(__APP_VERSION__));
 
 // Block-level tags that occupy their own line when the prompt HTML is serialized.
 // contentEditable writes <div> per line; pasted rich text can add <p>/<li>/headings.
@@ -1777,11 +1711,23 @@ export function ChatArea() {
     const t = window.setInterval(() => { void agentTickRef.current(); }, 2000);
     return () => window.clearInterval(t);
   }, []);
-  // 열린 프로젝트가 없을 때(아래 가드에서 멈춤)도 '화면은 켜져 있음' 은 알린다 — 가드 뒤에서 진짜 처리로 바꿔 끼운다.
-  agentTickRef.current = () => fetch('/api/agent/jobs/claim', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ screen: agentScreenId, peek: true, project: null, billing: null, composer: false }),
-  }).then(() => undefined, () => undefined);
+  // 설명서 올리기 — 서버가 가진 버전이 이 화면의 것과 다르면(앱을 막 켰거나 서버만 다시 떴을 때) 올린다.
+  // 서버는 이걸 에이전트에게 그대로 내주고, 작업함 응답마다 버전을 붙인다(src/lib/agent-inbox.ts).
+  const agentSyncManual = (serverVersion: unknown) => {
+    const m = agentManual();
+    if (serverVersion === m.version) return;
+    void fetch('/api/agent/manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(m) }).catch(() => {});
+  };
+  // 열린 프로젝트가 없을 때(아래 가드에서 멈춤)도 '화면은 켜져 있음' 과 설명서는 알린다 — 가드 뒤에서 진짜 처리로 바꿔 끼운다.
+  agentTickRef.current = async () => {
+    try {
+      const r = await fetch('/api/agent/jobs/claim', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ screen: agentScreenId, peek: true, project: null, billing: null, composer: false, manual: agentManual().version }),
+      });
+      if (r.ok) agentSyncManual((await r.json())?.manualVersion);
+    } catch { /* 다음 틱에 */ }
+  };
 
   if (!project) return null;
 
@@ -1945,7 +1891,7 @@ export function ChatArea() {
         if (task === 'edit' || task === 'extend') {
           if (!isVid) { rejected.push(`${file.name}: ${task === 'extend' ? 'Extend' : 'Edit'} Video는 영상만 받습니다.`); continue; }
           const sizeMB = file.size / (1024 * 1024);
-          if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
+          if (sizeMB > OMNI_VIDEO_MAX_MB) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 ${OMNI_VIDEO_MAX_MB}MB)`); continue; }
           // Measure and STORE the length. This path used to skip it entirely, which meant a
           // dropped clip carried no durationSec — so the panel's extend arithmetic and the
           // send-time 30s guard both silently did nothing for anything dropped rather than
@@ -1974,10 +1920,10 @@ export function ChatArea() {
           // Count LIVE, not from the `assets` snapshot taken before this loop: dropping
           // three clips at once would otherwise see zero for all three and add them all.
           const vidNow = (useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []).filter(a => a.type === 'video_url').length;
-          const vidCapDrop = modelVideoMax(model);
+          const vidCapDrop = omniTaskRefCaps(model, task).video;
           if (vidNow >= vidCapDrop) { rejected.push(`${file.name}: 참조 영상은 ${vidCapDrop}개까지입니다`); continue; }
           const sizeMB = file.size / (1024 * 1024);
-          if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
+          if (sizeMB > OMNI_VIDEO_MAX_MB) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 ${OMNI_VIDEO_MAX_MB}MB)`); continue; }
           try {
             const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
             const originalPath = pathOf(file);
@@ -1999,7 +1945,7 @@ export function ChatArea() {
           // modelImageMax, not a literal — same reason the reference-video cap moved to
           // modelVideoMax: the panel and this handler each held their own copy and drifted
           // (panel said "비디오 1/3" while a drop was refused at the 2nd file).
-          const imgCapDrop = modelImageMax(model);
+          const imgCapDrop = omniTaskRefCaps(model, task).image;
           if (assets.filter(a => a.type === 'image_url').length >= imgCapDrop) {
             rejected.push(`${file.name}: 이미지 한도 ${imgCapDrop}장 초과`); continue;
           }
@@ -2016,7 +1962,7 @@ export function ChatArea() {
       if (file.type.startsWith('image/')) {
         if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
         const imgCount = assets.filter(a => a.type === 'image_url').length;
-        const maxImg = mode === 'multimodal_reference' ? modelImageMax(model) : mode === 'edit_video' ? modelImageMax(model) : mode === 'image_to_video_first' ? 1 : mode === 'image_to_video_first_last' ? 2 : 0;
+        const maxImg = modeRefCaps(model, mode).image;   // store.ts — 에이전트 설명서도 같은 수를 읽는다
         if (imgCount >= maxImg) { rejected.push(`${file.name}: 이미지 한도 ${maxImg}개 초과`); continue; }
         let role: any = 'reference_image';
         if (mode === 'image_to_video_first') role = 'first_frame';
@@ -2044,7 +1990,7 @@ export function ChatArea() {
         }
         const existingVideos = assets.filter(a => a.type === 'video_url');
         const vidCount = existingVideos.length;
-        const maxVid = mode === 'extend_video' ? 3 : mode === 'edit_video' ? 1 : mode === 'multimodal_reference' ? modelVideoMax(model) : 0;
+        const maxVid = modeRefCaps(model, mode).video;
         // edit_video has a 1-video cap. When the user drops a new video while one
         // is already attached, treat it as a replace (preserve asset id so any
         // "@[Video 1]" mention keeps pointing to the same slot) rather than
@@ -2083,7 +2029,7 @@ export function ChatArea() {
           rejected.push(`${file.name}: 이 모드에서는 오디오를 사용할 수 없습니다.`); continue;
         }
         const audCount = assets.filter(a => a.type === 'audio_url').length;
-        const maxAud = modelAudioMax(model);
+        const maxAud = modeRefCaps(model, mode).audio;
         if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
         const audErr = await validateAudioFile(file, modelRefAudioSec(model));
         if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
@@ -3505,9 +3451,17 @@ export function ChatArea() {
           project: proj?.name ?? null,
           billing: selectedBillingProject(st)?.project ?? null,
           generating: isGenerating,
+          manual: agentManual().version,
+          // 지금 과금 프로젝트로 쓸 수 있는 것 — 에이전트가 권한 없는 모델을 고르지 않게(설명서는 '무엇이 있나', 이건 '지금 되나').
+          allowedModels: MODELS.filter(m => isModelAllowed(m.id, st)).map(m => m.id),
+          fourK: isFourKAllowed(st),
         }),
       });
-      if (res.ok) job = (await res.json())?.job || null;
+      if (res.ok) {
+        const data = await res.json();
+        job = data?.job || null;
+        agentSyncManual(data?.manualVersion);
+      }
     } catch { /* 서버가 잠깐 없으면 다음 틱에 */ }
     if (peek) return;
     if (!job) { agentBusyRef.current = false; return; }
