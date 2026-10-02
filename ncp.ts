@@ -17,6 +17,7 @@
  *  업데이트로 재시작한 앱이 옛 값을 계속 쓰는 문제가 있다 — 제미나이 키에서 겪은 그것.)
  */
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { Readable, Transform } from 'node:stream';
@@ -28,7 +29,7 @@ import {
   HeadObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { makePoster, makePreview } from './transcode';
+import { makePoster, makePreview, ffmpegPath } from './transcode';
 
 const GATEWAY_URL = process.env.SEEDANCE_GATEWAY_URL || 'https://seedance-gateway.production-khu.workers.dev';
 
@@ -566,19 +567,16 @@ export async function recoverFromHints(
  * 켜자마자 수백 건을 동시에 당기면 정작 사용자가 보려는 영상이 밀린다.
  * 이미 있는 것은 건너뛰므로 두 번째 실행부터는 사실상 공짜다.
  */
-export async function backfillPosters(): Promise<{ had: number; got: number; failed: number }> {
-  const out = { had: 0, got: 0, failed: 0 };
+export async function backfillPosters(): Promise<{ had: number; got: number; made: number; failed: number }> {
+  const out = { had: 0, got: 0, made: 0, failed: 0 };
   const todo: string[] = [];
   for (const [taskId, row] of mediaIndex) {
-    if (!row?.poster) continue;                       // 애초에 썸네일이 없는 건 건너뛴다
+    if (!row?.poster) continue;                       // 썸네일이 없는 것은 아래 2) 에서 만든다
     if (fs.existsSync(localPosterPath(taskId))) { out.had++; continue; }
     todo.push(taskId);
   }
-  if (!todo.length) {
-    console.log(`[NCP] 썸네일 로컬 보관 ${out.had}건 — 받을 것 없음`);
-    return out;
-  }
-  console.log(`[NCP] 썸네일 ${todo.length}건을 로컬로 받아둡니다 (이미 있음 ${out.had}건)`);
+  // 1) NCP 에 있는 썸네일을 로컬로.
+  if (todo.length) console.log(`[NCP] 썸네일 ${todo.length}건을 로컬로 받아둡니다 (이미 있음 ${out.had}건)`);
   for (const taskId of todo) {
     try {
       const url = await presignPoster(taskId);
@@ -591,8 +589,79 @@ export async function backfillPosters(): Promise<{ had: number; got: number; fai
     } catch { out.failed++; }
     await new Promise(r => setTimeout(r, 120));
   }
-  console.log(`[NCP] 썸네일 로컬 보관 완료 — 새로 받음 ${out.got}, 이미 있음 ${out.had}, 실패 ${out.failed}`);
+  // 2) 썸네일이 아예 없는 보관본 — 영상이 NCP 에서 사라지기 전에 지금 만든다(26.10.201~).
+  //    26.9.709(9/7) 전에 보관된 것은 서버가 썸네일을 만들지 않았고, 카드가 캡처하는 길은 그 PC 가
+  //    영상을 열어 봐야 하고 HEVC 코덱도 있어야 한다. 그대로 두면 보관이 끝나는 날 카드에 글씨만
+  //    남는다(2026-10-02 사용자 PC 75건 — 9/4·9/6 보관분, 10/4·10/6 만료). 먼저 사라질 것부터.
+  //    보관 기간이 지난 것은 받을 영상이 없으니 보지도 않는다. ffmpeg 이 없는 환경(맥 소스 실행
+  //    일부)에서는 아무것도 안 받는다 — 받아 놓고 못 만들면 매 실행 영상만 내려받게 된다.
+  const now = Date.now();
+  const rescue = [...mediaIndex]
+    .filter(([, r]) => r && !r.poster && r.size > 0 && now - r.at < POSTER_RESCUE_WINDOW_MS)
+    .sort((a, b) => a[1].at - b[1].at);
+  if (rescue.length && !ffmpegPath()) {
+    console.warn(`[NCP] 썸네일 없는 보관본 ${rescue.length}건 — ffmpeg 이 없어 만들지 못함`);
+  } else if (rescue.length) {
+    console.log(`[NCP] 썸네일 없는 보관본 ${rescue.length}건 — 영상이 NCP 에서 사라지기 전에 만듭니다`);
+    for (const [taskId, row] of rescue) {
+      try {
+        const r = await rescuePoster(taskId, row);
+        if (r === 'made') out.made++; else if (r === 'fetched') out.got++; else out.failed++;
+      } catch (e: any) {
+        out.failed++;
+        console.warn(`[NCP] 썸네일 만들기 실패 ${taskId}: ${e?.message || e}`);
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+  console.log(`[NCP] 썸네일 로컬 보관 — 새로 받음 ${out.got}, 새로 만듦 ${out.made}, 이미 있음 ${out.had}, 실패 ${out.failed}`);
   return out;
+}
+
+// NCP 보관은 30일 수명 주기로 지워진다. 하루 여유를 두고, 그보다 오래된 보관본은 영상이 이미 없다.
+const POSTER_RESCUE_WINDOW_MS = 31 * 24 * 60 * 60 * 1000;
+
+/**
+ * 썸네일 없는 보관본 하나에 썸네일을 만든다. 다른 PC(같은 영상을 연 팀원)나 지난 실행이 이미
+ * 만들어 NCP 에 있으면 받기만 한다. 원본은 이 PC 의 사본이 있으면 그걸, 없으면 NCP 에서 받는다.
+ * 만든 것은 makeDerivatives 와 같은 자리(본 영상 옆 .webp)와 로컬 posters/ 에 둔다.
+ */
+async function rescuePoster(taskId: string, row: IndexRow): Promise<'made' | 'fetched' | 'failed'> {
+  const ncp = await ensureNcp();
+  if (!ncp) return 'failed';
+  const there = await presignPoster(taskId);          // 있으면 색인(poster)도 여기서 고쳐진다
+  if (there) {
+    const r = await fetch(there);
+    if (!r.ok) return 'failed';
+    const body = Buffer.from(await r.arrayBuffer());
+    return body.length >= 256 && savePosterLocal(taskId, body) ? 'fetched' : 'failed';
+  }
+  const base = path.join(os.tmpdir(), `seedance-poster-${crypto.randomBytes(6).toString('hex')}`);
+  const ext = (row.key.match(/\.[A-Za-z0-9]+$/) || ['.mp4'])[0];
+  const tmpSrc = base + ext, out = base + '.webp';
+  try {
+    let src = row.local && fs.existsSync(row.local) ? row.local : '';
+    if (!src) {
+      const url = await presignArchived(taskId);
+      if (!url) return 'failed';
+      const r = await fetch(url);
+      if (!r.ok || !r.body) return 'failed';           // 404 = 보관 기간이 이미 끝났다
+      await pipeline(Readable.fromWeb(r.body as any), fs.createWriteStream(tmpSrc));
+      src = tmpSrc;
+    }
+    if (!(await makePoster(src, out))) return 'failed';
+    const body = fs.readFileSync(out);
+    await ncp.client.send(new PutObjectCommand({
+      Bucket: ncp.bucket, Key: row.key.replace(/\.[A-Za-z0-9]+$/, '.webp'), Body: body, ContentType: 'image/webp',
+    }));
+    const cur = mediaIndex.get(taskId);
+    if (cur) { cur.poster = true; saveIndex(); }
+    savePosterLocal(taskId, body);
+    console.log(`[NCP] 썸네일 만듦 ${taskId} — ${(body.length / 1024).toFixed(0)}KB${src === tmpSrc ? ' (NCP 원본에서)' : ''}`);
+    return 'made';
+  } finally {
+    for (const f of [tmpSrc, out]) { try { fs.rmSync(f, { force: true }); } catch { /* 임시 파일 */ } }
+  }
 }
 
 export function archiveStats() {
