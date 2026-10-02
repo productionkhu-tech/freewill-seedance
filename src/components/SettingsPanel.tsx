@@ -155,8 +155,8 @@ const OUTPUT_FORMAT_LABEL: Record<string, string> = {
   mp4: 'MP4 · 호환',
 };
 
-// Modes where return_last_frame makes sense
-const RETURN_LAST_FRAME_MODES: GenerationMode[] = [
+// Modes where return_last_frame makes sense. ChatArea 의 에이전트 작업함도 같은 목록으로 거른다.
+export const RETURN_LAST_FRAME_MODES: GenerationMode[] = [
   'text_to_video',
   'image_to_video_first',
   'multimodal_reference',

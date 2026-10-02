@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft } from '../store';
+import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
-import { getAssetNames } from './SettingsPanel';
+import { getAssetNames, RETURN_LAST_FRAME_MODES } from './SettingsPanel';
 import { CATEGORY_META } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
 import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
@@ -514,6 +514,111 @@ const textToHtml = (text: string, assets: any[]) => {
     return part;
   }).join('');
 };
+
+// ─── 에이전트 작업함 도우미 (26.10.302~, 쓰는 곳은 ChatArea 의 '에이전트 작업함') ───
+// 확장자 → 형식. 미디어 캐시는 원본을 octet-stream 으로 주므로 File 의 형식은 여기서 정한다. 첨부 검사(attachFiles)는
+// 드래그와 똑같이 형식과 확장자를 본다 — 모르는 확장자는 빈 형식이 되어 거기서 '지원하지 않는 파일' 로 걸린다.
+const AGENT_MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', bmp: 'image/bmp', gif: 'image/gif',
+  tif: 'image/tiff', tiff: 'image/tiff', heic: 'image/heic', heif: 'image/heif',
+  mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/x-m4v', webm: 'video/webm',
+  wav: 'audio/wav', mp3: 'audio/mpeg',
+};
+
+// 에이전트가 준 프롬프트(평문) → 작성 칸 HTML. 줄마다 <div>, 빈 줄은 <div><br></div> — getPlainText 가 글자 그대로
+// 되읽는 모양이다. [Image N] 같은 표시는 붙인 레퍼런스의 알약으로(textToHtml 과 같은 모양, 뒤에 붙는 공백만 뺀다 —
+// 보낸 글이 받은 글과 한 글자도 다르지 않게).
+const agentPromptHtml = (text: string, named: any[]) => text.replace(/\r\n?/g, '\n').split('\n').map(line => {
+  const inner = line.split(/(\[(?:Image|Video|Audio) \d+\])/g).map(part =>
+    /^\[(?:Image|Video|Audio) \d+\]$/.test(part)
+      ? textToHtml(part, named).replace(/&nbsp;$/, '')
+      : part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('');
+  return `<div>${inner || '<br>'}</div>`;
+}).join('');
+
+// 적어 둔 작성 칸 HTML 의 레퍼런스 알약을 지금 레퍼런스 id 에 이름으로 다시 묶는다 — replaceAllAssets 는 새 id 를 준다.
+// handleReuse 와 같은 일. 안 묶으면 알약 감시 effect 가 '지워진 레퍼런스' 로 보고 알약을 지운다.
+const rebindMentionPills = (html: string, named: { id: string; name: string }[]) => {
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+  temp.querySelectorAll('.mention-pill').forEach(pill => {
+    const match = named.find(a => a.name === pill.getAttribute('data-name'));
+    if (match) pill.setAttribute('data-asset-id', match.id);
+    else pill.removeAttribute('data-asset-id');
+  });
+  return temp.innerHTML;
+};
+
+// 에이전트가 준 설정을 프로젝트 설정 위에 얹는다. 설정 패널에서 고를 수 있는 값만 받고, 아니면 이유를 돌려준다.
+// 모델·모드가 바뀌면 패널에서 바꿀 때처럼 그 조합의 기본값에서 시작하고(settingsDefaultsFor), 준 값이 그 위에 덮인다.
+// 비율은 일부러 검사하지 않는다 — BytePlus 가 작업을 만들기 전에 검증해 과금 없이 거절한다(HANDOFF '무과금 API 프로브').
+const AGENT_MODES: GenerationMode[] = ['text_to_video', 'image_to_video_first', 'image_to_video_first_last', 'multimodal_reference', 'edit_video', 'extend_video'];
+function agentSettings(cur: GenerationSettings, req: Record<string, unknown>): { next?: GenerationSettings; error?: string } {
+  const next: GenerationSettings = { ...cur };
+  const has = (k: string) => req[k] !== undefined && req[k] !== null && req[k] !== '';
+  if (has('model')) {
+    const m = resolveModelId(String(req.model));
+    if (!MODELS.some(x => x.id === m)) return { error: `앱에 없는 모델입니다: ${req.model}\n(있는 모델: ${MODELS.map(x => x.id).join(', ')})` };
+    next.model = m;
+  }
+  const omni = modelProvider(next.model) === 'gemini';
+  if (has('mode') && !omni) {
+    if (!AGENT_MODES.includes(req.mode as GenerationMode)) return { error: `모르는 모드입니다: ${req.mode}\n(${AGENT_MODES.join(', ')})` };
+    next.mode = req.mode as GenerationMode;
+  }
+  if (omni) {
+    const tasks = modelOmniTasks(next.model);
+    if (has('omniTask') && !tasks.includes(String(req.omniTask))) return { error: `이 모델에 없는 작업입니다: ${req.omniTask}\n(${tasks.join(', ')})` };
+    next.omniTask = resolveOmniTask(next.model, has('omniTask') ? String(req.omniTask) : next.omniTask);
+  }
+  if (next.model !== cur.model || next.mode !== cur.mode) {
+    Object.assign(next, settingsDefaultsFor(next.model, next.mode));
+    if (!RETURN_LAST_FRAME_MODES.includes(next.mode)) next.return_last_frame = false;
+    if (next.output_format && !modelOutputFormats(next.model).includes(next.output_format)) next.output_format = undefined;
+    // Omni 는 16:9 · 9:16, 3~10초만 — 모델을 Omni 로 바꿀 때 패널이 하는 정리와 같다.
+    if (omni && next.ratio !== '16:9' && next.ratio !== '9:16') next.ratio = '16:9';
+    if (omni && (next.duration === -1 || next.duration < 3 || next.duration > 10)) next.duration = 5;
+  }
+  if (has('resolution')) {
+    const r = String(req.resolution);
+    const ok = modelResolutions(next.model);
+    if (!ok.includes(r)) return { error: `이 모델에 없는 해상도입니다: ${r}\n(${ok.join(', ')})` };
+    next.resolution = r;
+  }
+  if (has('ratio')) next.ratio = String(req.ratio);
+  if (has('duration')) {
+    const d = Number(req.duration);
+    const [lo, hi] = modelDurationRange(next.model);
+    if (!(d === -1 && !omni) && !(Number.isInteger(d) && d >= lo && d <= hi)) return { error: `길이는 ${lo}~${hi}초${omni ? '' : ' 또는 -1(자동)'}입니다: ${req.duration}` };
+    next.duration = d;
+  }
+  if (has('output_count')) {
+    const n = Number(req.output_count);
+    if (!Number.isInteger(n) || n < 1 || n > 3) return { error: `개수는 1~3입니다: ${req.output_count}` };
+    next.output_count = n;
+  }
+  if (has('generate_audio')) {
+    if (typeof req.generate_audio !== 'boolean') return { error: 'generate_audio 는 true/false 입니다' };
+    next.generate_audio = req.generate_audio;
+  }
+  if (has('return_last_frame')) {
+    if (typeof req.return_last_frame !== 'boolean') return { error: 'return_last_frame 는 true/false 입니다' };
+    if (req.return_last_frame && (omni || !RETURN_LAST_FRAME_MODES.includes(next.mode))) return { error: '이 모드에서는 마지막 프레임을 따로 받을 수 없습니다' };
+    next.return_last_frame = req.return_last_frame;
+  }
+  if (has('draft')) {
+    if (typeof req.draft !== 'boolean') return { error: 'draft 는 true/false 입니다' };
+    if (req.draft && (omni || !modelSupportsDraft(next.model))) return { error: '이 모델은 초안(Draft)이 없습니다' };
+    next.draft = req.draft;
+  }
+  if (has('output_format')) {
+    const f = String(req.output_format);
+    const ok = modelOutputFormats(next.model);
+    if (!ok.includes(f)) return { error: `이 모델에 없는 출력 형식입니다: ${f}${ok.length ? `\n(${ok.join(', ')})` : ''}` };
+    next.output_format = f;
+  }
+  return { next };
+}
 
 // Block-level tags that occupy their own line when the prompt HTML is serialized.
 // contentEditable writes <div> per line; pasted rich text can add <p>/<li>/headings.
@@ -1127,7 +1232,10 @@ export function ChatArea() {
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(null), ok ? 2200 : 5000);
   };
-  const warn = (msg: string) => showToast(msg, false);
+  // 에이전트 작업(아래 '에이전트 작업함')을 보내는 동안 뜬 경고를 모아, 그 작업의 실패 이유로 돌려준다.
+  // 화면 토스트는 평소처럼 뜬다 — 사용자도 왜 안 나갔는지 본다.
+  const agentWarnRef = useRef<string[] | null>(null);
+  const warn = (msg: string) => { agentWarnRef.current?.push(msg); showToast(msg, false); };
   // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적.
   // 슬롯 id를 함께 저장해서, 슬롯이 다른 경로(피커·삭제 후 재추가·프로젝트
   // 전환)로 바뀌었으면 사이클을 버리고 무조건 first부터 다시 시작한다.
@@ -1627,6 +1735,24 @@ export function ChatArea() {
   // Find a specific message and scroll to it — 갤러리 '찾기' · 상세의 '프롬프트 찾기'. 실제 일은 revealMessage.
   const scrollToMessage = (messageId: string) => revealMessage(messageId);
 
+  // ── 에이전트 작업함 (26.10.302~) — 훅이라 아래 `if (!project) return null` 보다 위에 둔다 ──
+  // 2초마다 server.ts 작업함을 들여다본다(폴링은 setInterval 하나 — HANDOFF §7 API 4). 실제 처리(agentTick)는
+  // handleSend 아래에 있고, 렌더마다 새 함수로 바꿔 끼운다 — 그래야 지금 화면의 상태(isGenerating 등)를 본다.
+  const agentScreenId = useMemo(() => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, []);
+  const agentBusyRef = useRef(false);   // 작업 하나를 보내는 중(작성 칸을 빌려 쓰는 중)
+  const lastTypedAtRef = useRef(0);     // 마지막 타자 시각 — 입력 중에는 가져가지 않는다
+  const agentActiveRef = useRef(new Map<string, { projectId: string; ids: string[]; last: string }>());   // 보낸 뒤 카드 상태를 올리는 작업
+  const agentTickRef = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    const t = window.setInterval(() => { void agentTickRef.current(); }, 2000);
+    return () => window.clearInterval(t);
+  }, []);
+  // 열린 프로젝트가 없을 때(아래 가드에서 멈춤)도 '화면은 켜져 있음' 은 알린다 — 가드 뒤에서 진짜 처리로 바꿔 끼운다.
+  agentTickRef.current = () => fetch('/api/agent/jobs/claim', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen: agentScreenId, peek: true, project: null, billing: null, composer: false }),
+  }).then(() => undefined, () => undefined);
+
   if (!project) return null;
 
   const namedAssets = useMemo(() => getAssetNames(project.assets), [project.assets]);
@@ -1762,13 +1888,200 @@ export function ChatArea() {
   const handleDragOver = (e: React.DragEvent) => e.preventDefault();
   const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); dragCounter.current -= 1; if (dragCounter.current === 0) setIsDragging(false); };
 
+  // 파일 붙이기 — 드래그와 에이전트 작업함(경로로 받은 파일)이 같이 쓴다. 규칙이 갈라지지 않게 한 곳에 둔다.
+  // 모델·모드는 파일마다 스토어에서 새로 읽는다. 에이전트는 설정을 바꾼 바로 그 틱에(렌더 전에) 붙이기 때문이다 —
+  // 재생성(handleReuse → handleSend)이 스토어를 새로 읽는 것과 같은 이유. 드래그에서는 화면에 보이는 값과 같다.
+  // src: 파일 객체만으로는 원본 경로를 알 수 없을 때(경로에서 읽어 만든 File) 그 경로와 이미 캐시해 둔 id.
+  // 붙이지 못한 파일과 이유를 돌려준다 — 알리는 건 부르는 쪽이다.
+  const attachFiles = async (allFiles: File[], src?: (f: File) => { path?: string; cacheId?: string } | undefined): Promise<string[]> => {
+    const rejected: string[] = [];
+    for (const file of allFiles) {
+      const freshProject = useAppStore.getState().projects.find(p => p.id === project.id);
+      const assets = freshProject?.assets || [];
+      const model = freshProject?.settings.model || project.settings.model;
+      const mode = freshProject?.settings.mode || project.settings.mode;
+      const given = src?.(file);
+      const pathOf = (f: File) => getFilePath(f) || given?.path || '';
+      const cacheOf = (f: File) => (given?.cacheId ? Promise.resolve(given.cacheId) : cacheFile(f));
+
+      // ── Gemini Omni: route drops by the selected Video task (bypasses Seedance mode rules) ──
+      if (modelProvider(model) === 'gemini') {
+        const task = resolveOmniTask(freshProject?.settings.model, freshProject?.settings.omniTask);
+        const isImg = file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif)$/i.test(file.name);
+        const isVid = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mpe?g|wmv|3gpp?|flv)$/i.test(file.name);
+        if (task === 'text_to_video') { rejected.push(`${file.name}: Text to Video는 에셋을 사용하지 않습니다.`); continue; }
+        // Extend takes the same single source clip as Edit — one branch, so the two can
+        // never drift apart on size caps, replace-vs-add, or thumbnailing.
+        if (task === 'edit' || task === 'extend') {
+          if (!isVid) { rejected.push(`${file.name}: ${task === 'extend' ? 'Extend' : 'Edit'} Video는 영상만 받습니다.`); continue; }
+          const sizeMB = file.size / (1024 * 1024);
+          if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
+          // Measure and STORE the length. This path used to skip it entirely, which meant a
+          // dropped clip carried no durationSec — so the panel's extend arithmetic and the
+          // send-time 30s guard both silently did nothing for anything dropped rather than
+          // picked through the panel. Rejecting here matches how every other cap in this
+          // app behaves (size, count): refuse at attach, with the reason.
+          const dropDur = await getMediaDurationSec(file as File, 'video');
+          const dropCap = modelExtendMaxSrcSec(model);
+          if (task === 'extend' && dropCap !== undefined && typeof dropDur === 'number' && dropDur > dropCap) {
+            rejected.push(`${(file as File).name}: ${dropDur.toFixed(1)}초 — 이어붙일 원본은 ${dropCap}초까지입니다`); continue;
+          }
+          const existing = assets.find(a => a.type === 'video_url');
+          try {
+            const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+            const originalPath = pathOf(file);
+            const cacheId = await cacheOf(file);
+            const durPatch = dropDur != null ? { durationSec: dropDur } : {};
+            if (existing) useAppStore.getState().replaceAsset(project.id, existing.id, { url: '', file_name: file.name, cacheId, thumbnailUrl, ...durPatch, ...(originalPath ? { originalPath } : {}) });
+            else addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...durPatch, ...(originalPath ? { originalPath } : {}) });
+          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
+          continue;
+        }
+        // reference_to_video also accepts video references — 3 verified working 2026-08-28
+        // (it was capped at 1 here from an older doc line saying multiple were unsupported,
+        // which left the panel showing "비디오 1/3" while a drop was refused at the 2nd file).
+        if (task === 'reference_to_video' && isVid) {
+          // Count LIVE, not from the `assets` snapshot taken before this loop: dropping
+          // three clips at once would otherwise see zero for all three and add them all.
+          const vidNow = (useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []).filter(a => a.type === 'video_url').length;
+          const vidCapDrop = modelVideoMax(model);
+          if (vidNow >= vidCapDrop) { rejected.push(`${file.name}: 참조 영상은 ${vidCapDrop}개까지입니다`); continue; }
+          const sizeMB = file.size / (1024 * 1024);
+          if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
+          try {
+            const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+            const originalPath = pathOf(file);
+            const cacheId = await cacheOf(file);
+            addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
+          continue;
+        }
+        // image tasks: image_to_video (start/end frames) | reference_to_video (≤10 image refs)
+        if (!isImg) { rejected.push(`${file.name}: 이 태스크는 이미지만 받습니다. (영상 편집은 Edit Video 태스크)`); continue; }
+        const sizeErr = validateImageFile(file);
+        if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
+        let role: any = 'reference_image';
+        if (task === 'image_to_video') {
+          if (!assets.some(a => a.role === 'first_frame')) role = 'first_frame';
+          else if (!assets.some(a => a.role === 'last_frame')) role = 'last_frame';
+          else { rejected.push(`${file.name}: Image to Video는 시작·끝 프레임 2장까지입니다.`); continue; }
+        } else {
+          // modelImageMax, not a literal — same reason the reference-video cap moved to
+          // modelVideoMax: the panel and this handler each held their own copy and drifted
+          // (panel said "비디오 1/3" while a drop was refused at the 2nd file).
+          const imgCapDrop = modelImageMax(model);
+          if (assets.filter(a => a.type === 'image_url').length >= imgCapDrop) {
+            rejected.push(`${file.name}: 이미지 한도 ${imgCapDrop}장 초과`); continue;
+          }
+        }
+        try {
+          const thumbnailUrl = await createThumbnail(file);
+          const originalPath = pathOf(file);
+          const cacheId = await cacheOf(file);
+          addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+        } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
+        continue;
+      }
+
+      if (file.type.startsWith('image/')) {
+        if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
+        const imgCount = assets.filter(a => a.type === 'image_url').length;
+        const maxImg = mode === 'multimodal_reference' ? modelImageMax(model) : mode === 'edit_video' ? modelImageMax(model) : mode === 'image_to_video_first' ? 1 : mode === 'image_to_video_first_last' ? 2 : 0;
+        if (imgCount >= maxImg) { rejected.push(`${file.name}: 이미지 한도 ${maxImg}개 초과`); continue; }
+        let role: any = 'reference_image';
+        if (mode === 'image_to_video_first') role = 'first_frame';
+        else if (mode === 'image_to_video_first_last') role = assets.some(a => a.role === 'first_frame') ? 'last_frame' : 'first_frame';
+        const sizeErr = validateImageFile(file);
+        if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
+        try {
+          const dimErr = await validateImageDimensions(file);
+          if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
+          const thumbnailUrl = await createThumbnail(file);
+          const originalPath = pathOf(file);
+          // Attach → media-cache only. R2 upload happens at send time so
+          // every R2 object is born with a task to be tied to.
+          const cacheId = await cacheOf(file);
+          addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
+        } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
+
+      } else if (file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(file.name)) {
+        // Trust the extension regardless of MIME. Chromium reports .mov as '',
+        // 'video/quicktime', or even the non-standard 'video/mov' depending on
+        // build/OS — checking only video/* MIME drops valid files. The
+        // <video> metadata decode in validateVideoFile is the real gatekeeper.
+        if (mode === 'image_to_video_first' || mode === 'image_to_video_first_last') {
+          rejected.push(`${file.name}: 이 모드는 이미지만 받습니다.`); continue;
+        }
+        const existingVideos = assets.filter(a => a.type === 'video_url');
+        const vidCount = existingVideos.length;
+        const maxVid = mode === 'extend_video' ? 3 : mode === 'edit_video' ? 1 : mode === 'multimodal_reference' ? modelVideoMax(model) : 0;
+        // edit_video has a 1-video cap. When the user drops a new video while one
+        // is already attached, treat it as a replace (preserve asset id so any
+        // "@[Video 1]" mention keeps pointing to the same slot) rather than
+        // rejecting with the over-limit alert.
+        const shouldReplace = mode === 'edit_video' && vidCount >= 1;
+        if (!shouldReplace && vidCount >= maxVid) {
+          rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue;
+        }
+        const vidErr = await validateVideoFile(file, modelRefVideoSec(model), refVideoMinSecFor(model, mode));
+        if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
+        const vidDuration = await getMediaDurationSec(file, 'video');
+        // Combined cap: all reference videos in one request ≤ 15s total.
+        // When replacing, the outgoing video's duration doesn't count.
+        const vidOthers = shouldReplace ? assets.filter(a => a.id !== existingVideos[0].id) : assets;
+        const vidTotErr = totalDurationError(vidOthers, 'video_url', vidDuration, modelRefVideoSec(model));
+        if (vidTotErr) { rejected.push(`${file.name}: ${vidTotErr}`); continue; }
+        try {
+          const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
+          const originalPath = pathOf(file);
+          // Attach → media-cache only (R2 upload deferred to send time)
+          const cacheId = await cacheOf(file);
+          if (shouldReplace) {
+            const existing = existingVideos[0];
+            useAppStore.getState().replaceAsset(project.id, existing.id, {
+              url: '', file_name: file.name, cacheId, thumbnailUrl,
+              durationSec: vidDuration ?? undefined,
+              ...(originalPath ? { originalPath } : {}),
+            });
+          } else {
+            addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(vidDuration != null ? { durationSec: vidDuration } : {}), ...(originalPath ? { originalPath } : {}) });
+          }
+        } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
+
+      } else if (file.type.startsWith('audio/') || /\.(wav|mp3|mpeg|mpga)$/i.test(file.name)) {
+        if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
+          rejected.push(`${file.name}: 이 모드에서는 오디오를 사용할 수 없습니다.`); continue;
+        }
+        const audCount = assets.filter(a => a.type === 'audio_url').length;
+        const maxAud = modelAudioMax(model);
+        if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
+        const audErr = await validateAudioFile(file, modelRefAudioSec(model));
+        if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
+        const audDuration = await getMediaDurationSec(file, 'audio');
+        // Combined cap: all reference audio in one request ≤ the model's limit
+        // (2.0 15.2s / 2.5 30.2s). Was defaulting to 15 for every model.
+        const audTotErr = totalDurationError(assets, 'audio_url', audDuration, modelRefAudioSec(model));
+        if (audTotErr) { rejected.push(`${file.name}: ${audTotErr}`); continue; }
+        try {
+          const originalPath = pathOf(file);
+          // Attach → media-cache only (R2 upload deferred to send time)
+          const cacheId = await cacheOf(file);
+          addAsset(project.id, { type: 'audio_url', url: '', role: 'reference_audio', file_name: file.name, cacheId, ...(audDuration != null ? { durationSec: audDuration } : {}), ...(originalPath ? { originalPath } : {}) });
+        } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
+      } else {
+        rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
+      }
+    }
+    return rejected;
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault(); dragCounter.current = 0; setIsDragging(false);
     const mode = project.settings.mode;
-    const allFiles = Array.from(e.dataTransfer.files);
+    const allFiles = Array.from(e.dataTransfer.files) as File[];
     if (allFiles.length === 0) return;
     // Seedance-only guard: for Omni the stale `mode` is irrelevant (Omni routes by omniTask
-    // in the loop below). After 초기화 mode resets to 'text_to_video', which would otherwise
+    // in attachFiles). After 초기화 mode resets to 'text_to_video', which would otherwise
     // wrongly block an Omni Edit/Reference drop with a "Text to Video" message.
     if (!isOmni && mode === 'text_to_video') {
       warn('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
@@ -1776,179 +2089,7 @@ export function ChatArea() {
     }
 
     (async () => {
-      const rejected: string[] = [];
-      for (const file of allFiles) {
-        const freshProject = useAppStore.getState().projects.find(p => p.id === project.id);
-        const assets = freshProject?.assets || [];
-
-        // ── Gemini Omni: route drops by the selected Video task (bypasses Seedance mode rules) ──
-        if (isOmni) {
-          const task = resolveOmniTask(freshProject?.settings.model, freshProject?.settings.omniTask);
-          const isImg = file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif)$/i.test(file.name);
-          const isVid = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mpe?g|wmv|3gpp?|flv)$/i.test(file.name);
-          if (task === 'text_to_video') { rejected.push(`${file.name}: Text to Video는 에셋을 사용하지 않습니다.`); continue; }
-          // Extend takes the same single source clip as Edit — one branch, so the two can
-          // never drift apart on size caps, replace-vs-add, or thumbnailing.
-          if (task === 'edit' || task === 'extend') {
-            if (!isVid) { rejected.push(`${file.name}: ${task === 'extend' ? 'Extend' : 'Edit'} Video는 영상만 받습니다.`); continue; }
-            const sizeMB = file.size / (1024 * 1024);
-            if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
-            // Measure and STORE the length. This path used to skip it entirely, which meant a
-            // dropped clip carried no durationSec — so the panel's extend arithmetic and the
-            // send-time 30s guard both silently did nothing for anything dropped rather than
-            // picked through the panel. Rejecting here matches how every other cap in this
-            // app behaves (size, count): refuse at attach, with the reason.
-            const dropDur = await getMediaDurationSec(file as File, 'video');
-            const dropCap = modelExtendMaxSrcSec(freshProject?.settings.model || project.settings.model);
-            if (task === 'extend' && dropCap !== undefined && typeof dropDur === 'number' && dropDur > dropCap) {
-              rejected.push(`${(file as File).name}: ${dropDur.toFixed(1)}초 — 이어붙일 원본은 ${dropCap}초까지입니다`); continue;
-            }
-            const existing = assets.find(a => a.type === 'video_url');
-            try {
-              const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
-              const originalPath = getFilePath(file);
-              const cacheId = await cacheFile(file);
-              const durPatch = dropDur != null ? { durationSec: dropDur } : {};
-              if (existing) useAppStore.getState().replaceAsset(project.id, existing.id, { url: '', file_name: file.name, cacheId, thumbnailUrl, ...durPatch, ...(originalPath ? { originalPath } : {}) });
-              else addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...durPatch, ...(originalPath ? { originalPath } : {}) });
-            } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-            continue;
-          }
-          // reference_to_video also accepts video references — 3 verified working 2026-08-28
-          // (it was capped at 1 here from an older doc line saying multiple were unsupported,
-          // which left the panel showing "비디오 1/3" while a drop was refused at the 2nd file).
-          if (task === 'reference_to_video' && isVid) {
-            // Count LIVE, not from the `assets` snapshot taken before this loop: dropping
-            // three clips at once would otherwise see zero for all three and add them all.
-            const vidNow = (useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []).filter(a => a.type === 'video_url').length;
-            const vidCapDrop = modelVideoMax(freshProject?.settings.model || project.settings.model);
-            if (vidNow >= vidCapDrop) { rejected.push(`${file.name}: 참조 영상은 ${vidCapDrop}개까지입니다`); continue; }
-            const sizeMB = file.size / (1024 * 1024);
-            if (sizeMB > 50) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)`); continue; }
-            try {
-              const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
-              const originalPath = getFilePath(file);
-              const cacheId = await cacheFile(file);
-              addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-            } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-            continue;
-          }
-          // image tasks: image_to_video (start/end frames) | reference_to_video (≤10 image refs)
-          if (!isImg) { rejected.push(`${file.name}: 이 태스크는 이미지만 받습니다. (영상 편집은 Edit Video 태스크)`); continue; }
-          const sizeErr = validateImageFile(file);
-          if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
-          let role: any = 'reference_image';
-          if (task === 'image_to_video') {
-            if (!assets.some(a => a.role === 'first_frame')) role = 'first_frame';
-            else if (!assets.some(a => a.role === 'last_frame')) role = 'last_frame';
-            else { rejected.push(`${file.name}: Image to Video는 시작·끝 프레임 2장까지입니다.`); continue; }
-          } else {
-            // modelImageMax, not a literal — same reason the reference-video cap moved to
-            // modelVideoMax: the panel and this handler each held their own copy and drifted
-            // (panel said "비디오 1/3" while a drop was refused at the 2nd file).
-            const imgCapDrop = modelImageMax(freshProject?.settings.model || project.settings.model);
-            if (assets.filter(a => a.type === 'image_url').length >= imgCapDrop) {
-              rejected.push(`${file.name}: 이미지 한도 ${imgCapDrop}장 초과`); continue;
-            }
-          }
-          try {
-            const thumbnailUrl = await createThumbnail(file);
-            const originalPath = getFilePath(file);
-            const cacheId = await cacheFile(file);
-            addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-          } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
-          continue;
-        }
-
-        if (file.type.startsWith('image/')) {
-          if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
-          const imgCount = assets.filter(a => a.type === 'image_url').length;
-          const maxImg = mode === 'multimodal_reference' ? modelImageMax(project.settings.model) : mode === 'edit_video' ? modelImageMax(project.settings.model) : mode === 'image_to_video_first' ? 1 : mode === 'image_to_video_first_last' ? 2 : 0;
-          if (imgCount >= maxImg) { rejected.push(`${file.name}: 이미지 한도 ${maxImg}개 초과`); continue; }
-          let role: any = 'reference_image';
-          if (mode === 'image_to_video_first') role = 'first_frame';
-          else if (mode === 'image_to_video_first_last') role = assets.some(a => a.role === 'first_frame') ? 'last_frame' : 'first_frame';
-          const sizeErr = validateImageFile(file);
-          if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
-          try {
-            const dimErr = await validateImageDimensions(file);
-            if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
-            const thumbnailUrl = await createThumbnail(file);
-            const originalPath = getFilePath(file);
-            // Attach → media-cache only. R2 upload happens at send time so
-            // every R2 object is born with a task to be tied to.
-            const cacheId = await cacheFile(file);
-            addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-          } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
-
-        } else if (file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(file.name)) {
-          // Trust the extension regardless of MIME. Chromium reports .mov as '',
-          // 'video/quicktime', or even the non-standard 'video/mov' depending on
-          // build/OS — checking only video/* MIME drops valid files. The
-          // <video> metadata decode in validateVideoFile is the real gatekeeper.
-          if (mode === 'image_to_video_first' || mode === 'image_to_video_first_last') {
-            rejected.push(`${file.name}: 이 모드는 이미지만 받습니다.`); continue;
-          }
-          const existingVideos = assets.filter(a => a.type === 'video_url');
-          const vidCount = existingVideos.length;
-          const maxVid = mode === 'extend_video' ? 3 : mode === 'edit_video' ? 1 : mode === 'multimodal_reference' ? modelVideoMax(project.settings.model) : 0;
-          // edit_video has a 1-video cap. When the user drops a new video while one
-          // is already attached, treat it as a replace (preserve asset id so any
-          // "@[Video 1]" mention keeps pointing to the same slot) rather than
-          // rejecting with the over-limit alert.
-          const shouldReplace = mode === 'edit_video' && vidCount >= 1;
-          if (!shouldReplace && vidCount >= maxVid) {
-            rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue;
-          }
-          const vidErr = await validateVideoFile(file, modelRefVideoSec(project.settings.model), refVideoMinSecFor(project.settings.model, mode));
-          if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
-          const vidDuration = await getMediaDurationSec(file, 'video');
-          // Combined cap: all reference videos in one request ≤ 15s total.
-          // When replacing, the outgoing video's duration doesn't count.
-          const vidOthers = shouldReplace ? assets.filter(a => a.id !== existingVideos[0].id) : assets;
-          const vidTotErr = totalDurationError(vidOthers, 'video_url', vidDuration, modelRefVideoSec(project.settings.model));
-          if (vidTotErr) { rejected.push(`${file.name}: ${vidTotErr}`); continue; }
-          try {
-            const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
-            const originalPath = getFilePath(file);
-            // Attach → media-cache only (R2 upload deferred to send time)
-            const cacheId = await cacheFile(file);
-            if (shouldReplace) {
-              const existing = existingVideos[0];
-              useAppStore.getState().replaceAsset(project.id, existing.id, {
-                url: '', file_name: file.name, cacheId, thumbnailUrl,
-                durationSec: vidDuration ?? undefined,
-                ...(originalPath ? { originalPath } : {}),
-              });
-            } else {
-              addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(vidDuration != null ? { durationSec: vidDuration } : {}), ...(originalPath ? { originalPath } : {}) });
-            }
-          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-
-        } else if (file.type.startsWith('audio/') || /\.(wav|mp3|mpeg|mpga)$/i.test(file.name)) {
-          if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
-            rejected.push(`${file.name}: 이 모드에서는 오디오를 사용할 수 없습니다.`); continue;
-          }
-          const audCount = assets.filter(a => a.type === 'audio_url').length;
-          const maxAud = modelAudioMax(project.settings.model);
-          if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
-          const audErr = await validateAudioFile(file, modelRefAudioSec(project.settings.model));
-          if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
-          const audDuration = await getMediaDurationSec(file, 'audio');
-          // Combined cap: all reference audio in one request ≤ the model's limit
-          // (2.0 15.2s / 2.5 30.2s). Was defaulting to 15 for every model.
-          const audTotErr = totalDurationError(assets, 'audio_url', audDuration, modelRefAudioSec(project.settings.model));
-          if (audTotErr) { rejected.push(`${file.name}: ${audTotErr}`); continue; }
-          try {
-            const originalPath = getFilePath(file);
-            // Attach → media-cache only (R2 upload deferred to send time)
-            const cacheId = await cacheFile(file);
-            addAsset(project.id, { type: 'audio_url', url: '', role: 'reference_audio', file_name: file.name, cacheId, ...(audDuration != null ? { durationSec: audDuration } : {}), ...(originalPath ? { originalPath } : {}) });
-          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-        } else {
-          rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
-        }
-      }
+      const rejected = await attachFiles(allFiles);
       if (rejected.length > 0) warn(`일부 파일이 추가되지 않았습니다:\n\n${rejected.join('\n')}`);
     })();
   };
@@ -1970,6 +2111,7 @@ export function ChatArea() {
   }, []);
 
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
+    lastTypedAtRef.current = Date.now();   // 에이전트 작업함: 입력 중에는 작성 칸을 빌려 쓰지 않는다
     setHasText(!!e.currentTarget.innerText.trim());
     syncMentionCount();
     const sel = window.getSelection();
@@ -2556,7 +2698,7 @@ export function ChatArea() {
 
     // Gemini Omni = separate provider → its own send path (no BytePlus payload).
     // (Success reporting to the sheet is Seedance-only; Omni still requires the gate above.)
-    if (modelProvider(project.settings.model) === 'gemini') { await handleSendGemini(project); return; }
+    if (modelProvider(project.settings.model) === 'gemini') { return await handleSendGemini(project); }
     // Force mention labels to the CURRENT asset order before reading the prompt.
     // The [project.assets] sync effect is async (passive), so if the user
     // reorders/replaces and sends in the same tick, the pills could still hold
@@ -2876,6 +3018,8 @@ export function ChatArea() {
     } catch (error: any) {
       systemMessageIds.forEach(id => updateMessage(project.id, id, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() }));
     } finally { setIsGenerating(false); }
+    // 만든 카드 id — 에이전트 작업함이 진행을 따라가는 데 쓴다. 위에서 멈춘 경우는 undefined.
+    return systemMessageIds;
   };
 
   /* ─── Gemini Omni Flash send (separate provider, sync) ─── */
@@ -2883,7 +3027,8 @@ export function ChatArea() {
   // task/poll — the message goes running → (awaited) → succeeded. Panel images
   // (max 10) ride as inline base64; ratio→aspect(16:9|9:16), duration→"Ns"(3-10),
   // thinking always high, task always explicit (no Unspecified). Seedance path untouched.
-  const handleSendGemini = async (project: any) => {
+  const handleSendGemini = async (project: any): Promise<string[] | undefined> => {
+    let sentIds: string[] | undefined;   // 만든 카드 id (에이전트 작업함용)
     if (!contentEditableRef.current) return;
     const userPrompt = getPlainText(contentEditableRef.current.innerHTML);
     const s = project.settings;
@@ -3136,6 +3281,7 @@ export function ChatArea() {
         const id = crypto.randomUUID(); ids.push(id);
         addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, videoStorage: omniStorage } as any);
       }
+      sentIds = ids;
       setTimeout(() => scrollToBottom(), 150);
 
       // Fire each generation in the BACKGROUND (no await). Omni's HTTP call is synchronous
@@ -3180,7 +3326,166 @@ export function ChatArea() {
       // The generation keeps rendering in the background card; the composer is free to queue more.
       window.setTimeout(() => setIsGenerating(false), 800);
     }
+    return sentIds;
   };
+
+  /* ─── 에이전트 작업함: 받아서 보내기 (26.10.302~) ─── */
+  // 같은 PC 의 에이전트(freewill 커넥터의 send-to-seedance)가 server.ts 작업함에 넣은 요청을, 사람이 전송 버튼을
+  // 누르는 것과 같은 길(attachFiles → handleSend)로 보낸다. 생성 중 카드 · 권한 검사 · 트래커 보고 · NCP 보관 · 폴링이
+  // 전부 평소대로다. 작성 칸(설정 · 레퍼런스 · 프롬프트)을 잠깐 빌려 쓰고, 보낸 뒤 쓰던 그대로 되돌린다 — 재생성이
+  // 작성 칸을 덮어쓰는 것과 같은 방식에 '되돌리기' 를 더한 것.
+  // 지키는 것:
+  //   · 지금 열린 프로젝트에만 보낸다. 요청에 적힌 프로젝트 이름과 다르면 보내지 않는다(실패로 알림).
+  //   · 입력 중(4초 안에 타자) · 생성 중 · 갤러리 화면(작성 칸 없음) · 다른 요청을 보내는 중이면 가져가지 않는다.
+  //   · 빌려 쓰는 동안 프롬프트 칸을 잠근다 — 그 사이 친 글자가 되돌릴 때 사라지지 않게.
+  //   · 레퍼런스를 하나라도 못 붙이면 보내지 않는다 — 빠진 채로 나가면 다른 영상이 되고 값은 똑같이 낸다.
+  //   · 진행은 카드(스토어 메시지)에서 읽어 올린다. /api/byteplus/tasks/:id 를 따로 부르지 않는다(server.ts 주석).
+  const agentReport = (id: string, body: Record<string, unknown>) =>
+    fetch(`/api/agent/jobs/${encodeURIComponent(id)}/report`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }).then(() => undefined, () => undefined);
+
+  // 카드 상태 → 에이전트에게 보여 줄 모양. 카드를 지웠으면 missing.
+  const agentCards = (projectId: string, ids: string[]) => {
+    const msgs = useAppStore.getState().projects.find(p => p.id === projectId)?.messages || [];
+    return ids.map(id => {
+      const m = msgs.find(x => x.id === id) as any;
+      if (!m) return { id, status: 'missing' };
+      return {
+        id, status: m.status || 'queued',
+        ...(m.taskId ? { taskId: m.taskId } : {}),
+        ...(m.videoUrl ? { videoUrl: m.videoUrl } : {}),
+        ...(m.error ? { error: String(m.error).slice(0, 500) } : {}),
+      };
+    });
+  };
+
+  // 경로의 파일을 화면으로 가져온다. 서버가 디스크에서 읽어 미디어 캐시에 넣고(cache-from-path — 재사용이 쓰는 그 길),
+  // 화면은 그 바이트로 File 을 만든다. 캐시 id 는 내용 md5 라 attachFiles 가 다시 올리지 않고 그대로 쓴다.
+  const agentFileFromPath = async (p: string): Promise<{ file: File; cacheId: string }> => {
+    const cacheId = await cacheFromPath(p);
+    const res = await fetch(`/api/cache/${cacheId}`);
+    if (!res.ok) throw new Error(`캐시를 읽지 못했습니다 (${res.status})`);
+    const name = p.split(/[\\/]/).pop() || 'file';
+    const ext = (name.match(/\.([^.]+)$/)?.[1] || '').toLowerCase();
+    return { file: new File([await res.blob()], name, { type: AGENT_MIME[ext] || '' }), cacheId };
+  };
+
+  const agentProcess = async (job: any) => {
+    const st = useAppStore.getState();
+    const proj = st.projects.find(p => p.id === st.currentProjectId);
+    const editor = contentEditableRef.current;
+    const fail = (error: string) => agentReport(job.id, { status: 'failed', error, ...(proj ? { project: proj.name } : {}) });
+    if (!proj || !editor) return fail('앱에 열린 프로젝트가 없습니다. 앱에서 프로젝트를 연 뒤 다시 보내 주세요.');
+    if (proj.id !== currentProjectId) return fail('받는 순간 앱의 프로젝트가 바뀌어 보내지 않았습니다. 다시 보내 주세요.');
+    if (job.project && job.project !== proj.name.trim()) return fail(`앱에 열린 프로젝트는 "${proj.name}" 입니다(요청: "${job.project}"). 그 프로젝트를 연 뒤 다시 보내 주세요.`);
+    // 과금 프로젝트도 확인 카드에서 본 그대로여야 한다 — 그 사이 드롭다운을 바꿨으면 다른 프로젝트에 과금된다.
+    const billNow = selectedBillingProject(st)?.project ?? null;
+    if (job.billing && job.billing !== billNow?.trim()) return fail(`앱에서 고른 과금 프로젝트는 ${billNow ? `"${billNow}"` : '(선택 없음)'} 입니다(요청: "${job.billing}"). 확인한 뒤 다시 보내 주세요.`);
+    const plan = agentSettings(proj.settings, job.settings && typeof job.settings === 'object' ? job.settings : {});
+    if (!plan.next) return fail(plan.error || '설정을 읽지 못했습니다');
+    const next = plan.next;
+    const omni = modelProvider(next.model) === 'gemini';
+    // 첫·끝 프레임은 role 로 순서를 정한다. 나머지는 받은 순서 그대로 — 프롬프트의 [Image N] 번호가 이 순서다.
+    const rank = (r?: string) => (r === 'first_frame' ? 0 : r === 'last_frame' ? 1 : 2);
+    const refs = (Array.isArray(job.refs) ? job.refs : [])
+      .map((r: any, i: number) => ({ path: String(r?.path || ''), role: typeof r?.role === 'string' ? r.role : undefined, i }))
+      .sort((a: any, b: any) => rank(a.role) - rank(b.role) || a.i - b.i);
+    if (refs.length && !omni && next.mode === 'text_to_video') return fail('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
+
+    // 지금 작성 칸을 적어 둔다 — 보낸 뒤(실패해도) 이걸로 되돌린다.
+    const pid = proj.id;
+    const prevHtml = editor.innerHTML;
+    const prevSettings: Record<string, unknown> = { ...proj.settings };
+    const prevAssets = proj.assets.map(({ id: _id, ...rest }) => rest);
+    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    agentWarnRef.current = [];
+    editor.setAttribute('contenteditable', 'false');
+    showToast(`에이전트 요청을 보내는 중…${job.name ? ` (${job.name})` : ''}`, true);
+    let ids: string[] | undefined;
+    let problem = '';
+    try {
+      useAppStore.getState().updateProjectSettings(pid, next);
+      useAppStore.getState().replaceAllAssets(pid, []);
+      const files: File[] = [];
+      const given = new Map<File, { path: string; cacheId: string }>();
+      for (const r of refs) {
+        try {
+          const got = await agentFileFromPath(r.path);
+          files.push(got.file);
+          given.set(got.file, { path: r.path, cacheId: got.cacheId });
+        } catch (e: any) { throw new Error(`레퍼런스를 읽지 못했습니다: ${r.path}\n${e?.message || e}`); }
+      }
+      const rejected = await attachFiles(files, f => given.get(f));
+      if (rejected.length) throw new Error(`레퍼런스를 붙이지 못했습니다:\n${rejected.join('\n')}`);
+      // 여기부터 handleSend 가 프롬프트를 읽을 때까지는 await 없이 이어진다 — 그 사이 프로젝트가 바뀔 틈이 없다.
+      if (useAppStore.getState().currentProjectId !== pid || contentEditableRef.current !== editor) throw new Error('보내기 전에 앱의 프로젝트(화면)가 바뀌어 보내지 않았습니다.');
+      editor.innerHTML = agentPromptHtml(String(job.prompt || ''), getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
+      setHasText(true);
+      syncMentionCount();
+      ids = await handleSend();
+      if (!ids?.length) problem = (agentWarnRef.current || []).join('\n') || '앱이 보내지 않았습니다(작성 칸 검사에서 멈춤).';
+    } catch (e: any) {
+      problem = e?.message || String(e);
+    } finally {
+      agentWarnRef.current = null;
+      // 되돌리기. 에이전트가 새로 넣은 설정 키(예: output_format)는 비워야 한다 — updateProjectSettings 는 합치기라서.
+      const restore: Record<string, unknown> = { ...prevSettings };
+      for (const k of Object.keys(next)) if (!(k in prevSettings)) restore[k] = undefined;
+      useAppStore.getState().updateProjectSettings(pid, restore as Partial<GenerationSettings>);
+      useAppStore.getState().replaceAllAssets(pid, prevAssets);
+      const html = rebindMentionPills(prevHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
+      if (useAppStore.getState().currentProjectId === pid && contentEditableRef.current === editor) {
+        editor.innerHTML = html;
+        setHasText(!!editor.innerText.trim());
+        syncMentionCount();
+      }
+      useAppStore.getState().updateDraftPrompt(pid, html);
+      editor.setAttribute('contenteditable', 'true');
+    }
+    if (problem) return fail(problem);
+    agentActiveRef.current.set(job.id, { projectId: pid, ids: ids!, last: '' });
+    await agentReport(job.id, { status: 'sent', project: proj.name, messages: agentCards(pid, ids!) });
+  };
+
+  const agentTick = async () => {
+    // 1) 보낸 요청의 카드 상태를 올린다(바뀐 때만). 전부 끝나면(성공 · 실패 · 지워짐) done.
+    for (const [jobId, a] of agentActiveRef.current) {
+      const cards = agentCards(a.projectId, a.ids);
+      const sig = JSON.stringify(cards);
+      if (sig === a.last) continue;
+      a.last = sig;
+      const finished = cards.every(c => c.status === 'succeeded' || c.status === 'failed' || c.status === 'missing');
+      if (finished) agentActiveRef.current.delete(jobId);
+      void agentReport(jobId, { status: finished ? 'done' : 'sent', messages: cards });
+    }
+    // 2) 새 요청. 받을 수 없는 때는 peek — 화면 상태만 알리고 가져가지 않는다.
+    const st = useAppStore.getState();
+    const proj = st.projects.find(p => p.id === st.currentProjectId);
+    const composer = !!contentEditableRef.current;
+    const peek = agentBusyRef.current || isGenerating || !composer || !proj || proj.id !== currentProjectId
+      || Date.now() - lastTypedAtRef.current < 4000;
+    if (!peek) agentBusyRef.current = true;   // 응답을 기다리는 사이 다음 틱이 또 가져가지 않게
+    let job: any = null;
+    try {
+      const res = await fetch('/api/agent/jobs/claim', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          screen: agentScreenId, peek, composer,
+          project: proj?.name ?? null,
+          billing: selectedBillingProject(st)?.project ?? null,
+          generating: isGenerating,
+        }),
+      });
+      if (res.ok) job = (await res.json())?.job || null;
+    } catch { /* 서버가 잠깐 없으면 다음 틱에 */ }
+    if (peek) return;
+    if (!job) { agentBusyRef.current = false; return; }
+    try { await agentProcess(job); }
+    catch (e: any) { await agentReport(job.id, { status: 'failed', error: e?.message || String(e) }); }
+    finally { agentBusyRef.current = false; }
+  };
+  agentTickRef.current = agentTick;
 
   /* ─── 초안 → 1080p 본편 ─── */
   // handleSend 를 타지 않는다. 본편 요청에 초안에서 물려받는 값(프롬프트·레퍼런스·길이·비율·

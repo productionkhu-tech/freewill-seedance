@@ -1272,6 +1272,139 @@ async function startServer() {
     known: TEAM_NAME !== 'UNKNOWN',
   }));
 
+  // ── 에이전트 작업함 (26.10.302~) ─────────────────────────────────────────────
+  // 같은 PC 의 에이전트(Claude Code·Codex 의 freewill 커넥터)가 생성 요청을 넣는 곳. 서버는 받아 두기만
+  // 하고, 실제로 보내는 건 앱 화면(ChatArea)이 사람이 전송 버튼을 누르는 것과 같은 길(handleSend)로 한다.
+  // 그래서 생성 중 카드 · 권한 검사 · 트래커 보고 · NCP 보관 · 폴링이 전부 평소대로다.
+  //   에이전트: POST /api/agent/jobs → GET /api/agent/jobs/:id 로 진행을 본다. 상태는 GET /api/agent/status.
+  //   화면:     POST /api/agent/jobs/claim (2초마다 — 지금 프로젝트·과금 선택도 같이 알린다)
+  //             → 보낸 뒤 POST /api/agent/jobs/:id/report 로 카드 상태를 올린다.
+  // ★ 진행 확인을 /api/byteplus/tasks/:id 로 하게 만들지 마라 — 그 조회는 성공을 처음 본 순간 트래커 보고와
+  //   NCP 보관을 하고 작업→프로젝트 기록을 지운다. 화면과 에이전트가 같이 조회하면 그 순서가 엇갈린다.
+  // 이 라우트들도 위의 127.0.0.1 바인딩 + 다른 출처 거절 미들웨어 뒤에 있다. 메모리에만 둔다(앱을 껐다 켜면
+  // 사라진다). 24시간 지난 것은 지운다.
+  // ★ 화면이 가져간 작업은 절대 다시 내놓지 않는다. 화면이 보내는 도중 멈췄으면 이미 BytePlus 에 작업이
+  //   만들어졌을 수 있다 — 다시 내놓으면 같은 영상이 두 번 과금된다. 대신 그 화면이 1분 넘게 안 들르면
+  //   실패로 닫고 "앱에서 생성됐는지 확인" 하라고 알린다.
+  type AgentJob = {
+    id: string; createdAt: number; updatedAt: number;
+    status: 'pending' | 'taken' | 'sent' | 'done' | 'failed';
+    spec: { prompt: string; project?: string; billing?: string; name?: string; settings: Record<string, unknown>; refs: { path: string; role?: string }[] };
+    takenBy?: string; error?: string; projectName?: string; messages?: unknown[];
+  };
+  const agentJobs = new Map<string, AgentJob>();
+  let agentScreen: { at: number; project?: string; billing?: string | null; generating?: boolean; composer?: boolean } = { at: 0 };
+  const agentScreenSeen = new Map<string, number>();   // 화면(창)마다 마지막으로 들른 시각
+  const pruneAgentJobs = () => {
+    const now = Date.now();
+    const cut = now - 24 * 3600 * 1000;
+    for (const [k, j] of agentJobs) if (j.updatedAt < cut) agentJobs.delete(k);
+    for (const j of agentJobs.values()) {
+      // 10분 안에 화면이 못 가져간 요청은 닫는다(입력 중 · 갤러리 화면 · 앱 꺼짐). 한참 뒤 갑자기 생성되면 안 된다.
+      if (j.status === 'pending' && now - j.createdAt > 10 * 60000) {
+        j.status = 'failed'; j.updatedAt = now;
+        j.error = '앱이 10분 안에 이 요청을 받지 못해 취소했습니다(앱이 꺼져 있었거나 · 갤러리 화면 · 계속 입력 중). 다시 보내 주세요.';
+        console.warn(`[Agent] job ${j.id} → failed (10분 대기)`);
+        continue;
+      }
+      if (j.status !== 'taken') continue;
+      const seen = agentScreenSeen.get(j.takenBy || '') || 0;
+      if (now - Math.max(seen, j.updatedAt) > 60000) {
+        j.status = 'failed'; j.updatedAt = now;
+        j.error = '앱 화면이 이 작업을 받은 뒤 응답이 없습니다(앱을 닫았거나 새로고침). 앱에서 생성됐는지 확인한 뒤, 안 됐으면 다시 보내 주세요.';
+        console.warn(`[Agent] job ${j.id} → failed (화면 응답 없음)`);
+      }
+    }
+  };
+  const openAgentJobs = () => [...agentJobs.values()].filter(j => j.status === 'pending' || j.status === 'taken');
+
+  app.get('/api/agent/status', (_req, res) => {
+    pruneAgentJobs();
+    res.json({
+      ok: true,
+      screenAlive: Date.now() - agentScreen.at < 8000,   // 화면이 작업함을 들여다보고 있나 (2초마다 들른다)
+      project: agentScreen.project ?? null,              // 지금 열린 프로젝트(사이드바)
+      billing: agentScreen.billing ?? null,               // 과금 프로젝트 선택 — null 이면 아직 안 고름
+      generating: !!agentScreen.generating,
+      composer: agentScreen.composer !== false,           // false = 갤러리 화면(작성 칸이 없어 받지 못함)
+      pending: openAgentJobs().length,
+    });
+  });
+
+  app.post('/api/agent/jobs', (req, res) => {
+    const b = req.body || {};
+    const prompt = typeof b.prompt === 'string' ? b.prompt : '';
+    if (!prompt.trim()) return res.status(400).json({ error: 'prompt 가 비었습니다' });
+    if (prompt.length > 50000) return res.status(400).json({ error: 'prompt 가 너무 깁니다 (5만 자까지)' });
+    const settings = b.settings && typeof b.settings === 'object' && !Array.isArray(b.settings) ? b.settings : {};
+    const rawRefs: unknown[] = Array.isArray(b.refs) ? b.refs : [];
+    if (rawRefs.length > 50) return res.status(400).json({ error: '레퍼런스는 50개까지입니다' });
+    const refs = rawRefs.map((r: any) => typeof r === 'string'
+      ? { path: r }
+      : { path: String(r?.path || ''), ...(typeof r?.role === 'string' ? { role: r.role } : {}) });
+    if (refs.some(r => !r.path)) return res.status(400).json({ error: 'path 가 없는 레퍼런스가 있습니다' });
+    pruneAgentJobs();
+    if (openAgentJobs().length >= 30) return res.status(429).json({ error: '아직 보내지 않은 작업이 30개입니다 — 앱이 처리할 때까지 기다려 주세요' });
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    agentJobs.set(id, {
+      id, createdAt: now, updatedAt: now, status: 'pending',
+      spec: {
+        prompt, settings, refs,
+        // 확인 카드에서 사용자가 본 프로젝트(사이드바) · 과금 프로젝트. 화면의 지금 값과 다르면 화면이 보내지 않는다.
+        ...(typeof b.project === 'string' && b.project.trim() ? { project: b.project.trim() } : {}),
+        ...(typeof b.billing === 'string' && b.billing.trim() ? { billing: b.billing.trim() } : {}),
+        ...(typeof b.name === 'string' && b.name.trim() ? { name: b.name.trim().slice(0, 120) } : {}),
+      },
+    });
+    console.log(`[Agent] job ${id} 받음 (레퍼런스 ${refs.length}개)`);
+    res.json({ ok: true, id });
+  });
+
+  app.post('/api/agent/jobs/claim', (req, res) => {
+    const b = req.body || {};
+    const now = Date.now();
+    const screen = typeof b.screen === 'string' ? b.screen.slice(0, 64) : '';
+    if (screen) agentScreenSeen.set(screen, now);
+    for (const [k, t] of agentScreenSeen) if (now - t > 3600000) agentScreenSeen.delete(k);
+    agentScreen = {
+      at: now,
+      project: typeof b.project === 'string' ? b.project : undefined,
+      billing: typeof b.billing === 'string' ? b.billing : null,
+      generating: !!b.generating,
+      composer: b.composer !== false,
+    };
+    pruneAgentJobs();
+    // peek: 상태만 알리고 가져가지는 않는다 — 사용자가 입력 중 · 생성 중 · 다른 작업을 보내는 중일 때.
+    if (b.peek || !screen) return res.json({ job: null });
+    const next = [...agentJobs.values()].filter(j => j.status === 'pending').sort((x, y) => x.createdAt - y.createdAt)[0];
+    if (!next) return res.json({ job: null });
+    next.status = 'taken'; next.updatedAt = now; next.takenBy = screen;
+    res.json({ job: { id: next.id, ...next.spec } });
+  });
+
+  app.post('/api/agent/jobs/:id/report', (req, res) => {
+    const j = agentJobs.get(req.params.id);
+    if (!j) return res.status(404).json({ error: 'no such job' });
+    const b = req.body || {};
+    if (b.status === 'sent' || b.status === 'done' || b.status === 'failed') j.status = b.status;
+    // 늦게라도 화면이 '보냈다' 고 알려 오면 그게 사실이다 — 응답 없음으로 닫아 둔 문구를 지운다.
+    if (typeof b.error === 'string') j.error = b.error.slice(0, 4000);
+    else if (b.status === 'sent') delete j.error;
+    if (typeof b.project === 'string') j.projectName = b.project;
+    if (Array.isArray(b.messages)) j.messages = b.messages.slice(0, 10);
+    j.updatedAt = Date.now();
+    if (j.status === 'failed' || j.status === 'done') console.log(`[Agent] job ${j.id} → ${j.status}${j.error ? ` (${j.error.split('\n')[0]})` : ''}`);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/agent/jobs/:id', (req, res) => {
+    pruneAgentJobs();
+    const j = agentJobs.get(req.params.id);
+    if (!j) return res.status(404).json({ error: '없는 작업입니다 (앱을 다시 켜면 작업함이 비워집니다)' });
+    res.json({ id: j.id, name: j.spec.name, status: j.status, error: j.error, project: j.projectName, messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt });
+  });
+
   // ── 목록 썸네일(포스터) ───────────────────────────────────────────────────
   // ★ /api/media/:taskId 보다 먼저 등록한다. 뒤에 두면 '{taskId}/poster' 가 통째로
   //   :taskId 로 잡히지 않고 4-세그먼트라 아예 매칭이 안 된다.
