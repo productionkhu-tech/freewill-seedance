@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, MessageSquare, ChevronDown, ChevronUp } from 'lucide-react';
-import { useAppStore, MODELS, groupTree, type ChatMessage } from '../store';
+import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filter, Search, ChevronDown, ChevronUp } from 'lucide-react';
+import { useAppStore, MODELS, groupTree, requestFindMessage, type ChatMessage } from '../store';
 import { VideoPlayer, ClipStamp, downloadClip, revealClipFile, posterSrcFor , playbackChain } from './ChatArea';
 import { formatStamp, formatStampFull } from '../lib/utils';
 
@@ -161,7 +161,6 @@ function FilterSelect({ label, value, options, onChange, searchAfter = 8, hint }
 export function GlobalGallery({ onClose }: { onClose: () => void }) {
   const projects = useAppStore(s => s.projects);
   const projectGroups = useAppStore(s => s.projectGroups);
-  const setCurrentProjectId = useAppStore(s => s.setCurrentProjectId);
   const updateMessage = useAppStore(s => s.updateMessage);
 
   const [groupFilter, setGroupFilter] = useState(ALL);
@@ -177,6 +176,9 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   // 초안(480p 미리보기)은 기본으로 숨긴다 — 프로젝트 갤러리와 같은 규칙. 편집에 쓸 컷을
   // 찾는 화면이 버려질 미리보기로 덮이지 않게.
   const [withDrafts, setWithDrafts] = useState(false);
+  // 프롬프트 검색(26.10.203~). 채택만과 같이 쓰면 여러 프로젝트에 흩어진 채택 컷을 글로 찾는다.
+  const [query, setQuery] = useState('');
+  const qn = query.trim().toLowerCase();
   const [note, setNote] = useState<string | null>(null);
   const [shown, setShown] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -272,6 +274,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       when: (r: Row) => r.timestamp >= since && r.timestamp <= until,
       star: (r: Row) => !starredOnly || !!r.starred,
       draft: (r: Row) => withDrafts || !r.usedSettings?.draft,
+      q: (r: Row) => !qn || (r.promptText || '').toLowerCase().includes(qn),
     };
     type Dim = keyof typeof pass;
     const dims = Object.keys(pass) as Dim[];
@@ -366,7 +369,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       },
     };
   }, [allRows, projectGroups, groupFilter, groupMatch, projectFilter, modelFilter,
-      resFilter, ratioFilter, durFilter, since, until, starredOnly, withDrafts]);
+      resFilter, ratioFilter, durFilter, since, until, starredOnly, withDrafts, qn]);
 
   // 라이브러리의 초안 수. 0 이면 '초안 포함' 버튼 자체를 안 보인다.
   const draftCount = useMemo(() => allRows.filter(r => r.usedSettings?.draft).length, [allRows]);
@@ -390,7 +393,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
 
   // Any filter change resets the window — otherwise you narrow to 3 results and still
   // carry a "shown = 96" from before, or worse, land past the end of a shorter list.
-  useEffect(() => { setShown(PAGE_SIZE); }, [groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter, since, until, starredOnly, withDrafts]);
+  useEffect(() => { setShown(PAGE_SIZE); }, [groupFilter, projectFilter, modelFilter, resFilter, ratioFilter, durFilter, since, until, starredOnly, withDrafts, qn]);
 
   const visible = rows.slice(0, shown);
   const hasMore = rows.length > shown;
@@ -408,24 +411,20 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
   }, [hasMore, rows.length]);
 
   const anyFilter = groupFilter !== ALL || projectFilter !== ALL || modelFilter !== ALL || resFilter !== ALL
-    || ratioFilter !== ALL || durFilter !== ALL || period !== 'all' || starredOnly || withDrafts;
+    || ratioFilter !== ALL || durFilter !== ALL || period !== 'all' || starredOnly || withDrafts || !!qn;
   const resetFilters = () => {
     setGroupFilter(ALL); setProjectFilter(ALL); setModelFilter(ALL); setResFilter(ALL);
     setRatioFilter(ALL); setDurFilter(ALL); setPeriod('all'); setFromDate(''); setToDate(''); setStarredOnly(false);
-    setWithDrafts(false);
+    setWithDrafts(false); setQuery('');
   };
 
+  // 이 컷을 만든 대화의 그 자리로(찾기). 예전에는 프로젝트를 바꾸고 0.18초 뒤에 메시지로 굴렸는데,
+  // 프로젝트가 바뀌면 채팅이 0.7초 동안 맨 아래에 붙어 있어서 곧바로 바닥으로 끌려 내려갔다 —
+  // 다른 프로젝트의 컷은 사실상 찾을 수 없었다(26.10.203 에서 고침). 이제 갈 곳을 store 에 맡기고,
+  // 채팅이 그 프로젝트를 그리는 순간 맨 아래 대신 그 메시지로 간다(ChatArea revealMessage).
   const goToProject = (r: Row) => {
-    setCurrentProjectId(r.projectId);
+    requestFindMessage(r.projectId, r.id);
     onClose();
-    // The project has to render before the message exists in the DOM to scroll to.
-    setTimeout(() => {
-      const el = document.getElementById(`msg-${r.id}`);
-      if (!el) return;
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.classList.add('ring-2', 'ring-indigo-400', 'rounded-2xl');
-      setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-400', 'rounded-2xl'), 1800);
-    }, 180);
   };
 
   // Presentation lives in the Sidebar: it owns the portal, the AnimatePresence, and the
@@ -448,6 +447,21 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
             {rows.length !== scopeCount && <span className="text-gray-300"> / {scopeCount}</span>}
             개
           </span>
+          {/* 프롬프트 검색 — 다른 필터(채택만 · 프로젝트 · 기간 …)와 함께 걸린다. Esc 는 갤러리를 닫기 전에
+              검색어부터 지운다. */}
+          <div className="relative ml-2">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input type="text" value={query} onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape' && query) { e.stopPropagation(); setQuery(''); } }}
+              placeholder="프롬프트 검색..."
+              className="w-56 pl-8 pr-7 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all" />
+            {query && (
+              <button onClick={() => setQuery('')} title="검색 지우기"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-gray-400 hover:text-gray-700">
+                <X size={13} />
+              </button>
+            )}
+          </div>
           <div className="flex-1" />
           <button onClick={onClose} title="닫기 (Esc)"
             className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">
@@ -599,10 +613,11 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
                       </button>
                     )}
                     {/* Straight back to the message you typed this prompt in — the folder
-                        button finds the FILE, this finds the CONVERSATION. */}
-                    <button onClick={() => goToProject(r)} title="이 프롬프트를 쓴 곳으로 이동"
+                        button finds the FILE, this finds the CONVERSATION. 이름은 프로젝트 갤러리와 같은
+                        '찾기'(26.10.203~, 예전 이름 '프롬프트' 는 무엇을 하는 버튼인지 알기 어려웠다). */}
+                    <button onClick={() => goToProject(r)} title="이 컷을 만든 대화로 이동"
                       className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-indigo-600 px-1.5 py-1 rounded-md hover:bg-indigo-50 transition-colors shrink-0">
-                      <MessageSquare size={12} /> 프롬프트
+                      <Search size={12} /> 찾기
                     </button>
                     <span title={`생성 시각 ${formatStampFull(r.timestamp)}`}
                       className="text-[10px] text-gray-400 ml-auto tabular-nums shrink-0">

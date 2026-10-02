@@ -2647,6 +2647,28 @@ export function consumeHistoryNav(projectId: string | null): boolean {
   return hit;
 }
 
+// ─── 갤러리 '찾기' — 그 컷을 만든 대화의 그 자리로 (26.10.203~) ──────────────────────
+// 전체 갤러리의 찾기는 다른 프로젝트로 넘어가야 한다. 넘어가면 ChatArea 가 맨 아래 고정(0.7초)을 거는데,
+// 예전 코드는 0.18초 뒤에 메시지로 굴려서 곧바로 바닥으로 끌려 내려갔다 — 찾기가 안 되는 것처럼 보였다.
+// 이제 갈 곳을 여기 맡겨 두고, ChatArea 가 그 프로젝트를 그리는 순간 맨 아래 대신 그 메시지로 간다
+// (consumeFindRequest). 지금 보고 있는 프로젝트면 이벤트로 바로 알린다.
+let findRequest: { projectId: string; messageId: string; at: number } | null = null;
+export function requestFindMessage(projectId: string, messageId: string): void {
+  const st = useAppStore.getState();
+  if (!st.projects.some(p => p.id === projectId)) return;
+  if (st.currentProjectId === projectId) {
+    window.dispatchEvent(new CustomEvent('seedance:find-message', { detail: { messageId } }));
+    return;
+  }
+  findRequest = { projectId, messageId, at: Date.now() };
+  st.setCurrentProjectId(projectId);
+}
+export function consumeFindRequest(projectId: string | null): string | null {
+  const r = findRequest;
+  findRequest = null;
+  return r && projectId && r.projectId === projectId && Date.now() - r.at < 5000 ? r.messageId : null;
+}
+
 useAppStore.subscribe((state) => {
   const cur = state.currentProjectId;
   if (cur === navLastProjectId) return;

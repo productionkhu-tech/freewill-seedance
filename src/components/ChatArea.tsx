@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
-import { useAppStore, navigateProjectHistory, consumeHistoryNav, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft } from '../store';
+import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
@@ -1095,6 +1095,9 @@ export function ChatArea() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [headerSearch, setHeaderSearch] = useState('');
+  // 갤러리의 프롬프트 검색(26.10.203~). 채팅 검색과 따로 둔다 — 갤러리에서 '찾기' 로 채팅에 가면 그 대화의
+  // 앞뒤가 보여야 하고, 갤러리로 돌아오면 검색해 둔 결과가 그대로 있어야 한다.
+  const [gallerySearch, setGallerySearch] = useState('');
   const [showGallery, setShowGallery] = useState(false);
   // 갤러리 "채택만" 필터. 세션 한정(저장 안 함) — 필터 상태까지 영속화하면 다음에 열었을 때
   // 영상이 사라진 것처럼 보인다.
@@ -1490,15 +1493,65 @@ export function ChatArea() {
     requestAnimationFrame(step);
   }, []);
 
+  // 특정 메시지로 가서 잠깐 그 자리를 붙든다(26.10.203~). 갤러리의 '찾기' · 상세의 '프롬프트 찾기' ·
+  // 전체 갤러리의 '찾기'(다른 프로젝트면 consumeFindRequest 로 들어온다)가 같이 쓴다. 위쪽 카드의
+  // 포스터·영상이 늦게 로드되며 높이가 자라도 그 메시지가 제자리에 있게, MB4/MB5 의 '보던 자리' 와 같은
+  // 방법(restoreScroll)으로 0.9초 붙든다 — 휠·터치면 즉시 놓는다. 갤러리에서 돌아오는 중이거나 채팅
+  // 검색이 그 메시지를 가리고 있으면(검색을 푼다) 메시지가 그려질 때까지 몇 프레임 기다린다.
+  const headerSearchRef = useRef('');
+  headerSearchRef.current = headerSearch;
+  const revealMessage = useCallback((messageId: string) => {
+    pinReleaseRef.current?.();
+    setShowGallery(false);
+    setPreviewItem(null);
+    const q = headerSearchRef.current.trim().toLowerCase();
+    if (q) {
+      const st = useAppStore.getState();
+      const m = st.projects.find(p => p.id === st.currentProjectId)?.messages.find(x => x.id === messageId);
+      if (m && !(m.promptText || '').toLowerCase().includes(q)) setHeaderSearch('');
+    }
+    const t0 = Date.now();
+    const attempt = () => {
+      const node = document.getElementById(`msg-${messageId}`);
+      const cur = messagesScrollRef.current;
+      if (!node || !cur || !cur.contains(node)) {
+        if (Date.now() - t0 < 3000) requestAnimationFrame(attempt);
+        return;
+      }
+      restoreScroll({ atBottom: false, anchorId: messageId, offset: 16, top: cur.scrollTop }, 900);
+      // 도착한 카드의 테두리를 잠깐 밝힌다. 같은 프롬프트의 Draft 가 여러 장 붙어 있으면 스크롤만으로는
+      // 어느 카드로 왔는지 알 수 없다. 줄 전체가 아니라 카드(첫 자식)에 건다.
+      const card = node.firstElementChild as HTMLElement | null;
+      if (card) {
+        card.classList.add('ring-2', 'ring-indigo-400');
+        window.setTimeout(() => card.classList.remove('ring-2', 'ring-indigo-400'), 1800);
+      }
+    };
+    attempt();
+  }, [restoreScroll]);
+
+  // 지금 보고 있는 프로젝트 안에서의 전체 갤러리 '찾기'(store.ts requestFindMessage).
+  useEffect(() => {
+    const onFind = (e: Event) => {
+      const id = (e as CustomEvent).detail?.messageId;
+      if (typeof id === 'string') revealMessage(id);
+    };
+    window.addEventListener('seedance:find-message', onFind);
+    return () => window.removeEventListener('seedance:find-message', onFind);
+  }, [revealMessage]);
+
   // 그려지기 전에 먼저 바닥으로 보낸다. useEffect 는 그린 뒤에 돌기 때문에, 거기서
   // 옮기면 '위에 있다가 아래로 내려가는' 한 프레임이 실제로 보인다. useLayoutEffect
   // 는 페인트 전이라 처음부터 맨 아래로 그려진다 — 켜면 이미 맨 아래인 상태가 된다.
-  // ★ 예외 하나: 뒤로/앞으로(MB4/MB5)로 온 것이면 맨 아래가 아니라 보던 자리로 간다.
+  // ★ 예외 둘: 뒤로/앞으로(MB4/MB5)로 온 것이면 보던 자리로, 전체 갤러리의 '찾기'로 온 것이면
+  //   그 메시지로 간다 — 맨 아래 고정을 걸지 않는다(걸면 도착한 자리를 바닥으로 끌어내린다).
   useLayoutEffect(() => {
     const el = messagesScrollRef.current;
     shownProjectIdRef.current = currentProjectId;
-    const memo = consumeHistoryNav(currentProjectId) && currentProjectId
-      ? scrollMemoRef.current.get(currentProjectId) : undefined;
+    const viaHistory = consumeHistoryNav(currentProjectId);
+    const findId = consumeFindRequest(currentProjectId);
+    if (el && findId) { revealMessage(findId); return; }
+    const memo = viaHistory && currentProjectId ? scrollMemoRef.current.get(currentProjectId) : undefined;
     if (el && memo && !memo.atBottom) { restoreScroll(memo); return; }
     if (el) jumpToBottom(el);
     pinToBottom();
@@ -1557,26 +1610,8 @@ export function ChatArea() {
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'auto' }), 50);
     });
   };
-  // Find a specific message and scroll to it
-  const scrollToMessage = (messageId: string) => {
-    pinReleaseRef.current?.();   // 특정 컷으로 가는 중이면 바닥 고정을 푼다
-    setShowGallery(false);
-    setPreviewItem(null);
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        const el = document.getElementById(`msg-${messageId}`);
-        if (!el) return;
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        // 도착한 카드의 테두리를 잠깐 밝힌다. 같은 프롬프트의 Draft 가 여러 장 붙어 있으면
-        // 스크롤만으로는 어느 카드로 왔는지 알 수 없다. 줄 전체가 아니라 카드(첫 자식)에 건다.
-        const card = el.firstElementChild as HTMLElement | null;
-        if (card) {
-          card.classList.add('ring-2', 'ring-indigo-400');
-          window.setTimeout(() => card.classList.remove('ring-2', 'ring-indigo-400'), 1800);
-        }
-      }, 100);
-    });
-  };
+  // Find a specific message and scroll to it — 갤러리 '찾기' · 상세의 '프롬프트 찾기'. 실제 일은 revealMessage.
+  const scrollToMessage = (messageId: string) => revealMessage(messageId);
 
   if (!project) return null;
 
@@ -1649,25 +1684,35 @@ export function ChatArea() {
   // 그대로 섞으면 편집 때 쓸 컷을 찾는 화면이 미리보기로 덮인다. 초안이 하나라도 있으면
   // '초안 포함' 버튼이 나타난다.
   const isDraftClip = (m: any) => !!m.usedSettings?.draft;
+  const galleryClips = useMemo(() => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl), [project.messages]);
+  const gq = gallerySearch.trim().toLowerCase();
+  const matchesGallerySearch = (m: any) => !gq || (m.promptText || '').toLowerCase().includes(gq);
+  // 버튼을 보일지는 검색과 상관없이 정한다 — 검색어를 치는 동안 버튼이 사라졌다 나타나면 안 된다.
+  const hasDraftClips = useMemo(() => galleryClips.some(isDraftClip), [galleryClips]);
+  const hasStarredClips = useMemo(() => galleryClips.some(m => m.starred), [galleryClips]);
   const draftClipCount = useMemo(
-    () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && isDraftClip(m)).length,
-    [project.messages]);
-  const galleryVideos = useMemo(() => project.messages
-    .filter(m => m.status === 'succeeded' && m.videoUrl)
+    () => galleryClips.filter(m => isDraftClip(m) && matchesGallerySearch(m)).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [galleryClips, gq]);
+  const galleryVideos = useMemo(() => galleryClips
     .filter(m => withDrafts || !isDraftClip(m))
     .filter(m => !starredOnly || m.starred)
-    .sort((a, b) => b.timestamp - a.timestamp), [project.messages, starredOnly, withDrafts]);
-  // 채택 숫자도 지금 보이는 범위(초안 포함 여부)에 맞춘다 — 누르면 나오는 개수와 같아야 한다.
+    .filter(matchesGallerySearch)
+    .sort((a, b) => b.timestamp - a.timestamp),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [galleryClips, starredOnly, withDrafts, gq]);
+  // 채택 숫자도 지금 보이는 범위(초안 포함 여부 · 검색)에 맞춘다 — 누르면 나오는 개수와 같아야 한다.
   const starredCount = useMemo(
-    () => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl && m.starred && (withDrafts || !isDraftClip(m))).length,
-    [project.messages, withDrafts]);
+    () => galleryClips.filter(m => m.starred && (withDrafts || !isDraftClip(m)) && matchesGallerySearch(m)).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [galleryClips, withDrafts, gq]);
 
   // Gallery paging — see the note on the grid. Reset whenever the visible set changes
   // (opening it, switching project, toggling 채택만) so we never open mid-list.
   const GALLERY_PAGE = 24;
   const [gallShown, setGallShown] = useState(GALLERY_PAGE);
   const gallSentinelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { setGallShown(GALLERY_PAGE); }, [showGallery, project.id, starredOnly, withDrafts]);
+  useEffect(() => { setGallShown(GALLERY_PAGE); }, [showGallery, project.id, starredOnly, withDrafts, gq]);
   useEffect(() => {
     if (!showGallery || galleryVideos.length <= gallShown) return;
     const el = gallSentinelRef.current;
@@ -3353,13 +3398,42 @@ export function ChatArea() {
           <h1 className="text-[20px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight truncate">{project.name}</h1>
         )}
         <div className="flex items-center gap-2">
-          {!showGallery && (
-            <div className="relative">
-              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input type="text" value={headerSearch} onChange={(e) => setHeaderSearch(e.target.value)} placeholder="프롬프트 검색..."
-                className="w-44 pl-8 pr-3 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all" />
-            </div>
+          {/* 갤러리의 채택만 · Draft 포함은 머리에 둔다(26.10.203~). 목록 맨 위에 두었더니 스크롤하면
+              같이 올라가 버려, 채택만 보면서 내려가다 끄려면 다시 맨 위까지 가야 했다. */}
+          {showGallery && (hasStarredClips || starredOnly) && (
+            <button onClick={() => setStarredOnly(v => !v)} title="채택한 컷만 보기"
+              className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors whitespace-nowrap ${starredOnly
+                ? 'text-amber-700 bg-amber-50 border-amber-300'
+                : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
+              <Star size={13} className={starredOnly ? 'fill-amber-400 text-amber-500' : ''} />
+              채택만 <span className="font-mono opacity-70">{starredCount}</span>
+            </button>
           )}
+          {showGallery && (hasDraftClips || withDrafts) && (
+            <button onClick={() => setWithDrafts(v => !v)}
+              title="Draft(480p 미리보기)는 기본으로 숨겨 둡니다"
+              className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors whitespace-nowrap ${withDrafts
+                ? 'text-amber-700 bg-amber-50 border-amber-300'
+                : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
+              {withDrafts ? <Check size={13} /> : <Eye size={13} />}
+              Draft 포함 <span className="font-mono opacity-70">{draftClipCount}</span>
+            </button>
+          )}
+          {/* 프롬프트 검색 — 채팅에서는 메시지를, 갤러리에서는 컷을 거른다(검색어는 따로 기억한다). */}
+          <div className="relative">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input type="text" value={showGallery ? gallerySearch : headerSearch}
+              onChange={(e) => (showGallery ? setGallerySearch : setHeaderSearch)(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') (showGallery ? setGallerySearch : setHeaderSearch)(''); }}
+              placeholder="프롬프트 검색..."
+              className="w-44 pl-8 pr-7 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all" />
+            {(showGallery ? gallerySearch : headerSearch) && (
+              <button onClick={() => (showGallery ? setGallerySearch : setHeaderSearch)('')} title="검색 지우기 (Esc)"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-gray-400 hover:text-gray-700">
+                <X size={13} />
+              </button>
+            )}
+          </div>
           <button onClick={showGallery ? exitGallery : enterGallery} className={`p-2 rounded-lg transition-all ${showGallery ? 'bg-indigo-500 text-white shadow-md' : 'text-gray-400 hover:bg-gray-100 hover:text-indigo-600'}`} title="갤러리">
             <LayoutGrid size={18} />
           </button>
@@ -3473,39 +3547,22 @@ export function ChatArea() {
           0.15초짜리 장식 때문에 기능이 멈추는 거래라 애니메이션을 뜼고 그냥 즉시 교체한다. */}
       {showGallery ? (
         <div className="flex-1 overflow-y-auto p-6 bg-[#f5f5f7] dark:bg-[#242426]">
-          {/* 채택만 보기 · 초안 포함 — 해당하는 컷이 하나도 없으면 그 버튼은 굳이 노출하지 않는다 */}
-          {(starredCount > 0 || draftClipCount > 0) && (
-            <div className="flex items-center gap-2 mb-4">
-              {starredCount > 0 && (
-                <button onClick={() => setStarredOnly(v => !v)}
-                  className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors ${starredOnly
-                    ? 'text-amber-700 bg-amber-50 border-amber-300'
-                    : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
-                  <Star size={13} className={starredOnly ? 'fill-amber-400 text-amber-500' : ''} />
-                  채택만 <span className="font-mono opacity-70">{starredCount}</span>
-                </button>
-              )}
-              {draftClipCount > 0 && (
-                <button onClick={() => setWithDrafts(v => !v)}
-                  title="Draft(480p 미리보기)는 기본으로 숨겨 둡니다"
-                  className={`flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1.5 rounded-lg border transition-colors ${withDrafts
-                    ? 'text-amber-700 bg-amber-50 border-amber-300'
-                    : 'text-gray-500 bg-white dark:bg-[#1c1c1e] border-gray-200 hover:border-amber-300 hover:text-amber-600'}`}>
-                  {withDrafts ? <Check size={13} /> : <Eye size={13} />}
-                  Draft 포함 <span className="font-mono opacity-70">{draftClipCount}</span>
-                </button>
-              )}
-            </div>
+          {gq && galleryVideos.length > 0 && (
+            <p className="text-[12px] text-gray-500 mb-3">‘{gallerySearch.trim()}’ 검색 결과 <span className="font-mono">{galleryVideos.length}</span>개</p>
           )}
           {galleryVideos.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3 animate-fade-in">
-              <LayoutGrid size={48} className="text-gray-300" />
-              <p className="text-lg">{starredOnly ? '채택한 컷이 없습니다.'
+              {gq ? <Search size={48} className="text-gray-300" /> : <LayoutGrid size={48} className="text-gray-300" />}
+              <p className="text-lg">{gq ? '검색 결과가 없습니다.'
+                : starredOnly ? '채택한 컷이 없습니다.'
                 : !withDrafts && draftClipCount > 0 ? `본편이 아직 없습니다 · Draft ${draftClipCount}개` : '아직 생성된 영상이 없습니다.'}</p>
-              {starredOnly && (
+              {gq && (
+                <button onClick={() => setGallerySearch('')} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">검색 지우기</button>
+              )}
+              {!gq && starredOnly && (
                 <button onClick={() => setStarredOnly(false)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">전체 보기</button>
               )}
-              {!starredOnly && !withDrafts && draftClipCount > 0 && (
+              {!gq && !starredOnly && !withDrafts && draftClipCount > 0 && (
                 <button onClick={() => setWithDrafts(true)} className="text-[13px] text-indigo-500 hover:text-indigo-600 font-medium">Draft 보기</button>
               )}
             </div>
