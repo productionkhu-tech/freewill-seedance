@@ -439,6 +439,9 @@ const ELEMENTS_RESTORE_MAX = 150 * 1024 * 1024;
 // Same ceiling for the state file. Normally ~19MB so it never applies — it exists for the
 // pre-split legacy fallback, which bundles the library and can be half a gigabyte.
 const STATE_RESTORE_MAX = 150 * 1024 * 1024;
+// 상태 전용 백업이 이보다 크면 IPC 로 한 덩어리를 넘기지 않는다 — 렌더러가 서버(같은 백업 폴더)에서 프로젝트를
+// 하나씩 받아 붙인다(26.10.202~, server.ts state-outline). 크기 때문에 복원을 건너뛰는 일이 없다.
+const STATE_SINGLE_MAX = 64 * 1024 * 1024;
 
 function writeAtomic(target, content) {
   if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -559,6 +562,11 @@ ipcMain.handle('backup-load', async () => {
     // the app before — the fact that it holds the work history doesn't make it safe to
     // load. Better to boot empty and say so than to die on launch every time.
     const stateSize = fs.statSync(path_).size;
+    if (path_ === BACKUP_PATH && stateSize > STATE_SINGLE_MAX) {
+      let elementsChunks = 0, elementsCount = 0;
+      try { const man = JSON.parse(fs.readFileSync(ELEMENTS_MANIFEST_PATH, 'utf8')); if (man && man.chunks > 0) { elementsChunks = man.chunks; elementsCount = man.count || 0; } } catch {}
+      return { ok: true, content: null, stateSkipped: true, pieces: true, stateBytes: stateSize, path: path_, elementsChunks, elementsCount };
+    }
     if (stateSize > STATE_RESTORE_MAX) {
       console.warn(`[Backup] ${path_} is ${(stateSize / 1048576).toFixed(0)}MB — too large to load safely; skipping restore.`);
       // 상태는 못 넘겨도 어셋 목록은 조각이라 넘길 수 있다 — 클라이언트가 따로 되살린다(26.10.201~).

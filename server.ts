@@ -644,6 +644,9 @@ async function startServer() {
   const ELEMENTS_MANIFEST_PATH = path.join(BACKUP_DIR, 'seedance-elements-manifest.json');
   const elementsChunkPath = (i: number) => path.join(BACKUP_DIR, `seedance-elements-${String(i).padStart(3, '0')}.json`);
   const STATE_RESTORE_MAX = 150 * 1024 * 1024;
+  // 상태 전용 백업이 이보다 크면 한 덩어리로 넘기지 않고 프로젝트 하나씩 넘긴다(26.10.202~, state-outline ·
+  // state-project). 한 덩어리 JSON 응답은 134MB 에서 Node 를 죽였다(2026-09-30 Zone Allocation failed).
+  const STATE_SINGLE_MAX = 64 * 1024 * 1024;
   const ELEMENTS_RESTORE_MAX = 150 * 1024 * 1024;
 
   function writeAtomic(target: string, content: string) {
@@ -747,6 +750,12 @@ async function startServer() {
       // A pre-split backup is state AND library in one file. Reading that whole thing at
       // startup is what used to kill the app — booting empty and saying so is better.
       const stateSize = fs.statSync(p).size;
+      if (p === BACKUP_PATH && stateSize > STATE_SINGLE_MAX) {
+        // 크다고 건너뛰지 않는다 — 클라이언트가 조각으로 받아 붙인다(아래 state-outline).
+        let elementsChunks = 0, elementsCount = 0;
+        try { const man = JSON.parse(fs.readFileSync(ELEMENTS_MANIFEST_PATH, 'utf8')); if (man && man.chunks > 0) { elementsChunks = man.chunks; elementsCount = man.count || 0; } } catch {}
+        return res.json({ ok: true, content: null, stateSkipped: true, pieces: true, stateBytes: stateSize, path: p, elementsChunks, elementsCount });
+      }
       if (stateSize > STATE_RESTORE_MAX) {
         console.warn(`[Backup] ${p} is ${(stateSize / 1048576).toFixed(0)}MB — too large to load safely; skipping.`);
         // 상태는 못 넘겨도 어셋 목록은 조각이라 넘길 수 있다 — 클라이언트가 따로 되살린다(26.10.201~).
@@ -931,7 +940,7 @@ async function startServer() {
     return i;
   }
   // 객체를 훑으며 원하는 키의 값 범위만 모은다(나머지 값은 건너뛰기만).
-  function objectEntries(b: Buffer, i: number, want: string[]): Map<string, [number, number]> {
+  function objectEntries(b: Buffer, i: number, want: string[] | null): Map<string, [number, number]> {   // null = 모든 키
     const out = new Map<string, [number, number]>();
     i = skipWs(b, i);
     if (b[i] !== 0x7b) throw new Error('not an object');
@@ -943,7 +952,7 @@ async function startServer() {
       const key = JSON.parse(b.toString('utf8', ks, i));
       i = skipWs(b, i); if (b[i] !== 0x3a) throw new Error('expected colon'); i = skipWs(b, i + 1);
       const vs = i; i = skipValue(b, i);
-      if (want.includes(key)) out.set(key, [vs, i]);
+      if (!want || want.includes(key)) out.set(key, [vs, i]);
       i = skipWs(b, i);
       if (b[i] === 0x2c) { i++; continue; }
       if (b[i] === 0x7d) return out;
@@ -1088,6 +1097,59 @@ async function startServer() {
       const bindings = Object.fromEntries(Object.entries(allBind || {}).filter(([pid]) => pids.has(pid)));
       console.log(`[Recovery] ${c.name}: 프로젝트 ${projects.length}개, 어셋 ${elements.length}개(이미지 ${images}장, 새 원본 파일 ${written}개)`);
       res.json({ ok: true, name: c.name, mtime: c.mtime, projects, elements, collections, bindings });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // ── 지금 백업을 프로젝트 하나씩 (26.10.202~) ─────────────────────────────────────
+  // 작업 기록 백업이 STATE_SINGLE_MAX 를 넘으면 GET /api/backup/state 는 내용 대신 pieces:true 를 준다.
+  // 클라이언트는 여기서 '프로젝트 말고 나머지' 와 프로젝트 수를 받고, 프로젝트를 하나씩 받아 붙인다 —
+  // 기록이 아무리 커도 한 덩어리 문자열을 만들지 않으므로, 크기 때문에 복원을 건너뛰는 일(빈 상태로 시작
+  // → 덮어쓰기, 2026-10-01 팀원 사고의 한 갈래)이 없다. 파일은 바이트로 한 번 훑고(509MB 0.7초) 범위만
+  // 들고 있다가, 마지막 조각을 넘기거나 2분이 지나면 놓는다. 옛 합본(legacy)은 여기로 오지 않는다 —
+  // 어셋 원본이 상태 안에 있어서, 너무 크면 예전처럼 건너뛰고 26.10.201 의 되살리기가 맡는다.
+  type Outline = { sig: string; b: Buffer; rest: string; version: unknown; ranges: [number, number][] };
+  let outline: Outline | null = null;
+  function loadOutline(): Outline | null {
+    if (!fs.existsSync(BACKUP_PATH)) return null;
+    const st = fs.statSync(BACKUP_PATH);
+    const sig = `${st.size}|${Math.round(st.mtimeMs)}`;
+    if (outline && outline.sig === sig) return outline;
+    const b = fs.readFileSync(BACKUP_PATH);
+    const root = objectEntries(b, 0, ['state', 'version']);
+    const s = root.get('state');
+    if (!s) throw new Error('state 가 없는 백업');
+    const keys = objectEntries(b, s[0], null);
+    const ranges: [number, number][] = [];
+    const pr = keys.get('projects');
+    if (pr) forEachItem(b, pr, (a, e) => { ranges.push([a, e]); });
+    const rest = '{' + [...keys]
+      .filter(([k]) => k !== 'projects' && k !== 'elementAssets')
+      .map(([k, [a, e]]) => JSON.stringify(k) + ':' + b.toString('utf8', a, e))
+      .join(',') + '}';
+    const v = root.get('version');
+    const o: Outline = { sig, b, rest, version: v ? JSON.parse(b.toString('utf8', v[0], v[1])) : 0, ranges };
+    outline = o;
+    setTimeout(() => { if (outline === o) outline = null; }, 2 * 60 * 1000).unref?.();
+    return o;
+  }
+  app.get('/api/backup/state-outline', (_req, res) => {
+    try {
+      const o = loadOutline();
+      if (!o) return res.json({ ok: false, error: 'no backup' });
+      res.json({ ok: true, sig: o.sig, projects: o.ranges.length, rest: o.rest, version: o.version });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.get('/api/backup/state-project/:i', (req, res) => {
+    try {
+      const o = loadOutline();
+      // 받는 도중에 백업이 바뀌었으면 섞지 않는다 — 클라이언트는 처음부터 다른 길로 간다.
+      if (!o || String(req.query.sig || '') !== o.sig) return res.status(409).json({ ok: false, error: '백업이 그새 바뀌었습니다' });
+      const i = Number(req.params.i);
+      const r = Number.isInteger(i) ? o.ranges[i] : undefined;
+      if (!r) return res.status(404).json({ ok: false, error: 'no such project' });
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.end(o.b.subarray(r[0], r[1]));
+      if (i === o.ranges.length - 1 && outline === o) outline = null;   // 다 넘겼다 — 버퍼를 놓는다
     } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
   });
 

@@ -384,6 +384,13 @@ function runBackup() {
   // 백업 폴더의 element-library/ 로 간다(아래 sync).
   void (async () => {
     try {
+      // 기록 속 그림 파일(26.10.202~, compactMessageImages)도 백업 폴더로. 칩 아이콘·카드 썸네일이라
+      // 못 채워도 아래 어셋 목록 백업은 막지 않는다 — 다음 주기에 다시.
+      const msgIds = messageLibraryIds(st.projects);
+      if (msgIds.length) {
+        const s2 = await syncLibraryBackup(msgIds);
+        if (!s2?.ok || (s2.missing && s2.missing.length)) console.warn('[Backup] message images not all in the backup folder:', s2?.error || `${s2?.missing?.length} missing`);
+      }
       const els = st.elementAssets || [];
       // ★ 원본 파일이 백업 폴더에 먼저 있어야 한다. 목록은 libId 만 들고 있으므로, 원본이 백업에 없는
       //   채로 목록만 새로 쓰면 그 백업으로 되살린 라이브러리는 그림이 없다. 채우지 못하면 이번에는
@@ -437,6 +444,28 @@ function blockPersist(msg: string) {
   console.error('[Persist] saving disabled for this session:', msg);
   // 스토어가 아직 만들어지는 중이면(TDZ) 실패한다 — onRehydrateStorage 가 persistTroubleMsg 로 다시 넣는다.
   try { useAppStore.setState({ persistTrouble: msg }); } catch { /* 위 주석 */ }
+}
+
+// 큰 작업 기록 백업을 프로젝트 하나씩 받아 붙인다(26.10.202~, server.ts state-outline). 한 덩어리
+// 문자열을 만들지 않으므로 크기 때문에 복원을 건너뛰지 않는다. 하나라도 못 받으면 null — 부르는 쪽이
+// 201 의 길(켜진 뒤 그 백업에서 프로젝트를 꺼내 붙이기)로 간다.
+async function restoreStateInPieces(): Promise<StorageValue<unknown> | null> {
+  try {
+    const o = await (await fetch('/api/backup/state-outline')).json();
+    if (!o?.ok || !Number.isInteger(o.projects) || typeof o.rest !== 'string') return null;
+    const projects: unknown[] = [];
+    for (let i = 0; i < o.projects; i++) {
+      const r = await fetch(`/api/backup/state-project/${i}?sig=${encodeURIComponent(o.sig)}`);
+      if (!r.ok) { console.warn(`[Backup] piece ${i}/${o.projects} failed: HTTP ${r.status}`); return null; }
+      projects.push(await r.json());
+    }
+    const state = { ...JSON.parse(o.rest), projects };
+    console.log(`[Backup] Restored ${projects.length} project(s) in pieces`);
+    return { state, version: typeof o.version === 'number' ? o.version : 0 };
+  } catch (e) {
+    console.warn('[Backup] piecewise restore failed:', e);
+    return null;
+  }
 }
 
 // 백업 폴더의 어셋 목록 조각을 IDB 로. 상태 복원과 따로 — 상태가 너무 커서 건너뛰어도 어셋은 되살린다.
@@ -502,9 +531,19 @@ const idbPersistStorage: PersistStorage<unknown> = {
       if (api?.backupLoad) {
         const result = await api.backupLoad();
         if (result?.ok && !result.content && result.stateSkipped) {
-          // 너무 커서 통째로는 못 불러왔다. 어셋은 조각이라 되살리고, 프로젝트는 켜진 뒤 그 백업에서 꺼낸다.
-          restoreSkippedThisLaunch = true;
+          // 한 덩어리로는 안 넘어왔다. 어셋 목록은 조각이라 먼저 되살린다.
           await restoreElementChunksFromBackup(api, result);
+          // 상태 전용 백업이면 프로젝트를 하나씩 받아 붙인다(26.10.202~) — 크기와 상관없이 그대로 돌아온다.
+          if (result.pieces) {
+            const pieced = await restoreStateInPieces();
+            if (pieced) {
+              try { await set(name, JSON.stringify(pieced)); }
+              catch (e) { console.warn('[Backup] pieced state could not be seeded into IndexedDB (the next save writes it):', e); }
+              return pieced;
+            }
+          }
+          // 조각으로도 못 받았다(옛 합본이 너무 큼 · 받는 중 바뀜) — 켜진 뒤 그 백업에서 프로젝트를 꺼낸다(201).
+          restoreSkippedThisLaunch = true;
         }
         if (result?.ok && result.content) {
           // Seed IDB so subsequent reads hit the fast path and the next setItem
@@ -2787,3 +2826,165 @@ async function backfillLibraryImages(): Promise<void> {
   }
   console.log(`[Library] 빠진 미리보기 ${previews}개 · 썸네일 ${thumbs}개 채움${failed ? ` (실패 ${failed} — 다음 실행에 다시)` : ''}`);
 }
+
+// ─── 기록 속 그림은 한 번만 (26.10.202~) ──────────────────────────────────────────
+// 메시지마다 썸네일을 base64 로 통째로 들고 있었다 — 프롬프트의 @멘션 칩 하나하나(같은 어셋을 17번
+// 부르면 17장, 그 프롬프트로 4개를 뽑으면 또 4배), 카드의 레퍼런스 줄, 첨부 썸네일. 2026-10-02 실측:
+// 작업 기록 133.8MB 중 106MB 가 그림인데 서로 다른 그림은 263장(1.1MB)뿐이었다. 9월 속도(월 53MB)면
+// 9일 뒤 백업 자동 복원 상한(150MB)을 넘고, 저장할 때마다 그 전체를 다시 쓴다.
+// 이제 그림은 서버 라이브러리 폴더에 파일로 한 번만 둔다(이름 = 내용 md5 — 같은 그림은 저절로 하나,
+// 한 픽셀만 달라도 다른 파일). 메시지에는 주소(/api/library/<id>)만 남고, 화면은 주소를 그대로 그린다.
+// 새 메시지는 보낸 직후에, 옛 메시지는 켜질 때 한 번. 서버가 같은 크기로 받았다고 확인한 그림만 바꾼다
+// (3001 원본 옮기기와 같은 규칙) — 실패한 것은 그대로 두고 다음에 다시. 그새 바뀐 메시지는 건드리지
+// 않고 다음 차례에 한다. 파일은 라이브러리 원본처럼 백업 폴더 element-library/ 로도 복사된다.
+// ★ 한 방향: 이 버전 전 앱은 주소로 바뀐 칩 아이콘을 못 그린다(기록 자체는 그대로).
+// 보통 그림 형식만 — 서버가 머리 바이트로 형식을 알아보는 것들. SVG 같은 것은 그대로 둔다(형식을 못
+// 알아보면 확장자가 틀린 파일이 되어 화면에 안 나온다).
+const DATA_IMG_RE = /data:image\/(?:png|jpe?g|webp|gif|bmp);base64,[A-Za-z0-9+/=]+/g;
+const isDataImg = (s: unknown): s is string => typeof s === 'string' && /^data:image\/(?:png|jpe?g|webp|gif|bmp);base64,/.test(s);
+const imgUrlCache = new Map<string, string>();     // data URL → '/api/library/<id>' (이번 실행 동안)
+const cleanMessages = new WeakSet<object>();        // 박힌 그림이 없는 메시지(객체 — 바뀌면 새 객체다)
+let compacting = false;
+let compactAgain = false;
+let compactTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleCompaction(delay = 4000) {
+  if (compactTimer) clearTimeout(compactTimer);
+  compactTimer = setTimeout(() => { compactTimer = null; void compactMessageImages(); }, delay);
+}
+
+function messageDataImages(m: any): string[] {
+  const out: string[] = [];
+  if (typeof m?.promptHtml === 'string' && m.promptHtml.includes('data:image/')) out.push(...(m.promptHtml.match(DATA_IMG_RE) || []));
+  for (const ei of m?.usedElementImages || []) if (isDataImg(ei?.url)) out.push(ei.url);
+  for (const a of m?.usedAssets || []) { if (isDataImg(a?.url)) out.push(a.url); if (isDataImg(a?.thumbnailUrl)) out.push(a.thumbnailUrl); }
+  return out;
+}
+
+// 저장된 그림만 주소로 바꾼 새 메시지. 바꿀 게 없으면 같은 객체를 돌려준다.
+function rewriteMessageImages(m: any): any {
+  const sub = (s: string) => imgUrlCache.get(s) ?? s;
+  const next: any = { ...m };
+  let changed = false;
+  if (typeof m.promptHtml === 'string' && m.promptHtml.includes('data:image/')) {
+    const h = m.promptHtml.replace(DATA_IMG_RE, sub);
+    if (h !== m.promptHtml) { next.promptHtml = h; changed = true; }
+  }
+  if (Array.isArray(m.usedElementImages)) {
+    const arr = m.usedElementImages.map((ei: any) => isDataImg(ei?.url) && imgUrlCache.has(ei.url) ? { ...ei, url: sub(ei.url) } : ei);
+    if (arr.some((x: any, i: number) => x !== m.usedElementImages[i])) { next.usedElementImages = arr; changed = true; }
+  }
+  if (Array.isArray(m.usedAssets)) {
+    const arr = m.usedAssets.map((a: any) => {
+      const u = isDataImg(a?.url) && imgUrlCache.has(a.url);
+      const t = isDataImg(a?.thumbnailUrl) && imgUrlCache.has(a.thumbnailUrl);
+      return u || t ? { ...a, ...(u ? { url: sub(a.url) } : {}), ...(t ? { thumbnailUrl: sub(a.thumbnailUrl) } : {}) } : a;
+    });
+    if (arr.some((x: any, i: number) => x !== m.usedAssets[i])) { next.usedAssets = arr; changed = true; }
+  }
+  return changed ? next : m;
+}
+
+async function storeMessageImage(dataUrl: string): Promise<string> {
+  const blob = await (await fetch(dataUrl)).blob();
+  const res = await fetch('/api/library', {
+    method: 'POST',
+    headers: { 'Content-Type': blob.type || 'application/octet-stream', 'X-Filename': encodeURIComponent('thumb' + extForMime(blob.type)) },
+    body: blob,
+  });
+  const j = await res.json().catch(() => null);
+  if (!res.ok || !j?.ok || !j.libId) throw new Error(j?.error || `그림 저장 실패 (${res.status})`);
+  if (j.bytes !== blob.size) throw new Error(`그림 저장 확인 실패 (보낸 ${blob.size}B, 저장 ${j.bytes}B)`);
+  return `/api/library/${j.libId}`;
+}
+
+async function compactMessageImages(): Promise<void> {
+  if (persistBlocked) return;
+  if (!useAppStore.getState()._hasHydrated) return;
+  if (compacting) { compactAgain = true; return; }
+  compacting = true;
+  let stored = 0, failed = 0, rewritten = 0;
+  try {
+    do {
+      compactAgain = false;
+      // 1) 아직 그림이 박힌 메시지와 처음 보는 그림을 모은다. 프로젝트마다 한 번 숨을 돌린다 — 켜질 때
+      //    첫 회는 기록 전체(100MB+)를 훑는다.
+      const seen = new Map<string, any>();
+      const fresh = new Set<string>();
+      for (const p of useAppStore.getState().projects) {
+        for (const m of p.messages) {
+          if (cleanMessages.has(m)) continue;
+          const imgs = messageDataImages(m);
+          if (!imgs.length) { cleanMessages.add(m); continue; }
+          seen.set(m.id, m);
+          for (const d of imgs) if (!imgUrlCache.has(d)) fresh.add(d);
+        }
+        await new Promise(r => setTimeout(r, 0));
+      }
+      if (!seen.size) break;
+      // 2) 처음 보는 그림만 파일로.
+      let failedNow = 0;
+      for (const d of fresh) {
+        try { imgUrlCache.set(d, await storeMessageImage(d)); stored++; }
+        catch (e) { failedNow++; console.warn('[Compact] 그림 저장 실패 — 그대로 두고 다음에 다시:', e); }
+      }
+      failed += failedNow;
+      // 3) 주소로 바꾼 메시지를, 그새 바뀌지 않은 것만 갈아 끼운다.
+      const next = new Map<string, any>();
+      for (const [id, m] of seen) { const n = rewriteMessageImages(m); if (n !== m) next.set(id, n); }
+      if (next.size) {
+        useAppStore.setState(s => ({
+          projects: s.projects.map(p => {
+            let hit = false;
+            const messages = p.messages.map(m => {
+              const n = next.get(m.id);
+              if (!n || seen.get(m.id) !== m) return m;      // 그새 바뀌었다 — 다음 차례에
+              hit = true; rewritten++;
+              if (!messageDataImages(n).length) cleanMessages.add(n);
+              return n;
+            });
+            return hit ? { ...p, messages } : p;
+          }),
+        }));
+      }
+      if (failedNow) break;                                  // 실패가 있으면 이번엔 여기까지(다음 예약 때)
+    } while (compactAgain);
+  } finally {
+    compacting = false;
+  }
+  if (stored || rewritten || failed) {
+    console.log(`[Compact] 기록 속 그림 ${stored}장을 파일로, 메시지 ${rewritten}개를 주소로 바꿈${failed ? ` (실패 ${failed} — 다음에 다시)` : ''}`);
+    // 새 파일을 바로 백업 폴더에도 — 다음 백업 주기까지 한 곳에만 있지 않게.
+    const ids = [...new Set([...imgUrlCache.values()].map(u => u.slice('/api/library/'.length)))];
+    if (ids.length) void syncLibraryBackup(ids);
+  }
+}
+
+// 백업 폴더에 있어야 할 기록 속 그림 파일(id). 메시지 객체마다 한 번만 훑는다.
+const LIB_REF_RE = /\/api\/library\/([0-9a-f]{12}\.[a-z0-9]{2,5})/g;
+const msgLibRefs = new WeakMap<object, string[]>();
+function messageLibraryIds(projects: Project[]): string[] {
+  const ids = new Set<string>();
+  for (const p of projects) for (const m of p.messages as any[]) {
+    let r = msgLibRefs.get(m);
+    if (!r) {
+      const found: string[] = [];
+      const scan = (s: unknown) => { if (typeof s === 'string' && s.includes('/api/library/')) for (const x of s.matchAll(LIB_REF_RE)) found.push(x[1]); };
+      scan(m.promptHtml);
+      for (const ei of m.usedElementImages || []) scan(ei?.url);
+      for (const a of m.usedAssets || []) { scan(a?.url); scan(a?.thumbnailUrl); }
+      msgLibRefs.set(m, found);
+      r = found;
+    }
+    for (const id of r) ids.add(id);
+  }
+  return [...ids];
+}
+
+// 기록이 바뀔 때마다(새 메시지 · 되살린 프로젝트 · 가져오기) 조금 뒤에 한 번. 깨끗한 메시지는 건너뛰므로 싸다.
+let lastProjectsForCompact: unknown = null;
+useAppStore.subscribe((state) => {
+  if (!state._elementsHydrated || state.projects === lastProjectsForCompact) return;
+  lastProjectsForCompact = state.projects;
+  scheduleCompaction();
+});
