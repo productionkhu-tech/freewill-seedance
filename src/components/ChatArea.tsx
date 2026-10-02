@@ -1368,6 +1368,36 @@ export function ChatArea() {
     }
   }, [currentProjectId]);
 
+  // 작성 칸이 내려갔다 다시 그려질 때 초안을 지킨다(26.10.303~). 갤러리는 채팅 화면을 통째로 바꾸므로 작성 칸도
+  // 내려갔다가 새로 그려지는데, 초안을 편집기에 다시 넣는 곳이 위의 프로젝트 전환 effect 뿐이라 빈 칸으로 돌아왔고,
+  // 이어 치면 그 빈 칸이 초안을 덮었다. 게다가 초안 저장은 0.5초 디바운스라, 치자마자 갤러리를 열면 마지막 글자가
+  // 저장되지 않았다(타이머가 돌 때 편집기가 이미 없다).
+  //   내려갈 때: 떼어진 노드도 내용은 그대로 들고 있다 — 그걸 지금 초안으로 저장한다(그 편집기가 들고 있던 프로젝트에).
+  //   다시 그려질 때: 지금 프로젝트의 초안을 넣는다 — 갤러리에서 '찾기' 로 다른 프로젝트에 가도 그 프로젝트 것이 들어간다.
+  // 처음 그려질 때는 프로젝트 전환 effect 가 맡는다. 렌더마다 돌지만 같은 노드면 바로 끝난다.
+  const lastEditorRef = useRef<HTMLDivElement | null>(null);
+  const editorParkedRef = useRef(false);
+  useLayoutEffect(() => {
+    const el = contentEditableRef.current;
+    const prev = lastEditorRef.current;
+    if (el === prev) return;
+    lastEditorRef.current = el;
+    if (!el) {
+      if (!prev) return;
+      if (draftSaveTimerRef.current) { clearTimeout(draftSaveTimerRef.current); draftSaveTimerRef.current = null; }
+      // previousProjectIdRef = 이 편집기가 들고 있던 프로젝트(프로젝트 전환 effect 가 바꾸기 전 값).
+      const owner = previousProjectIdRef.current;
+      if (owner) useAppStore.getState().updateDraftPrompt(owner, prev.innerHTML);
+      editorParkedRef.current = true;
+      return;
+    }
+    if (!editorParkedRef.current) return;
+    editorParkedRef.current = false;
+    el.innerHTML = useAppStore.getState().projects.find(p => p.id === currentProjectId)?.draftPrompt || '';
+    setHasText(!!el.innerText.trim());
+    syncMentionCount();
+  });
+
   // Persist draft on window close (cache before IndexedDB debounce window)
   useEffect(() => {
     const handler = () => {
