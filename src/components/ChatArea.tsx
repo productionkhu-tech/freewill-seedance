@@ -1603,13 +1603,27 @@ export function ChatArea() {
   const enterGallery = () => {
     setShowGallery(true);
   };
+  // 갤러리에서 채팅으로 돌아오기(26.10.204~). 채팅 목록은 갤러리와 자리를 바꾸며 통째로 다시 그려지므로
+  // 처음엔 맨 위(scrollTop 0)다. 예전에는 그린 뒤 한 프레임 + 50ms 뒤에 맨 아래로 굴렸는데, index.css 의
+  // 전역 `scroll-behavior: smooth` 때문에 'auto' 가 곧 smooth 라 맨 위에서 주르륵 미끄러져 내려가는 게
+  // 보였다. 이제 그리기 전(아래 useLayoutEffect)에 보던 자리로 순간이동한다 — 맨 아래였으면 맨 아래.
+  // '찾기' 로 돌아올 때는 revealMessage 가 자리를 정하므로 여기를 타지 않는다.
+  const backFromGalleryRef = useRef(false);
   const exitGallery = () => {
+    backFromGalleryRef.current = true;
     setShowGallery(false);
-    // Scroll to absolute bottom after returning to chat
-    requestAnimationFrame(() => {
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'auto' }), 50);
-    });
   };
+  useLayoutEffect(() => {
+    if (showGallery || !backFromGalleryRef.current) return;
+    backFromGalleryRef.current = false;
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    const memo = currentProjectId ? scrollMemoRef.current.get(currentProjectId) : undefined;
+    if (memo && !memo.atBottom) { restoreScroll(memo); return; }
+    jumpToBottom(el);
+    pinToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showGallery]);
   // Find a specific message and scroll to it — 갤러리 '찾기' · 상세의 '프롬프트 찾기'. 실제 일은 revealMessage.
   const scrollToMessage = (messageId: string) => revealMessage(messageId);
 
