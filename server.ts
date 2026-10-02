@@ -1,5 +1,4 @@
 import express from 'express';
-import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
@@ -252,7 +251,22 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(cors());
+  // ★ 다른 출처에서 온 요청은 서버가 거절한다(26.10.301~). 예전에는 cors() 로 아무 웹사이트나 이 로컬 API 를
+  //   부를 수 있었다(같은 PC 브라우저에 열린 페이지가 기록을 읽고 · 파일을 쓰고 · 지울 수 있었다). CORS 헤더만
+  //   빼면 '응답을 못 읽게' 될 뿐 요청 자체는 실행되므로(단순 POST 는 미리 묻지도 않는다) 여기서 끊는다.
+  //   - Origin 이 붙어 오면 이 서버 자신(localhost · 127.0.0.1 + 같은 포트)이어야 한다. 앱 화면이 그렇다.
+  //   - Sec-Fetch-Site 가 cross-site · same-site 면 거절(다른 사이트가 <img> · <form> 으로 부르는 경우).
+  //   - 둘 다 없으면 통과 — Electron 메인 프로세스의 fetch, 주소창 직접 입력(none), curl 같은 같은 PC 도구.
+  const SELF_ORIGINS = new Set([`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`]);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    const site = String(req.headers['sec-fetch-site'] || '');
+    if ((origin && !SELF_ORIGINS.has(origin)) || site === 'cross-site' || site === 'same-site') {
+      console.warn(`[Security] 다른 출처의 요청을 거절: ${req.method} ${req.path} (origin=${origin || '-'}, site=${site || '-'})`);
+      return res.status(403).json({ error: 'cross-origin request refused' });
+    }
+    next();
+  });
   app.use(express.json({ limit: '200mb' }));
 
   // Download proxy (SSRF-safe: BytePlus CDN only)
@@ -840,7 +854,8 @@ async function startServer() {
   }
 
   // media-cache id 로도, 라이브러리 id 로도 원본을 찾는다. 요청에서 온 값이라 폴더를 벗어나는
-  // 이름(../ · 경로 구분자 · 드라이브 문자)은 여기서 막는다 — 이 서버는 0.0.0.0 에 떠 있다.
+  // 이름(../ · 경로 구분자 · 드라이브 문자)은 여기서 막는다 — 26.10.301 전에는 0.0.0.0 에 떠 있어 같은 망 어디서나
+  // 부를 수 있었다. 지금은 이 PC 에서만이지만, 요청에서 온 값은 그래도 믿지 않는다.
   function resolveMediaFile(raw: unknown): string | null {
     const id = String(raw ?? '');
     if (!id || /[\\/:\0]/.test(id) || id.includes('..')) return null;
@@ -2040,7 +2055,11 @@ async function startServer() {
     app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  // ★ 이 PC 안에서만 연다(26.10.301~). 예전 0.0.0.0 은 같은 망(회사 와이파이 · 사내망)의 누구나 이 PC 의 작업
+  //   기록 · 백업 · 어셋 원본 · 생성 영상을 읽고 파일을 쓸 수 있었다. 앱은 같은 PC 에서 localhost 로만 부른다
+  //   (창 주소 · 메인 프로세스의 확인 요청 · start.bat/start.command) — 0.0.0.0 도 IPv4 라 localhost 동작은 같다.
+  //   바깥 서비스(BytePlus · Gemini · NCP · 트래커)는 이 서버로 들어오지 않는다 — R2 링크 · 나가는 요청뿐.
+  app.listen(PORT, '127.0.0.1', () => {
     console.log(`\n  Freewill Seedance 2.0`);
     console.log(`  ========================`);
     console.log(`  http://localhost:${PORT}`);
