@@ -23,7 +23,7 @@ const CATEGORIES = Object.keys(CATEGORY_META) as AssetCategory[];
 // allows (2.5 → 30); what actually gates a request is modelImageMax at send time, which
 // still blocks a 20-image element on 2.0. Was 9, copied from 2.0's cap, which quietly made
 // 2.5's 30-image allowance unreachable through the library.
-const MAX_ELEMENT_IMAGES = 30;
+export const MAX_ELEMENT_IMAGES = 30;
 
 // ─── Sharable asset bundles (share link / file import) ───
 const BUNDLE_FORMAT = 'freewill-seedance-elements';
@@ -71,7 +71,8 @@ function parseBundle(text: string): { kind: 'collection' | 'asset'; collectionNa
 // (libId). 26.9.3001~ the original is never held in memory as base64 — cards and hover
 // load a JPG preview by URL (libraryPreviewSrc), and send/copy/share read the original
 // file untouched. storeLibraryImage verifies the server wrote every byte.
-async function fileToElementImage(file: File): Promise<ElementImage> {
+// 에이전트 작업함(ChatArea 의 elements.add)도 이 함수로 등록한다 — 검사 · 썸네일 · 원본 저장이 화면과 같게.
+export async function fileToElementImage(file: File): Promise<ElementImage> {
   const sizeErr = validateImageFile(file);
   if (sizeErr) throw new Error(sizeErr);
   const dimErr = await validateImageDimensions(file);

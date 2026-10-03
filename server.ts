@@ -1417,8 +1417,18 @@ async function startServer() {
       fourK: b.fourK === true,
     };
     pruneAgentJobs();
+    pruneAgentCmds();
     // manualVersion: 화면은 자기 설명서와 다르면(서버가 다시 떴거나 처음) 올린다.
     const manualVersion = manualVersionNow();
+    // 명령(26.10.305~)이 있으면 명령만 준다 — 그 틱엔 생성 요청을 주지 않는다(project.open 같은 명령 뒤의 생성은
+    // 화면이 새로 그려진 다음 틱에 받아야 지금 프로젝트를 제대로 본다). 입력 중이어도(peek) 명령은 받는다.
+    if (screen && b.takeCommands) {
+      const cmds = [...agentCmds.values()].filter(c => c.status === 'pending').sort((x, y) => x.createdAt - y.createdAt).slice(0, 5);
+      if (cmds.length) {
+        for (const c of cmds) { c.status = 'taken'; c.updatedAt = now; c.takenBy = screen; }
+        return res.json({ job: null, commands: cmds.map(c => ({ id: c.id, command: c.command, args: c.args })), manualVersion });
+      }
+    }
     // peek: 상태만 알리고 가져가지는 않는다 — 사용자가 입력 중 · 생성 중 · 다른 작업을 보내는 중일 때.
     if (b.peek || !screen) return res.json({ job: null, manualVersion });
     const next = [...agentJobs.values()].filter(j => j.status === 'pending').sort((x, y) => x.createdAt - y.createdAt)[0];
@@ -1447,6 +1457,98 @@ async function startServer() {
     const j = agentJobs.get(req.params.id);
     if (!j) return res.status(404).json({ error: '없는 작업입니다 (앱을 다시 켜면 작업함이 비워집니다)' });
     res.json({ id: j.id, name: j.spec.name, status: j.status, error: j.error, project: j.projectName, messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt, manualVersion: manualVersionNow() });
+  });
+
+  // ── 에이전트 명령 (26.10.305~) ───────────────────────────────────────────────
+  // 생성 말고 앱 기능(프로젝트 · 어셋 라이브러리 · 카드 · 과금 목록 보기)을 에이전트가 쓰는 길. 화면이 2초마다 가져가
+  // 앱 버튼과 같은 함수로 실행하고 결과를 올린다(ChatArea agentCommands — 목록은 src/lib/agent-inbox.ts AGENT_COMMANDS).
+  // 에이전트의 POST 는 결과가 올 때까지(기본 30초, 최대 120초) 기다렸다가 답한다. 더 걸리면 GET 으로 이어서 본다.
+  // 생성 요청과 같은 규칙: 설명서 버전 확인, 가져간 명령은 다시 내놓지 않음(화면이 1분 넘게 안 오면 실패로 닫음).
+  // ★ 지우기와 과금 프로젝트 고르기는 명령이 없다(사용자 결정 2026-10-03). 서버는 명령 이름을 거르지 않는다 —
+  //   모르는 이름은 화면이 "모르는 명령" 으로 돌려보낸다(목록이 화면 한 곳에만 있게).
+  type AgentCmd = {
+    id: string; createdAt: number; updatedAt: number; command: string; args: Record<string, unknown>;
+    status: 'pending' | 'taken' | 'done' | 'failed'; takenBy?: string; result?: unknown; error?: string;
+  };
+  const agentCmds = new Map<string, AgentCmd>();
+  const cmdWaiters = new Map<string, Array<() => void>>();
+  const settleCmd = (c: AgentCmd) => { const ws = cmdWaiters.get(c.id); cmdWaiters.delete(c.id); ws?.forEach(w => w()); };
+  const cmdView = (c: AgentCmd) => ({
+    id: c.id, command: c.command, status: c.status,
+    ...(c.result !== undefined ? { result: c.result } : {}), ...(c.error ? { error: c.error } : {}),
+    manualVersion: manualVersionNow(),
+  });
+  function pruneAgentCmds() {
+    const now = Date.now();
+    for (const [k, c] of agentCmds) {
+      if ((c.status === 'done' || c.status === 'failed') && now - c.updatedAt > 3600000) { agentCmds.delete(k); continue; }
+      if (c.status === 'pending' && now - c.createdAt > 10 * 60000) {
+        c.status = 'failed'; c.updatedAt = now;
+        c.error = '앱이 10분 안에 이 명령을 받지 못했습니다(앱이 꺼져 있었거나 다른 일을 하던 중). 다시 보내 주세요.';
+        settleCmd(c); continue;
+      }
+      if (c.status === 'taken') {
+        const seen = agentScreenSeen.get(c.takenBy || '') || 0;
+        if (now - Math.max(seen, c.updatedAt) > 60000) {
+          c.status = 'failed'; c.updatedAt = now;
+          c.error = '앱 화면이 이 명령을 받은 뒤 응답이 없습니다(앱을 닫았거나 새로고침). 앱에서 결과를 확인한 뒤 필요하면 다시 보내 주세요.';
+          settleCmd(c);
+        }
+      }
+    }
+  }
+
+  app.post('/api/agent/commands', async (req, res) => {
+    const b = req.body || {};
+    if (!agentManual) return res.status(503).json({ error: '앱 화면이 아직 준비되지 않았습니다(설명서 없음) — 시댄스 창이 열려 있는지 확인해 주세요.' });
+    if (typeof b.manual !== 'string' || !b.manual) {
+      return res.status(400).json({ error: '설명서 버전(manual)이 없습니다 — 설명서를 먼저 읽고(GET /api/agent/manual · send-to-seedance.mjs --manual) 그 version 을 manual 에 적어 보내 주세요.', needManual: true, manualVersion: manualVersionNow() });
+    }
+    if (b.manual !== agentManual.version) return res.status(409).json({ error: staleNotice(b.manual), stale: true, manualVersion: manualVersionNow() });
+    const command = typeof b.command === 'string' ? b.command.trim() : '';
+    if (!command || command.length > 60) return res.status(400).json({ error: 'command 가 없습니다' });
+    const args = b.args && typeof b.args === 'object' && !Array.isArray(b.args) ? b.args : {};
+    pruneAgentCmds();
+    if ([...agentCmds.values()].filter(c => c.status === 'pending' || c.status === 'taken').length >= 50) {
+      return res.status(429).json({ error: '아직 처리하지 않은 명령이 50개입니다 — 앱이 처리할 때까지 기다려 주세요' });
+    }
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    const c: AgentCmd = { id, createdAt: now, updatedAt: now, command, args, status: 'pending' };
+    agentCmds.set(id, c);
+    const waitSec = Math.max(0, Math.min(120, Number(b.wait ?? 30) || 0));
+    if (waitSec > 0) {
+      await new Promise<void>(resolve => {
+        const t = setTimeout(resolve, waitSec * 1000);
+        const list = cmdWaiters.get(id) || [];
+        list.push(() => { clearTimeout(t); resolve(); });
+        cmdWaiters.set(id, list);
+      });
+    }
+    res.json(cmdView(c));
+  });
+
+  app.get('/api/agent/commands/:id', (req, res) => {
+    pruneAgentCmds();
+    const c = agentCmds.get(req.params.id);
+    if (!c) return res.status(404).json({ error: '없는 명령입니다 (앱을 다시 켜면 비워집니다)' });
+    res.json(cmdView(c));
+  });
+
+  app.post('/api/agent/commands/:id/report', (req, res) => {
+    const c = agentCmds.get(req.params.id);
+    if (!c) return res.status(404).json({ error: 'no such command' });
+    const b = req.body || {};
+    if (b.status === 'done' || b.status === 'failed') c.status = b.status;
+    if (b.result !== undefined) {
+      const size = JSON.stringify(b.result).length;
+      c.result = size > 2_000_000 ? { truncated: true, note: `결과가 너무 큽니다(${size}자) — 조건을 좁혀 다시` } : b.result;
+    }
+    if (typeof b.error === 'string') c.error = b.error.slice(0, 4000);
+    c.updatedAt = Date.now();
+    console.log(`[Agent] 명령 ${c.command} → ${c.status}${c.error ? ` (${c.error.split('\n')[0]})` : ''}`);
+    settleCmd(c);
+    res.json({ ok: true });
   });
 
   // ── 목록 썸네일(포스터) ───────────────────────────────────────────────────

@@ -106,9 +106,33 @@ const SETTING_DOCS: Record<string, string> = {
   output_format: '출력 형식 — 고를 수 있는 모델만',
 };
 
+// 에이전트 명령 (26.10.305~). 앱 버튼과 같은 함수로 화면(ChatArea 의 agentCommands)이 실행한다. 여기 적힌 것이
+// 설명서에 나가고, 에이전트는 이것만 부를 수 있다 — 명령을 더하면 ChatArea 의 처리기도 같이 더한다.
+// ★ 지우기(카드·엘리먼트·컬렉션·프로젝트)와 과금 프로젝트 고르기는 일부러 없다(사용자 결정 2026-10-03 — 되돌리기
+//   어렵거나 돈이 가는 곳을 정하는 일은 사람이 앱에서). costs = 과금되는 명령(확인 카드를 받은 뒤에만).
+export const AGENT_COMMANDS: { name: string; args: string; does: string; costs?: boolean; composer?: boolean }[] = [
+  { name: 'projects.list', args: '{}', does: '프로젝트(사이드바) 목록 — 이름 · 그룹 · 카드 수 · 연결된 컬렉션 · 지금 열린 것' },
+  { name: 'project.open', args: '{ "project": "이름" }', does: '그 프로젝트를 연다(사이드바 클릭과 같음)' },
+  { name: 'project.create', args: '{ "name": "이름", "group"?: "그룹 이름" }', does: '새 프로젝트를 만들고 연다. 같은 이름이 있으면 앱 규칙대로 (1) 이 붙는다' },
+  { name: 'billing.list', args: '{}', does: '과금 프로젝트 목록과 지금 선택 — 프로젝트별 영상 수 · 토큰 · 2.5/4K 권한(크레딧 대시보드의 숫자). 고르는 건 사람이 앱에서' },
+  { name: 'collections.list', args: '{}', does: '어셋 라이브러리 — 컬렉션과 엘리먼트(이름 · 분류 · 설명 · 이미지 수), 연결된 프로젝트' },
+  { name: 'collection.create', args: '{ "name": "이름" }', does: '컬렉션을 만든다. 같은 이름이 있으면 그걸 돌려준다(existed)' },
+  { name: 'collection.bind', args: '{ "collection": "이름", "project"?: "이름(없으면 지금 프로젝트)" }', does: '프로젝트에 컬렉션을 연결한다 — 프롬프트의 @{이름} 은 연결된 컬렉션에서 찾는다' },
+  { name: 'elements.add', args: '{ "collection": "이름", "items": [{ "name": "이름", "category": "character|location|prop", "description"?: "설명", "images": ["이미지 경로", …] }] }', does: '엘리먼트를 등록한다(화면 등록과 같은 검사 · 원본 보관). 컬렉션에 같은 이름이 있으면 그 항목은 건너뛰고 알린다' },
+  { name: 'element.update', args: '{ "collection": "이름", "name": "이름", "newName"?, "category"?, "description"?, "addImages"?: [경로], "replaceImages"?: [경로] }', does: '엘리먼트를 고친다' },
+  { name: 'cards.list', args: '{ "project"?: "이름", "limit"?: 20, "status"?: "succeeded|failed|running|queued", "starred"?: true }', does: '카드(생성 결과) 목록 — 최신순. 프롬프트 · 설정 · 상태 · 초안 여부 · 채택 · 다운로드 경로' },
+  { name: 'card.get', args: '{ "id": "카드 id" }', does: '카드 하나의 지금 상태 — 진행을 지켜볼 때' },
+  { name: 'card.star', args: '{ "id": "카드 id", "on": true }', does: '채택(★)을 켜거나 끈다' },
+  { name: 'card.download', args: '{ "id": "카드 id" }', does: '영상을 다운로드 폴더에 저장한다(카드의 다운로드 버튼과 같음) — 저장한 경로를 돌려준다' },
+  { name: 'card.final', args: '{ "id": "초안 카드 id" }', does: '초안(480p) 카드로 1080p 본편을 만든다(같은 시드 · 구도) — 과금된다', costs: true },
+  { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 다시 만든다 — 과금된다', costs: true, composer: true },
+  { name: 'card.cancel', args: '{ "id": "카드 id" }', does: '대기 중(queued) 작업을 취소한다 — 이미 돌기 시작했으면 앱이 거절한다(그때는 과금된다)' },
+];
+
 const RULES = [
   '안 준 설정은 앱의 지금 설정을 따른다. 모델·모드를 바꾸면 그 조합의 기본값에서 시작한다.',
   '레퍼런스는 프롬프트에서 [Image N] · [Video N] · [Audio N] 으로 부른다 — 번호는 refs 에 넘긴 순서대로 종류별로 센다. 첫·끝 프레임은 refs 의 role(first_frame / last_frame)로 정한다.',
+  '어셋 라이브러리의 엘리먼트는 프롬프트에서 @{이름} 으로 부른다 — 프로젝트에 연결된 컬렉션에서 찾고(collection.bind), 앱이 그 엘리먼트 이미지를 레퍼런스로 붙인다. 못 찾으면 보내지 않는다. 레퍼런스→영상 · 영상 편집 모드에서만 된다.',
   '비율·길이·해상도·개수·오디오는 프롬프트에 쓰지 말고 설정으로 넘긴다.',
   '프롬프트 본문에 소수 길이 지시(예: "4.5초로")를 쓰지 않는다 — BytePlus 가 내부 오류로 실패한다.',
   '오디오 생성과 마지막 프레임 받기는 같이 못 켠다 — 마지막 프레임을 켜면 오디오는 꺼져서 나간다.',
@@ -173,6 +197,7 @@ export function buildAgentManual(appVersion: string): AgentManual {
       audio: { maxMB: au.maxSizeMB, minSec: au.minDuration, types: 'WAV·MP3' },
     },
     rules: RULES,
+    commands: AGENT_COMMANDS,
     models,
   };
   // 구분자는 - — + 는 주소(쿼리)에 넣으면 공백으로 바뀌어 버전이 어긋난다(PowerShell 로 시험하다 걸림).
@@ -192,6 +217,10 @@ function manualText(m: any, version: string): string {
   for (const r of m.rules) L.push(`- ${r}`);
   L.push('', '## 설정 키', '');
   for (const [k, d] of Object.entries(m.settings)) L.push(`- \`${k}\` — ${d}`);
+  L.push('', '## 명령', '');
+  L.push('생성 말고도 앱 기능을 명령으로 쓴다 — 앱 버튼과 같은 함수로 실행된다. `send-to-seedance.mjs --do <명령> <JSON 인자 또는 @파일>`');
+  L.push('과금되는 명령(💰)은 확인 카드를 받은 뒤에만 부른다. 지우기와 과금 프로젝트 고르기는 명령이 없다 — 사람이 앱에서 한다.', '');
+  for (const c of m.commands) L.push(`- \`${c.name}\` \`${c.args}\` — ${c.does}${c.costs ? ' 💰' : ''}`);
   const f = m.files;
   L.push('', '## 파일', '');
   L.push(`- 이미지: ${mb(f.image.maxMB)} 이하 · 한 변 ${f.image.minPx}~${f.image.maxPx}px · ${f.image.types}`);

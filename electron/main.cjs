@@ -72,6 +72,10 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.cjs'),
+      // 창을 최소화하거나 트레이로 숨겨도 화면의 타이머가 제 속도로 돈다(26.10.305~). 크롬은 숨은 창의
+      // 타이머를 1분에 한 번까지 늦추는데, 그러면 에이전트 작업함(2초마다 들름)이 "화면 응답 없음" 이 되고
+      // (2026-10-03 실제), 카드 폴링(10초)도 늦어져 트래커 보고 · NCP 보관이 밀린다.
+      backgroundThrottling: false,
     },
     show: false,
   });

@@ -4,8 +4,8 @@ import { resolveModelId , brandOf } from '../lib/model-access';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
-import { agentSettings, buildAgentManual } from '../lib/agent-inbox';
-import { CATEGORY_META } from './ElementLibrary';
+import { agentSettings, buildAgentManual, AGENT_COMMANDS } from '../lib/agent-inbox';
+import { CATEGORY_META, fileToElementImage, MAX_ELEMENT_IMAGES } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
 import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
 
@@ -529,13 +529,23 @@ const AGENT_MIME: Record<string, string> = {
 // 에이전트가 준 프롬프트(평문) → 작성 칸 HTML. 줄마다 <div>, 빈 줄은 <div><br></div> — getPlainText 가 글자 그대로
 // 되읽는 모양이다. [Image N] 같은 표시는 붙인 레퍼런스의 알약으로(textToHtml 과 같은 모양, 뒤에 붙는 공백만 뺀다 —
 // 보낸 글이 받은 글과 한 글자도 다르지 않게).
-const agentPromptHtml = (text: string, named: any[]) => text.replace(/\r\n?/g, '\n').split('\n').map(line => {
-  const inner = line.split(/(\[(?:Image|Video|Audio) \d+\])/g).map(part =>
-    /^\[(?:Image|Video|Audio) \d+\]$/.test(part)
-      ? textToHtml(part, named).replace(/&nbsp;$/, '')
-      : part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')).join('');
-  return `<div>${inner || '<br>'}</div>`;
-}).join('');
+// @{이름} 은 엘리먼트(어셋 라이브러리) 멘션 — elementPill 이 알약 HTML 을 주고, 못 찾은 이름은 missing 에 모은다
+// (부르는 쪽이 그때 보내지 않는다 — 글자로 나가면 그 인물 없이 만들어지고 값은 똑같이 낸다).
+const agentPromptHtml = (text: string, named: any[], elementPill?: (name: string) => string | null, missing?: string[]) =>
+  text.replace(/\r\n?/g, '\n').split('\n').map(line => {
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const inner = line.split(/(\[(?:Image|Video|Audio) \d+\]|@\{[^}\n]{1,80}\})/g).map(part => {
+      if (/^\[(?:Image|Video|Audio) \d+\]$/.test(part)) return textToHtml(part, named).replace(/&nbsp;$/, '');
+      const el = part.match(/^@\{([^}\n]{1,80})\}$/);
+      if (el) {
+        const html = elementPill?.(el[1].trim());
+        if (html) return html;
+        missing?.push(el[1].trim());
+      }
+      return esc(part);
+    }).join('');
+    return `<div>${inner || '<br>'}</div>`;
+  }).join('');
 
 // 적어 둔 작성 칸 HTML 의 레퍼런스 알약을 지금 레퍼런스 id 에 이름으로 다시 묶는다 — replaceAllAssets 는 새 id 를 준다.
 // handleReuse 와 같은 일. 안 묶으면 알약 감시 effect 가 '지워진 레퍼런스' 로 보고 알약을 지운다.
@@ -3347,6 +3357,55 @@ export function ChatArea() {
     return { file: new File([await res.blob()], name, { type: AGENT_MIME[ext] || '' }), cacheId };
   };
 
+  // 작성 칸 빌려 쓰기 — 지금 설정 · 레퍼런스 · 프롬프트를 적어 두고 run 을 돌린 뒤(실패해도) 그대로 되돌린다.
+  // 빌려 쓰는 동안 프롬프트 칸을 잠그고, 그 사이 뜬 앱 경고를 모아 돌려준다. 생성 요청과 재생성 명령이 같이 쓴다.
+  const agentBorrow = async <T,>(pid: string, editor: HTMLDivElement, note: string, run: () => Promise<T>): Promise<{ value: T; warnings: string[] }> => {
+    const proj = useAppStore.getState().projects.find(p => p.id === pid);
+    if (!proj) throw new Error('프로젝트가 사라졌습니다');
+    const prevHtml = editor.innerHTML;
+    const prevSettings: Record<string, unknown> = { ...proj.settings };
+    const prevAssets = proj.assets.map(({ id: _id, ...rest }) => rest);
+    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    const warnings: string[] = [];
+    agentWarnRef.current = warnings;
+    editor.setAttribute('contenteditable', 'false');
+    if (note) showToast(note, true);
+    try {
+      const value = await run();
+      return { value, warnings };
+    } finally {
+      agentWarnRef.current = null;
+      // 되돌리기. 새로 생긴 설정 키(예: output_format)는 비워야 한다 — updateProjectSettings 는 합치기라서.
+      const now = useAppStore.getState().projects.find(p => p.id === pid)?.settings || {};
+      const restore: Record<string, unknown> = { ...prevSettings };
+      for (const k of Object.keys(now)) if (!(k in prevSettings)) restore[k] = undefined;
+      useAppStore.getState().updateProjectSettings(pid, restore as Partial<GenerationSettings>);
+      useAppStore.getState().replaceAllAssets(pid, prevAssets);
+      const html = rebindMentionPills(prevHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
+      if (useAppStore.getState().currentProjectId === pid && contentEditableRef.current === editor) {
+        editor.innerHTML = html;
+        setHasText(!!editor.innerText.trim());
+        syncMentionCount();
+      }
+      useAppStore.getState().updateDraftPrompt(pid, html);
+      editor.setAttribute('contenteditable', 'true');
+    }
+  };
+
+  // 프롬프트의 @{이름} → 그 프로젝트에 연결된 컬렉션의 엘리먼트 알약(화면에서 @ 멘션한 것과 같은 모양).
+  // 보낼 때 앱이 그 엘리먼트 이미지를 레퍼런스로 붙이고 [Image N] 으로 바꾼다(handleSend 의 엘리먼트 멘션).
+  const agentElementPill = (pid: string) => {
+    const st = useAppStore.getState();
+    const cid = st.projectCollectionId[pid];
+    const els = cid ? st.elementAssets.filter(e => e.collectionId === cid) : [];
+    return (name: string) => {
+      const e = els.find(x => mentionKey(x.name) === mentionKey(name));
+      if (!e) return null;
+      return buildMentionPill({ kind: 'element', id: e.id, name: e.name, category: e.category,
+        thumbnailUrl: e.images[0]?.thumbnailUrl || e.images[0]?.url || '' }).outerHTML;
+    };
+  };
+
   const agentProcess = async (job: any) => {
     const st = useAppStore.getState();
     const proj = st.projects.find(p => p.id === st.currentProjectId);
@@ -3369,59 +3428,346 @@ export function ChatArea() {
       .sort((a: any, b: any) => rank(a.role) - rank(b.role) || a.i - b.i);
     if (refs.length && !omni && next.mode === 'text_to_video') return fail('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
 
-    // 지금 작성 칸을 적어 둔다 — 보낸 뒤(실패해도) 이걸로 되돌린다.
+    // 작성 칸을 빌려 쓰고(agentBorrow) 보낸 뒤 쓰던 그대로 되돌린다.
     const pid = proj.id;
-    const prevHtml = editor.innerHTML;
-    const prevSettings: Record<string, unknown> = { ...proj.settings };
-    const prevAssets = proj.assets.map(({ id: _id, ...rest }) => rest);
-    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
-    agentWarnRef.current = [];
-    editor.setAttribute('contenteditable', 'false');
-    showToast(`에이전트 요청을 보내는 중…${job.name ? ` (${job.name})` : ''}`, true);
     let ids: string[] | undefined;
     let problem = '';
     try {
-      useAppStore.getState().updateProjectSettings(pid, next);
-      useAppStore.getState().replaceAllAssets(pid, []);
-      const files: File[] = [];
-      const given = new Map<File, { path: string; cacheId: string }>();
-      for (const r of refs) {
-        try {
-          const got = await agentFileFromPath(r.path);
-          files.push(got.file);
-          given.set(got.file, { path: r.path, cacheId: got.cacheId });
-        } catch (e: any) { throw new Error(`레퍼런스를 읽지 못했습니다: ${r.path}\n${e?.message || e}`); }
-      }
-      const rejected = await attachFiles(files, f => given.get(f));
-      if (rejected.length) throw new Error(`레퍼런스를 붙이지 못했습니다:\n${rejected.join('\n')}`);
-      // 여기부터 handleSend 가 프롬프트를 읽을 때까지는 await 없이 이어진다 — 그 사이 프로젝트가 바뀔 틈이 없다.
-      if (useAppStore.getState().currentProjectId !== pid || contentEditableRef.current !== editor) throw new Error('보내기 전에 앱의 프로젝트(화면)가 바뀌어 보내지 않았습니다.');
-      editor.innerHTML = agentPromptHtml(String(job.prompt || ''), getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
-      setHasText(true);
-      syncMentionCount();
-      ids = await handleSend();
-      if (!ids?.length) problem = (agentWarnRef.current || []).join('\n') || '앱이 보내지 않았습니다(작성 칸 검사에서 멈춤).';
+      const out = await agentBorrow(pid, editor, `에이전트 요청을 보내는 중…${job.name ? ` (${job.name})` : ''}`, async () => {
+        useAppStore.getState().updateProjectSettings(pid, next);
+        useAppStore.getState().replaceAllAssets(pid, []);
+        const files: File[] = [];
+        const given = new Map<File, { path: string; cacheId: string }>();
+        for (const r of refs) {
+          try {
+            const got = await agentFileFromPath(r.path);
+            files.push(got.file);
+            given.set(got.file, { path: r.path, cacheId: got.cacheId });
+          } catch (e: any) { throw new Error(`레퍼런스를 읽지 못했습니다: ${r.path}\n${e?.message || e}`); }
+        }
+        const rejected = await attachFiles(files, f => given.get(f));
+        if (rejected.length) throw new Error(`레퍼런스를 붙이지 못했습니다:\n${rejected.join('\n')}`);
+        // 여기부터 handleSend 가 프롬프트를 읽을 때까지는 await 없이 이어진다 — 그 사이 프로젝트가 바뀔 틈이 없다.
+        if (useAppStore.getState().currentProjectId !== pid || contentEditableRef.current !== editor) throw new Error('보내기 전에 앱의 프로젝트(화면)가 바뀌어 보내지 않았습니다.');
+        const missing: string[] = [];
+        const html = agentPromptHtml(String(job.prompt || ''), getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []), agentElementPill(pid), missing);
+        if (missing.length) {
+          const st2 = useAppStore.getState();
+          const bound = st2.assetCollections.find(c => c.id === st2.projectCollectionId[pid])?.name;
+          throw new Error(`엘리먼트를 찾지 못했습니다: ${missing.join(', ')}\n(이 프로젝트에 연결된 컬렉션: ${bound ? `"${bound}"` : '없음'} — collections.list · collection.bind)`);
+        }
+        editor.innerHTML = html;
+        setHasText(true);
+        syncMentionCount();
+        return await handleSend();
+      });
+      ids = out.value;
+      if (!ids?.length) problem = out.warnings.join('\n') || '앱이 보내지 않았습니다(작성 칸 검사에서 멈춤).';
     } catch (e: any) {
       problem = e?.message || String(e);
-    } finally {
-      agentWarnRef.current = null;
-      // 되돌리기. 에이전트가 새로 넣은 설정 키(예: output_format)는 비워야 한다 — updateProjectSettings 는 합치기라서.
-      const restore: Record<string, unknown> = { ...prevSettings };
-      for (const k of Object.keys(next)) if (!(k in prevSettings)) restore[k] = undefined;
-      useAppStore.getState().updateProjectSettings(pid, restore as Partial<GenerationSettings>);
-      useAppStore.getState().replaceAllAssets(pid, prevAssets);
-      const html = rebindMentionPills(prevHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
-      if (useAppStore.getState().currentProjectId === pid && contentEditableRef.current === editor) {
-        editor.innerHTML = html;
-        setHasText(!!editor.innerText.trim());
-        syncMentionCount();
-      }
-      useAppStore.getState().updateDraftPrompt(pid, html);
-      editor.setAttribute('contenteditable', 'true');
     }
     if (problem) return fail(problem);
     agentActiveRef.current.set(job.id, { projectId: pid, ids: ids!, last: '' });
     await agentReport(job.id, { status: 'sent', project: proj.name, messages: agentCards(pid, ids!) });
+  };
+
+  /* ─── 에이전트 명령 (26.10.305~) ─── */
+  // 설명서의 AGENT_COMMANDS(src/lib/agent-inbox.ts)와 짝 — 이름이 같아야 한다. 앱 버튼이 부르는 것과 같은 스토어 함수 ·
+  // 화면 함수로 실행한다. 지우기와 과금 프로젝트 고르기는 없다(사용자 결정 2026-10-03 — 사람이 앱에서).
+  const agentCmdReport = (id: string, body: Record<string, unknown>) =>
+    fetch(`/api/agent/commands/${encodeURIComponent(id)}/report`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }).then(() => undefined, () => undefined);
+
+  const agentFindProject = (ref: unknown) => {
+    const st = useAppStore.getState();
+    const s = ref === undefined || ref === null ? '' : String(ref).trim();
+    if (!s) {
+      const cur = st.projects.find(p => p.id === st.currentProjectId);
+      if (!cur) throw new Error('앱에 열린 프로젝트가 없습니다');
+      return cur;
+    }
+    const p = st.projects.find(x => x.id === s) || st.projects.find(x => x.name.trim() === s) || st.projects.find(x => mentionKey(x.name) === mentionKey(s));
+    if (!p) throw new Error(`프로젝트를 찾지 못했습니다: ${s}\n(있는 프로젝트: ${st.projects.slice(0, 40).map(x => x.name).join(', ')}${st.projects.length > 40 ? ' …' : ''})`);
+    return p;
+  };
+  const agentFindCollection = (ref: unknown) => {
+    const st = useAppStore.getState();
+    const s = String(ref ?? '').trim();
+    if (!s) throw new Error('collection 이 비었습니다');
+    const c = st.assetCollections.find(x => x.id === s) || st.assetCollections.find(x => mentionKey(x.name) === mentionKey(s));
+    if (!c) throw new Error(`컬렉션을 찾지 못했습니다: ${s}\n(있는 컬렉션: ${st.assetCollections.map(x => x.name).join(', ') || '없음'})`);
+    return c;
+  };
+  const agentFindCard = (ref: unknown) => {
+    const s = String(ref ?? '');
+    for (const p of useAppStore.getState().projects) {
+      const m = p.messages.find(x => x.id === s);
+      if (m) return { project: p, card: m as any };
+    }
+    throw new Error(`카드를 찾지 못했습니다: ${s} (cards.list 의 id)`);
+  };
+  const agentCardView = (m: any, projectName?: string) => {
+    const us = m.usedSettings || {};
+    return {
+      id: m.id, status: m.status || 'queued', created: m.timestamp,
+      ...(projectName ? { project: projectName } : {}),
+      prompt: String(m.promptText || '').slice(0, 600),
+      settings: m.usedSettings ? { model: us.model, mode: us.mode, ...(modelProvider(us.model || '') === 'gemini' ? { omniTask: us.omniTask } : {}),
+        ratio: us.ratio, duration: us.duration, resolution: us.resolution, draft: !!us.draft } : null,
+      draft: !!us.draft, ...(m.draftOf ? { finalOf: m.draftOf } : {}),
+      starred: !!m.starred,
+      ...(m.taskId ? { taskId: m.taskId } : {}),
+      ...(m.videoUrl ? { videoUrl: m.videoUrl } : {}),
+      ...(m.downloadedPath ? { downloadedPath: m.downloadedPath } : {}),
+      ...(m.error ? { error: String(m.error).slice(0, 500) } : {}),
+    };
+  };
+  // 경로의 이미지들 → 엘리먼트 이미지(화면 등록과 같은 검사 · 썸네일 · 원본 보관, fileToElementImage).
+  const agentElementImages = async (paths: unknown) => {
+    const list = Array.isArray(paths) ? paths.map(String) : [];
+    const out = [];
+    for (const p of list) {
+      const { file } = await agentFileFromPath(p);
+      try { out.push(await fileToElementImage(file)); }
+      catch (e: any) { throw new Error(`${p}: ${e?.message || e}`); }
+    }
+    return out;
+  };
+
+  const agentCommands: Record<string, (a: any) => Promise<unknown>> = {
+    'projects.list': async () => {
+      const st = useAppStore.getState();
+      const groupName = (gid?: string) => st.projectGroups.find(g => g.id === gid)?.name ?? null;
+      const collName = (cid?: string) => st.assetCollections.find(c => c.id === cid)?.name ?? null;
+      return {
+        current: st.projects.find(p => p.id === st.currentProjectId)?.name ?? null,
+        projects: st.projects.map(p => ({
+          id: p.id, name: p.name, group: groupName(p.groupId),
+          cards: p.messages.filter(m => m.role !== 'user').length,
+          collection: collName(st.projectCollectionId[p.id]), current: p.id === st.currentProjectId,
+        })),
+      };
+    },
+    'project.open': async (a) => {
+      const p = agentFindProject(a.project);
+      useAppStore.getState().setCurrentProjectId(p.id);
+      return { project: p.name };
+    },
+    'project.create': async (a) => {
+      const name = String(a.name || '').trim();
+      if (!name) throw new Error('name 이 비었습니다');
+      const st = useAppStore.getState();
+      let gid: string | undefined;
+      if (a.group) {
+        const g = st.projectGroups.find(x => x.id === a.group || mentionKey(x.name) === mentionKey(String(a.group)));
+        if (!g) throw new Error(`그룹을 찾지 못했습니다: ${a.group}\n(있는 그룹: ${st.projectGroups.map(x => x.name).join(', ') || '없음'})`);
+        gid = g.id;
+      }
+      const before = new Set(st.projects.map(p => p.id));
+      st.createProject(gid);
+      const made = useAppStore.getState().projects.find(p => !before.has(p.id));
+      if (!made) throw new Error('프로젝트를 만들지 못했습니다');
+      useAppStore.getState().renameProject(made.id, name);
+      const final = useAppStore.getState().projects.find(p => p.id === made.id);
+      return { id: made.id, name: final?.name ?? name, opened: true };
+    },
+    'billing.list': async () => {
+      const st = useAppStore.getState();
+      const sel = selectedBillingProject(st);
+      // 크레딧 대시보드의 숫자(영상 수 · 토큰)는 트래커가 준다 — 앱 서버가 이미 받아 오는 목록을 그대로 읽는다.
+      let usage: any[] = [];
+      try {
+        const r = await fetch('/api/projects');
+        const j = await r.json();
+        if (j?.ok && Array.isArray(j.projects)) usage = j.projects;
+      } catch { /* 숫자만 빠진다 */ }
+      return {
+        selected: sel?.project ?? null,
+        projects: st.billingProjects.map(b => {
+          const u = usage.find(x => (b.id && String(x.id || x.project_id || '') === b.id) || x.project === b.project) || {};
+          return { name: b.project, status: b.status, videos: u.videoCount ?? null, tokens: u.tokens ?? null,
+            allow25: !!b.allow25, allow4k: !!b.allow4k, selected: !!sel && sel.key === b.key };
+        }),
+        note: '과금 프로젝트를 고르는 건 사람이 앱 설정 패널 맨 위 "프로젝트" 에서 한다',
+      };
+    },
+    'collections.list': async () => {
+      const st = useAppStore.getState();
+      return st.assetCollections.map(c => ({
+        id: c.id, name: c.name,
+        boundTo: st.projects.filter(p => st.projectCollectionId[p.id] === c.id).map(p => p.name),
+        elements: st.elementAssets.filter(e => e.collectionId === c.id)
+          .map(e => ({ id: e.id, name: e.name, category: e.category, description: e.description, images: e.images.length })),
+      }));
+    },
+    'collection.create': async (a) => {
+      const name = String(a.name || '').trim();
+      if (!name) throw new Error('name 이 비었습니다');
+      const st = useAppStore.getState();
+      const have = st.assetCollections.find(c => mentionKey(c.name) === mentionKey(name));
+      if (have) return { id: have.id, name: have.name, existed: true };
+      const id = st.createCollection(name);
+      return { id, name, existed: false };
+    },
+    'collection.bind': async (a) => {
+      const c = agentFindCollection(a.collection);
+      const p = agentFindProject(a.project);
+      useAppStore.getState().setProjectCollection(p.id, c.id);
+      return { project: p.name, collection: c.name };
+    },
+    'elements.add': async (a) => {
+      const c = agentFindCollection(a.collection);
+      const items: any[] = Array.isArray(a.items) ? a.items : [];
+      if (!items.length) throw new Error('items 가 비었습니다');
+      const added: unknown[] = [], skipped: unknown[] = [], failed: unknown[] = [];
+      for (const it of items) {
+        const name = String(it?.name || '').trim();
+        const category = String(it?.category || 'character');
+        if (!name) { failed.push({ name: '(이름 없음)', error: 'name 이 없습니다' }); continue; }
+        if (!(category in CATEGORY_META)) { failed.push({ name, error: `category 는 ${Object.keys(CATEGORY_META).join(' / ')}` }); continue; }
+        // 컬렉션 안에서 이름은 하나 — 멘션이 이름으로 찾기 때문이다(ElementLibrary 의 등록 규칙과 같다).
+        const same = useAppStore.getState().elementAssets.find(e => e.collectionId === c.id && mentionKey(e.name) === mentionKey(name));
+        if (same) { skipped.push({ name, id: same.id, reason: '같은 이름이 이미 있음 — 고치려면 element.update' }); continue; }
+        const paths = Array.isArray(it?.images) ? it.images : [];
+        if (!paths.length) { failed.push({ name, error: 'images 가 비었습니다' }); continue; }
+        if (paths.length > MAX_ELEMENT_IMAGES) { failed.push({ name, error: `이미지는 ${MAX_ELEMENT_IMAGES}장까지` }); continue; }
+        try {
+          const images = await agentElementImages(paths);
+          useAppStore.getState().addElementAsset({ collectionId: c.id, category: category as AssetCategory, name, description: String(it?.description || ''), images });
+          const made = useAppStore.getState().elementAssets.find(e => e.collectionId === c.id && mentionKey(e.name) === mentionKey(name));
+          added.push({ name, id: made?.id, images: images.length });
+        } catch (e: any) { failed.push({ name, error: e?.message || String(e) }); }
+      }
+      return { collection: c.name, added, skipped, failed };
+    },
+    'element.update': async (a) => {
+      const c = agentFindCollection(a.collection);
+      const st = useAppStore.getState();
+      const key = String(a.name || '');
+      const e = st.elementAssets.find(x => x.collectionId === c.id && (x.id === key || mentionKey(x.name) === mentionKey(key)));
+      if (!e) throw new Error(`엘리먼트를 찾지 못했습니다: ${key} (컬렉션 "${c.name}")`);
+      const upd: Record<string, unknown> = {};
+      if (a.newName) {
+        const nn = String(a.newName).trim();
+        const clash = st.elementAssets.find(x => x.collectionId === c.id && x.id !== e.id && mentionKey(x.name) === mentionKey(nn));
+        if (clash) throw new Error(`컬렉션에 같은 이름이 있습니다: ${nn}`);
+        upd.name = nn;
+      }
+      if (a.category) {
+        if (!(String(a.category) in CATEGORY_META)) throw new Error(`category 는 ${Object.keys(CATEGORY_META).join(' / ')}`);
+        upd.category = a.category;
+      }
+      if (a.description !== undefined) upd.description = String(a.description);
+      if (a.replaceImages) upd.images = await agentElementImages(a.replaceImages);
+      else if (a.addImages) {
+        const more = await agentElementImages(a.addImages);
+        if (e.images.length + more.length > MAX_ELEMENT_IMAGES) throw new Error(`이미지는 ${MAX_ELEMENT_IMAGES}장까지 — 지금 ${e.images.length}장`);
+        upd.images = [...e.images, ...more];
+      }
+      if (!Object.keys(upd).length) throw new Error('바꿀 것이 없습니다 (newName · category · description · addImages · replaceImages)');
+      if (Array.isArray(upd.images) && !upd.images.length) throw new Error('이미지가 하나도 없게 바꿀 수는 없습니다');
+      useAppStore.getState().updateElementAsset(e.id, upd as any);
+      const now = useAppStore.getState().elementAssets.find(x => x.id === e.id);
+      return { id: e.id, name: now?.name, category: now?.category, images: now?.images.length };
+    },
+    'cards.list': async (a) => {
+      const p = agentFindProject(a.project);
+      const limit = Math.max(1, Math.min(100, Number(a.limit) || 20));
+      let cards = p.messages.filter(m => m.role !== 'user').slice().reverse() as any[];
+      if (a.status) cards = cards.filter(m => (m.status || 'queued') === a.status);
+      if (a.starred === true) cards = cards.filter(m => m.starred);
+      return { project: p.name, total: cards.length, cards: cards.slice(0, limit).map(m => agentCardView(m)) };
+    },
+    'card.get': async (a) => {
+      const { project: p, card: m } = agentFindCard(a.id);
+      return agentCardView(m, p.name);
+    },
+    'card.star': async (a) => {
+      const { project: p, card: m } = agentFindCard(a.id);
+      useAppStore.getState().updateMessage(p.id, m.id, { starred: a.on !== false });
+      return { id: m.id, starred: a.on !== false };
+    },
+    'card.download': async (a) => {
+      const { project: p, card: m } = agentFindCard(a.id);
+      if (m.status !== 'succeeded' || !m.videoUrl) throw new Error('아직 영상이 없는 카드입니다(완성된 카드만 받을 수 있음)');
+      // 저장 경로는 다운로드가 끝나야 안다(Electron 'download-done'). 이번 저장의 경로를 받으려고 옛 경로를 비운다.
+      useAppStore.getState().updateMessage(p.id, m.id, { downloadedPath: undefined });
+      await downloadClip(m.id, m.videoUrl, m.taskId || '');
+      const until = Date.now() + 180000;
+      for (;;) {
+        const cur = useAppStore.getState().projects.find(x => x.id === p.id)?.messages.find(x => x.id === m.id) as any;
+        if (cur?.downloadedPath) return { id: m.id, path: cur.downloadedPath };
+        if (Date.now() > until) return { id: m.id, path: null, note: '다운로드는 시작했지만 저장 경로를 아직 모릅니다 — 큰 파일이면 앱 아래쪽 진행 막대를 보세요' };
+        await new Promise(r => setTimeout(r, 500));
+      }
+    },
+    'card.final': async (a) => {
+      const { project: p, card: m } = agentFindCard(a.id);
+      if (!m.usedSettings?.draft || m.status !== 'succeeded' || !m.taskId) throw new Error('완성된 초안(Draft) 카드만 본편을 만들 수 있습니다');
+      const warnings: string[] = [];
+      agentWarnRef.current = warnings;
+      try {
+        const id = await makeFinalFromDraft(m.taskId, m);
+        if (!id) throw new Error(warnings.join('\n') || '본편을 만들지 않았습니다');
+        return { card: id, project: p.name };
+      } finally { agentWarnRef.current = null; }
+    },
+    'card.regenerate': async (a) => {
+      const { project: p, card: m } = agentFindCard(a.id);
+      // 초안에서 만든 본편이 실패했으면 같은 초안에서 다시(카드의 재생성 버튼 handleRegenerate 와 같은 규칙).
+      if (m.draftOf && m.status === 'failed') {
+        const warnings: string[] = [];
+        agentWarnRef.current = warnings;
+        try {
+          const id = await makeFinalFromDraft(m.draftOf, m);
+          if (!id) throw new Error(warnings.join('\n') || '본편을 다시 만들지 않았습니다');
+          return { cards: [id], project: p.name };
+        } finally { agentWarnRef.current = null; }
+      }
+      if (p.id !== useAppStore.getState().currentProjectId || p.id !== currentProjectId) throw new Error(`그 카드는 "${p.name}" 프로젝트에 있습니다 — project.open 으로 연 뒤 다시`);
+      const editor = contentEditableRef.current;
+      if (!editor) throw new Error('작성 칸이 없는 화면입니다(갤러리) — 채팅 화면에서 다시');
+      if (isGenerating) throw new Error('앱이 다른 생성을 보내는 중입니다 — 잠시 뒤 다시');
+      if (Date.now() - lastTypedAtRef.current < 4000) throw new Error('사용자가 작성 칸에 입력 중입니다 — 잠시 뒤 다시');
+      // 카드의 재생성 버튼과 같은 길(handleReuse → handleSend). 다만 작성 칸은 빌려 쓰고 되돌린다.
+      const out = await agentBorrow(p.id, editor, '에이전트가 카드를 다시 만드는 중…', async () => {
+        const ok = await handleReuse(m);
+        if (!ok) return undefined;
+        return await handleSend();
+      });
+      if (!out.value?.length) throw new Error(out.warnings.join('\n') || '다시 만들지 않았습니다');
+      return { cards: out.value, project: p.name };
+    },
+    'card.cancel': async (a) => {
+      const { project: p, card: m } = agentFindCard(a.id);
+      if (!m.taskId || m.status !== 'queued') throw new Error(`대기 중(queued)인 카드만 취소할 수 있습니다 — 지금 ${m.status || 'queued'}`);
+      const warnings: string[] = [];
+      agentWarnRef.current = warnings;
+      try {
+        await useAppStore.getState().cancelTask(p.id, m.id, m.taskId);
+        await new Promise(r => setTimeout(r, 300));   // 거절 알림(seedance:cancel-failed)이 경고로 들어올 틈
+        const cur = useAppStore.getState().projects.find(x => x.id === p.id)?.messages.find(x => x.id === m.id);
+        if (warnings.length || cur?.status === 'queued' || cur?.status === 'running') {
+          throw new Error(warnings.join('\n') || '앱이 취소하지 못했습니다(이미 돌기 시작했으면 과금됩니다)');
+        }
+        return { id: m.id, status: cur?.status ?? 'deleted' };
+      } finally { agentWarnRef.current = null; }
+    },
+  };
+
+  const agentRunCommand = async (cmd: { id: string; command: string; args?: any }) => {
+    const fn = agentCommands[cmd.command];
+    if (!fn) {
+      await agentCmdReport(cmd.id, { status: 'failed', error: `모르는 명령입니다: ${cmd.command}\n(있는 명령: ${AGENT_COMMANDS.map(c => c.name).join(', ')})` });
+      return;
+    }
+    try {
+      const result = await fn(cmd.args && typeof cmd.args === 'object' ? cmd.args : {});
+      await agentCmdReport(cmd.id, { status: 'done', result: result ?? null });
+    } catch (e: any) {
+      await agentCmdReport(cmd.id, { status: 'failed', error: e?.message || String(e) });
+    }
   };
 
   const agentTick = async () => {
@@ -3435,19 +3781,23 @@ export function ChatArea() {
       if (finished) agentActiveRef.current.delete(jobId);
       void agentReport(jobId, { status: finished ? 'done' : 'sent', messages: cards });
     }
-    // 2) 새 요청. 받을 수 없는 때는 peek — 화면 상태만 알리고 가져가지 않는다.
+    // 2) 새 요청 · 명령. 생성 요청은 받을 수 없는 때 peek(화면 상태만 알림) — 입력 중 · 생성 중 · 갤러리 화면.
+    //    명령은 그때도 받는다(작성 칸이 필요한 재생성은 명령 안에서 다시 따진다). 다른 일을 하는 중이면 둘 다 안 받는다.
     const st = useAppStore.getState();
     const proj = st.projects.find(p => p.id === st.currentProjectId);
     const composer = !!contentEditableRef.current;
-    const peek = agentBusyRef.current || isGenerating || !composer || !proj || proj.id !== currentProjectId
+    const busy = agentBusyRef.current;
+    const peek = busy || isGenerating || !composer || !proj || proj.id !== currentProjectId
       || Date.now() - lastTypedAtRef.current < 4000;
-    if (!peek) agentBusyRef.current = true;   // 응답을 기다리는 사이 다음 틱이 또 가져가지 않게
+    const takeCommands = !busy;
+    if (!busy) agentBusyRef.current = true;   // 응답을 기다리는 사이 다음 틱이 또 가져가지 않게
     let job: any = null;
+    let commands: any[] = [];
     try {
       const res = await fetch('/api/agent/jobs/claim', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          screen: agentScreenId, peek, composer,
+          screen: agentScreenId, peek, takeCommands, composer,
           project: proj?.name ?? null,
           billing: selectedBillingProject(st)?.project ?? null,
           generating: isGenerating,
@@ -3460,14 +3810,20 @@ export function ChatArea() {
       if (res.ok) {
         const data = await res.json();
         job = data?.job || null;
+        commands = Array.isArray(data?.commands) ? data.commands : [];
         agentSyncManual(data?.manualVersion);
       }
     } catch { /* 서버가 잠깐 없으면 다음 틱에 */ }
-    if (peek) return;
-    if (!job) { agentBusyRef.current = false; return; }
-    try { await agentProcess(job); }
-    catch (e: any) { await agentReport(job.id, { status: 'failed', error: e?.message || String(e) }); }
-    finally { agentBusyRef.current = false; }
+    if (busy) return;
+    try {
+      // 서버는 명령이 있으면 명령만 준다(그 틱엔 생성 요청을 안 줌) — project.open 같은 명령 뒤의 생성은 화면이
+      // 새로 그려진 다음 틱에 받아야 지금 프로젝트를 제대로 본다.
+      for (const c of commands) await agentRunCommand(c);
+      if (job) {
+        try { await agentProcess(job); }
+        catch (e: any) { await agentReport(job.id, { status: 'failed', error: e?.message || String(e) }); }
+      }
+    } finally { agentBusyRef.current = false; }
   };
   agentTickRef.current = agentTick;
 
@@ -3480,7 +3836,8 @@ export function ChatArea() {
   // 정렬(생성 시각)이 어긋난다. 대신 초안 카드의 '본편 보기' 가 그 자리로 데려간다.
   // base: 새 카드에 옮겨 적을 프롬프트·설정·레퍼런스를 가진 메시지 — 초안 카드 자신이거나,
   // 실패한 본편을 다시 시도할 때는 그 본편 카드.
-  const makeFinalFromDraft = async (draftTaskId: string, base: any) => {
+  // 만든 본편 카드 id 를 돌려준다(에이전트 명령 card.final · card.regenerate 가 따라간다). 멈췄으면 undefined.
+  const makeFinalFromDraft = async (draftTaskId: string, base: any): Promise<string | undefined> => {
     const st = useAppStore.getState();
     const owner = st.projects.find(p => p.messages.some(m => m.id === base.id));
     if (!owner || !draftTaskId) return;
@@ -3557,6 +3914,7 @@ export function ChatArea() {
     } catch (error: any) {
       updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
     }
+    return id;
   };
 
   /* ─── Regenerate: restore this card's exact setup, then re-run the SAME send ─── */
