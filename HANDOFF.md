@@ -1,6 +1,6 @@
 # Freewill Seedance 2.0 — 인수인계
 
-> 최종 정리: **2026-10-03** / 버전 **26.10.305**
+> 최종 정리: **2026-10-03** / 버전 **26.10.306**
 > 이 문서 하나로 인수받을 수 있게 쓴다. 시간순 기록이 아니라 **주제별**이다.
 > 여기 적힌 숫자는 전부 실측이다. 확인 못 한 것은 "미확인"이라고 명시한다.
 >
@@ -119,6 +119,19 @@ Update installer has already been triggered. Quitting application.
 둘 다 `NsisUpdater.doInstall` 이 그대로 CLI 인자로 넘긴다. 참고로 `isSilent = false` 일
 때는 두 번째 인자가 무시되고 `autoRunAppAfterInstall` 이 대신 쓰인다
 (`BaseUpdater.quitAndInstall`), 그래서 "force-run 을 켰는데도" 마법사가 떴던 것이다.
+
+### 2-3c. 업데이트 확인은 세 가지 (26.10.306~, `electron/updater.cjs`)
+
+| 언제 | 하는 일 |
+|---|---|
+| 켤 때 | 있으면 대화상자로 알리고 받아서 **바로 다시 시작**(예전 그대로) |
+| 트레이 우클릭 '업데이트 확인 (지금 v…)' | 같은 흐름, 대화상자 대신 알림(창이 숨어 있을 수 있다). 없으면 '최신 버전이에요' |
+| 켜 둔 동안 3시간마다 | **조용히 받아 두기만** — 저절로 재시작하지 않는다(옴니 동기 생성은 끊기면 사라진다). 다 받으면 트레이 메뉴가 '업데이트 설치 — 다시 시작 (v…)' 로 바뀌고 한 번 알린다. 안 누르면 끌 때 조용히 설치(`autoInstallOnAppQuit` → `install(isSilent=true)`) |
+
+- 흐름은 `updater.cjs` 한 곳이고, 알림·대화상자·창 제목·트레이 메뉴는 main.cjs 가 넘긴다 — 가짜 autoUpdater 로 경우마다
+  시험할 수 있게(2026-10-03 27건: 켤 때 즉시 설치 · 트레이 · 숨은 받기 무재시작 · 실패 재시도 · 겹친 요청 무시 · 개발 실행).
+- ★ `electron-builder.yml` 의 `files` 에 `electron/updater.cjs` 가 있어야 한다. 빠지면 패키지 앱이 켜지자마자 죽는다.
+  배포 전에 app.asar 안에 있는지 본다(`@electron/asar` listPackage).
 
 ### 2-4. 배포 후 검증 (이 5개는 매번)
 

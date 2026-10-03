@@ -23,6 +23,7 @@ directories:
 files:
   - "dist/**/*"
   - "electron/main.cjs"
+  - "electron/updater.cjs"
   - "electron/preload.cjs"
   - "electron/icon.png"
   - "public/**/*"
