@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, Notification, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, Notification, shell, ipcMain, powerMonitor } = require('electron');
 const { autoUpdater } = require('electron-updater');
 // 업데이트 흐름(켤 때 · 트레이 · 켜 둔 동안). ★ electron-builder.yml files 에 이 파일이 있어야 한다.
 const { createUpdater, BACKGROUND_EVERY_MS } = require('./updater.cjs');
@@ -12,7 +12,9 @@ if (!gotTheLock) { app.quit(); return; }
 let mainWindow = null;
 let tray = null;
 let hiddenToTrayOnce = false;
-const PORT = 3000;
+// 3000 고정. SEEDANCE_PORT 는 격리 시험용(진짜 앱이 3000 을 쓰는 중에 같은 PC 에서 띄울 때)이다.
+// 서버에는 아래 startServer 가 PORT 로 넘긴다 — PC 에 다른 프로그램용 PORT 환경변수가 있어도 창과 서버가 갈리지 않게.
+const PORT = Number(process.env.SEEDANCE_PORT) || 3000;
 const isDev = !app.isPackaged;
 
 function getIconPath() {
@@ -29,7 +31,7 @@ function startServer() {
     const proc = spawn('npx', ['tsx', 'server.ts'], {
       cwd: path.join(__dirname, '..'),
       // 백업 폴더는 아래 IPC 핸들러와 같은 곳이어야 한다(라이브러리 원본 백업을 서버가 쓴다).
-      env: { ...process.env, NODE_ENV: 'development', SEEDANCE_BACKUP_DIR: BACKUP_DIR },
+      env: { ...process.env, NODE_ENV: 'development', SEEDANCE_BACKUP_DIR: BACKUP_DIR, PORT: String(PORT) },
       shell: true,
       stdio: 'pipe',
     });
@@ -50,6 +52,7 @@ function startServer() {
     // 서버가 쓰는 백업(라이브러리 원본 복사)을 IPC 백업과 같은 폴더로. 서버 혼자 두면 os.homedir()
     // 기준이라 Documents 가 OneDrive 로 옮겨진 PC 에서 두 곳으로 갈린다.
     process.env.SEEDANCE_BACKUP_DIR = BACKUP_DIR;
+    process.env.PORT = String(PORT);
     try {
       require(path.join(process.resourcesPath, 'server.cjs'));
       console.log('[Server] Started in production mode, cache at', process.env.MEDIA_CACHE_DIR);
@@ -152,6 +155,14 @@ function createWindow() {
     try { mainWindow?.webContents.send('app-command', cmd); } catch { /* 창이 닫히는 중 */ }
   });
 
+  // 숨김(X 를 눌러 트레이로 · 트레이 메뉴) · 최소화 → 화면에 "지금 저장해"(requestFlush 주석).
+  mainWindow.on('hide', () => requestFlush('hide'));
+  mainWindow.on('minimize', () => requestFlush('minimize'));
+  // 윈도우 종료 · 재시작 · 로그오프 직전. 시간이 거의 없지만 해 본다 — 2026-10-07 재부팅으로 그 세션의 작업이
+  // 백업에 하나도 없었다(작업 기록 자체는 IDB 에 있었다).
+  mainWindow.on('query-session-end', () => requestFlush('session-end'));
+  mainWindow.on('session-end', () => requestFlush('session-end'));
+
   // 멈춤도 같이 남긴다 — 죽지는 않았는데 한참 응답이 없는 것도 "꺼졌다 켜졌다" 로 보인다.
   mainWindow.on('unresponsive', () => crashLog('window unresponsive'));
   mainWindow.on('responsive', () => crashLog('window responsive again'));
@@ -164,6 +175,15 @@ function createWindow() {
     console.error('[Renderer] load failed:', code, desc, url);
     setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(`http://localhost:${PORT}`); }, 1000);
   });
+}
+
+// ─── "지금 저장해" (26.10.701~) ───────────────────────────────────────────────
+// 작업 기록(IDB)과 문서 폴더 백업을 디바운스를 기다리지 않고 쓰라고 화면에 알린다(store.ts flushAll). 원래 화면이
+// 스스로 visibilitychange 로 알았는데, backgroundThrottling:false(26.10.305~) 이후로는 오지 않는다 — 숨겨도
+// 최소화해도 'visible' 그대로(실측, 이벤트 0개). 그 바람에 숨길 때 하던 백업이 2026-10-03 부터 조용히 멎어
+// 있었다. 창 · 전원 이벤트는 throttling 과 상관없이 main 에 온다.
+function requestFlush(why) {
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-flush', why); } catch { /* 창이 닫히는 중 */ }
 }
 
 // ─── 화면 프로세스가 죽은 기록 ──────────────────────────────────────────────
@@ -690,6 +710,9 @@ app.on('ready', () => {
   createTray();
   setupAutoUpdater();
   setInterval(sampleRendererMemory, 30 * 1000);   // crash.log 에 남길 직전 메모리
+  // 절전 · 화면 잠금 — 창을 띄운 채로 자리를 비우는 순간이다. 깨어나지 못하는 경우까지 생각해 그 전에 쓴다.
+  powerMonitor.on('suspend', () => requestFlush('suspend'));
+  powerMonitor.on('lock-screen', () => requestFlush('lock'));
 });
 
 // Launching again while an instance holds the lock must ALWAYS put a window on screen —

@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { get, set, del, keys } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail, makeJpegPreview } from './lib/utils';
 import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
+import { createBackupClock } from './lib/backup-clock';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -16,15 +17,28 @@ const DEBOUNCE_MS = 1500;
 // used to run synchronously on EVERY set() — each settings commit froze frames.
 // Serialization now happens only at flush time, at most once per debounce window.
 let pendingWrite: { name: string; value: StorageValue<unknown> } | null = null;
+// 마지막으로 저장하러 넘긴 상태와 그때의 어셋 목록 — 같은 것을 다시 쓰지 않게(setItem 주석).
+let lastPersistedState: unknown = null;
+let lastElementsSeen: unknown = undefined;
+// 저장할 상태의 최상위 칸이 모두 같은 참조인가 — store 는 불변 갱신이라 이것으로 '바뀐 것 없음' 을 안다.
+function sameTopLevel(a: any, b: any): boolean {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) if (!Object.is(a[k], b[k])) return false;
+  return true;
+}
 
 // External backup mirror to Documents/Freewill Seedance Backup/seedance-backup.json.
 // Survives any userData loss (app-name rename, uninstall+reinstall, AppData cleanup).
 // Longer debounce than IDB so we don't churn the disk during heavy editing.
-let backupTimer: ReturnType<typeof setTimeout> | null = null;
+// 언제 쓸지는 backupClock(아래 runBackup 옆)이 정한다 — src/lib/backup-clock.ts.
 const BACKUP_DEBOUNCE_MS = 5 * 60 * 1000;
-// 아무리 바빠도 이만큼 지나면 디바운스를 무시하고 쓴다. 순수 디바운스만 두면
-// 쉬지 않고 작업하는 동안 백업이 한 번도 안 일어난다.
+// 아무리 바빠도 백업에 안 들어간 변화가 '처음' 생기고 이만큼 지나면 쓴다(26.10.701~ 처음부터 센다).
+// 순수 디바운스만 두면 쉬지 않고 작업하는 동안 백업이 한 번도 안 일어난다.
 const BACKUP_MAX_AGE_MS = 15 * 60 * 1000;
+// 이만큼 밀리면 화면에 알린다 — 디스크가 꽉 찼거나 폴더 권한처럼 앱 혼자 못 고치는 경우다.
+const BACKUP_LAG_NOTICE_MS = 45 * 60 * 1000;
 // Last library payload we successfully mirrored. The library is ~500MB, so re-writing it
 // every 5 minutes when nothing changed would grind the disk for no reason.
 let lastBackedUpElements: string | null = null;
@@ -326,14 +340,17 @@ function getBackupApi(): BackupApi | null {
   return httpBackupApi;                            // browser — same files, over the local server
 }
 
-// 대기 중인 백업 스냅샷과 마지막으로 실제로 쓴 시각.
+// 대기 중인 백업 스냅샷. 언제 쓸지는 backupClock 이 정한다(src/lib/backup-clock.ts — 15분 마감은 백업에
+// 안 들어간 변화가 '처음' 생긴 때부터 센다. 화면 신호나 조용한 틈에 기대지 않는다).
 let pendingBackup: any = null;
-let lastBackupAt = 0;
+const backupClock = createBackupClock({ quietMs: BACKUP_DEBOUNCE_MS, maxAgeMs: BACKUP_MAX_AGE_MS, fire: () => runBackup() });
+// 연달아 실패한 횟수와 마지막 이유 — 다시 해 볼 간격(1·2·4·8·15분)과 밀렸을 때의 알림에 쓴다.
+let backupFailures = 0;
+let lastBackupError = '';
 
-// 백업을 실제로 수행한다. 타이머가 부르거나, 창을 숨길 때 flushBackup 이 부른다.
+// 백업을 실제로 수행한다. 시계가 부르거나, 창을 숨길 때·끌 때 flushBackup 이 부른다.
 function runBackup() {
   if (persistBlocked) return;   // 빈 상태로 Documents 백업까지 덮지 않게
-  if (backupTimer) { clearTimeout(backupTimer); backupTimer = null; }
   const v = pendingBackup;
   if (!v) return;
 
@@ -342,20 +359,27 @@ function runBackup() {
   // ★ SAFETY: never write a backup before the library has loaded. Backing up an
   // empty/half-loaded elementAssets would OVERWRITE a good backup with one that
   // has no library — destroying the very safety net this mirror exists to be.
-  // Skipping is safe: the previous good backup stays on disk and the next write
-  // (post-hydration) reschedules this timer.
+  // Skipping is safe: the previous good backup stays on disk. 다음 변화를 기다리지 않고 30초 뒤 다시
+  // 본다 — 켜자마자 창을 숨기면 다음 변화가 한참 없을 수 있다.
   let st;
-  try { st = useAppStore.getState(); } catch { return; }
+  try { st = useAppStore.getState(); } catch { backupClock.failed(0, 30_000); return; }
   if (!st || !st._elementsHydrated) {
     console.warn('[Backup] skipped — element library not hydrated yet (keeping previous backup)');
+    backupClock.failed(0, 30_000);
     return;
   }
 
-  // 여기까지 와야 '실제로 쓴다'. 위에서 건너뛴 경우까지 시각을 갱신하면, 한 번도
-  // 안 썼는데 방금 쓴 것처럼 보여 다음 15분을 또 그냥 보낸다. 스냅샷도 여기서
-  // 비운다 — 건너뛴 경우에는 들고 있다가 다음 기회에 써야 한다.
+  // 여기까지 와야 '실제로 쓴다'. 스냅샷도 여기서 비운다 — 건너뛴 경우에는 들고 있다가 다음 기회에 써야 한다.
   pendingBackup = null;
-  lastBackupAt = Date.now();
+  const firstChangeAt = backupClock.taken();
+  // 쓰지 못했으면 이 스냅샷을 다시 든다(그새 더 새 것이 왔으면 그것이 이 내용을 다 담고 있다). 다음 변화를
+  // 기다리지 않고 1 · 2 · 4 · 8 · 15분 뒤 다시 — 실패가 오래가면 아래 1분 점검이 화면에 알린다.
+  const failed = (why: unknown) => {
+    backupFailures++;
+    lastBackupError = String(why ?? '').slice(0, 120);
+    if (!pendingBackup) pendingBackup = v;
+    backupClock.failed(firstChangeAt, Math.min(60_000 * 2 ** (backupFailures - 1), BACKUP_MAX_AGE_MS));
+  };
 
   // ── The work history goes first, and ALONE ──────────────────────────────────
   // This used to be one combined string (state + library). Once the library passed
@@ -368,13 +392,19 @@ function runBackup() {
   try {
     api.backupSave(JSON.stringify(v), 'state')
       .then((r: any) => {
-        if (r?.ok) console.log(`[Backup] state ${(r.bytes / 1048576).toFixed(2)}MB → ${r.path}`);
-        else console.warn('[Backup] state save failed:', r?.error);
+        if (r?.ok) {
+          backupFailures = 0; lastBackupError = ''; backupClock.ok();
+          console.log(`[Backup] state ${(r.bytes / 1048576).toFixed(2)}MB → ${r.path}`);
+        } else {
+          console.warn('[Backup] state save failed:', r?.error);
+          failed(r?.error || 'save failed');
+        }
       })
-      .catch((err: any) => console.warn('[Backup] state save error:', err?.message || err));
+      .catch((err: any) => { console.warn('[Backup] state save error:', err?.message || err); failed(err?.message || err); });
   } catch (err: any) {
     // try/catch because stringify throws SYNCHRONOUSLY — a promise .catch cannot see it.
     console.error('[Backup] state serialize failed:', err?.message || err);
+    failed(err?.message || err);
   }
 
   // ── The library second, chunked, best-effort ───────────────────────────────
@@ -581,6 +611,19 @@ const idbPersistStorage: PersistStorage<unknown> = {
   setItem: (name: string, value: StorageValue<unknown>): void => {
     // 읽지 못한 기록을 지키는 중이면 아무것도 쓰지 않는다(위 '못 읽음' 주석). 백업 미러도 같이 멈춘다.
     if (persistBlocked) { pendingWrite = null; return; }
+    // ★ 저장할 것이 그대로면 아무것도 안 한다(26.10.701~). persist 는 set 이 불릴 때마다 — 저장하지 않는 칸
+    //   (trackerReachable · mentionedElementImages · billingProjectKey 등)만 바뀌어도 — 여기를 부른다. 그때마다 기록
+    //   전체(33MB)를 다시 직렬화하고 백업의 '5분 조용한 틈' 을 처음부터 다시 셌다(실측 2026-10-07: 켜 둔 앱이 20초~1분
+    //   마다 바이트까지 같은 내용을 다시 썼다). store 는 불변 갱신이라(바꾸면 새 객체 — 저장 칸의 제자리 수정 0건 확인)
+    //   최상위 칸의 참조만 비교하면 된다. 어셋 목록은 따로 저장되지만 그 백업은 여기서 예약하므로 같이 본다.
+    const st = (value as any)?.state;
+    let els: unknown;
+    try { els = useAppStore.getState().elementAssets; } catch { els = undefined; }
+    const stateSame = sameTopLevel(st, lastPersistedState);
+    if (stateSame && els === lastElementsSeen) return;
+    lastElementsSeen = els;
+    if (stateSame) { pendingBackup = value; backupClock.changed(); return; }   // 어셋 목록만 바뀜 — 백업만
+    lastPersistedState = st;
     // `value.state` is zustand's immutable snapshot — safe to hold by reference
     // until the timer fires (updates replace objects, never mutate them).
     pendingWrite = { name, value };
@@ -620,12 +663,11 @@ const idbPersistStorage: PersistStorage<unknown> = {
     //   타이머가 영영 리셋되어 한 번도 안 터지고, 앱을 닫으면 대기 중이던 백업은
     //   그대로 버려진다. 즉 '계속 작업하다 끄는' 가장 흔한 패턴에서 백업이 0건이다.
     //   실제로 2026-09-15 이후 사흘간 한 번도 안 쓰였고, 그동안 영상 68편이 쌓였다.
-    //   이제 마지막 백업이 오래됐으면 디바운스를 무시하고 바로 쓴다 — 최악의 경우에도
-    //   BACKUP_MAX_AGE_MS 만큼만 뒤처진다.
+    // ★ 그 고침(마지막 백업이 오래됐으면 바로 쓴다)은 켠 뒤 한 번은 써야 작동했다 — 첫 백업은 창을 숨길 때만
+    //   났고, 305 가 그 신호를 끊자 켜 둔 동안 백업이 0번이 됐다(2026-10-05~07, 영상 135편). 이제 시계가
+    //   백업에 안 들어간 변화가 '처음' 생긴 때부터 센다 — 최악의 경우에도 BACKUP_MAX_AGE_MS 만큼만 뒤처진다.
     pendingBackup = value;
-    if (backupTimer) clearTimeout(backupTimer);
-    const overdue = lastBackupAt > 0 && Date.now() - lastBackupAt >= BACKUP_MAX_AGE_MS;
-    backupTimer = setTimeout(runBackup, overdue ? 0 : BACKUP_DEBOUNCE_MS);
+    backupClock.changed();
   },
   removeItem: async (name: string): Promise<void> => {
     if (persistBlocked) return;   // 읽지 못한 기록을 지키는 중
@@ -647,13 +689,35 @@ export function flushPersist(): Promise<void> {
 }
 
 // Safety net: flush whenever the window hides (minimize/tray) or unloads
-// (quit, auto-update restart). visibilitychange-hidden is the reliable signal
-// in Chromium/Electron; pagehide covers real navigation/quit.
+// (quit, auto-update restart). pagehide covers real navigation/quit.
+// ★ visibilitychange 는 브라우저에서만 온다. 앱 창은 backgroundThrottling:false(26.10.305~)라 숨겨도
+//   최소화해도 'visible' 그대로다(실측: 이벤트 0개) — 앱에서는 main 이 창 이벤트로 알려 준다(onFlushRequest:
+//   숨김 · 최소화 · 절전 · 화면 잠금 · 윈도우 종료, 26.10.701~).
 if (typeof window !== 'undefined') {
+  const flushAll = () => { void flushPersist(); void flushElements(); flushBackup(); };
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') { void flushPersist(); void flushElements(); flushBackup(); }
+    if (document.visibilityState === 'hidden') flushAll();
   });
-  window.addEventListener('pagehide', () => { void flushPersist(); void flushElements(); flushBackup(); });
+  window.addEventListener('pagehide', flushAll);
+  (window as any).electronAPI?.onFlushRequest?.(flushAll);
+
+  // 1분마다 백업 시계를 본다 — 밀린 게 있는데 타이머가 어떤 이유로든 없으면 다시 걸고, 45분 넘게 밀렸으면
+  // 알린다. 그 정도면 디스크가 꽉 찼거나 폴더 권한처럼 앱 혼자 못 고치는 경우다(작업 기록 자체는 IDB 에
+  // 계속 저장되고 있다). 백업이 조용히 멎는 것이 세 번(7월 · 9월 · 10월) 사고의 공통점이었다.
+  let lastLagNoticeAt = 0;
+  window.setInterval(() => {
+    if (persistBlocked) return;   // 빨간 띠가 이미 말하고 있다
+    const lag = backupClock.check();
+    if (lag < BACKUP_LAG_NOTICE_MS || Date.now() - lastLagNoticeAt < 60 * 60 * 1000) return;
+    lastLagNoticeAt = Date.now();
+    console.error(`[Backup] ${Math.round(lag / 60000)}분째 밀림`, lastBackupError);
+    window.dispatchEvent(new CustomEvent('seedance:toast', {
+      detail: {
+        ok: false,
+        msg: `문서 폴더 백업이 ${Math.round(lag / 60000)}분째 저장되지 않고 있어요${lastBackupError ? ` (${lastBackupError})` : ''}. 작업 기록은 앱 안에 계속 저장되고 있어요 — 디스크 공간과 문서\\Freewill Seedance Backup 폴더를 확인해 주세요.`,
+      },
+    }));
+  }, 60 * 1000);
 }
 
 export type AssetRole = 'reference_image' | 'reference_video' | 'reference_audio' | 'first_frame' | 'last_frame';
@@ -1925,7 +1989,10 @@ export const useAppStore = create<AppState>()(
       trackerReachable: null,
       setBillingProjectKey: (key) => set({ billingProjectKey: key }),
       setBillingProjects: (list) => set({ billingProjects: list }),
-      setTrackerReachable: (v) => set((s) => (s.trackerReachable === v ? s : { trackerReachable: v })),
+      // 값이 같으면 set 을 부르지도 않는다. persist 는 set 이 불릴 때마다(값이 그대로여도) 기록 전체를 다시
+      // 저장하고 백업을 다시 예약한다 — 1분마다 도는 트래커 확인이 이것으로 1분마다 33MB 를 다시 썼고, 백업이
+      // 기다리던 '5분 조용한 틈' 을 없앴다(2026-10-07 실측, 26.10.701 고침).
+      setTrackerReachable: (v) => { if (get().trackerReachable !== v) set({ trackerReachable: v }); },
       mentionedElementImages: 0,
       setMentionedElementImages: (n) => set({ mentionedElementImages: n }),
       // ─── Element library state + actions ───

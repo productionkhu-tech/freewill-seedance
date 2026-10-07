@@ -27,6 +27,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('app-command', h);
     return () => ipcRenderer.removeListener('app-command', h);
   },
+  // 창을 숨기거나 내렸다 · 절전 · 화면 잠금 · 윈도우 종료 — "지금 저장해"(26.10.701~). 화면의 visibilitychange 는
+  // backgroundThrottling:false 라 오지 않아서 main 이 창 이벤트로 알려 준다(store.ts flushAll).
+  onFlushRequest: (cb) => {
+    const h = (_e, why) => cb(why);
+    ipcRenderer.on('app-flush', h);
+    return () => ipcRenderer.removeListener('app-flush', h);
+  },
   // External backup mirror — Documents/Freewill Seedance Backup/seedance-backup.json
   // kind: 'state' (default, the work history — small, must never fail) | 'elements'
   backupSave: (content, kind) => ipcRenderer.invoke('backup-save', content, kind),
