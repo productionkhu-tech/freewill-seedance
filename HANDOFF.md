@@ -1136,15 +1136,22 @@ F:\시댄스\                                ← 키 배포 (윈도우 전용, s
   올림(팀 키 17 · R2 · 옴니 · ENROLL_OPEN · 관리 키. R2_SECRET 은 v1 부터 있어 안 건드린다) ④ `/admin` 에서 17팀 '앱 v1 표와 맞음'
   · '입장권 기억' 확인 ⑤ 앱 802 배포 → 관리 화면에서 PC 가 넘어오는지 ⑥ (권장) 평문으로 퍼졌던 키 재발급 → Cloudflare 만 교체
   ⑦ 전 PC 가 넘어온 뒤 `LEGACY_NCP` = "0".
-- **시험**: `node worker/gateway.test.mjs`(워커 61) · `node scripts/gateway_check.mjs`(앱 ↔ 워커 한 프로세스 47 — 팀 bat 바꾸기 · 끊긴 PC 포함) · 서버 수준
+- **시험**: `node worker/gateway.test.mjs`(워커 67) · `node scripts/gateway_check.mjs`(앱 ↔ 워커 한 프로세스 49 — 팀 bat 바꾸기 · 끊긴 PC · PC 이름 바꾸기 포함) · 서버 수준
   (`scratchpad/gw-e2e/server-e2e.mjs` — 진짜 server.ts + 가짜 BytePlus · R2 · 시트, 키 교체 중 생성 · 업로드가 안 멈춤, 밖으로 0건)
   · 진짜 main.cjs 3회(처음 · 보관본 · 게이트웨이 죽음) · 진짜 DPAPI. ★ 격리 하네스는 `SEEDANCE_GATEWAY=off` 로 — 안 그러면
   시험 PC 가 진짜 게이트웨이에 등록된다(`SEEDANCE_GATEWAY_URL` 을 막으면 옛 NCP 길까지 막혀 서버가 안 뜬다). 레지스트리 삭제
   시험은 `SFV_SECRETS_TEST_*` 이름으로만(키_암호화_시험) — ★ 앱과 같은 방식(기다리지 않음)으로도 돌릴 것. 처음 판은 PowerShell 을
   detached 로 띄웠는데, 그러면 명령을 실행하지 않고 코드 0 으로 끝난다(802 시험 PC 에서 키가 안 사라짐 → 이 PC 에서 재현, 붙여
   띄우게 고침). 기다리는 방식으로만 시험해서 못 잡았다.
-- **남은 결정**: 앱 802 를 전 PC 에 내기 전에 실제 업데이트 시험 — 첫 실행에 환경변수를 지우는 변경이라 팀 PC 한 대나 별도
-  Windows 계정에서(이 관리자 PC 에서 하면 이 PC 키도 지워진다 — 크레딧 관리 폴더 스크립트가 환경변수를 읽는다).
+- **관리자 PC**(개발하는 이 PC): 802 이상을 한 번 켜면 이 PC 도 `SEEDANCE_API_KEY` · `R2_*` 넷이 환경변수에서 지워진다
+  (`NANOBANANA_STUDIO_KEY` 는 남는다). 2026-10-08 `기획 파일` 전체를 뒤진 결과 — **영향 없음**: 앱(`npm run electron:dev` 포함 —
+  같은 userData 의 암호 파일), 주간 리포트 · `setup_cloudflare.py`(자기 `secrets.dat` 에 키가 있음), `tracker_capture.mjs`(bat 을
+  읽음), `worker/setup-secrets.mjs`(bat 폴더를 읽음), 나노바나나 · `ARK_API_KEY` 쓰는 스크립트. **환경변수를 직접 읽어 키를 못
+  찾게 되는 것**: `npm run dev` · `npm start`(Electron 없이 서버만 — 맥처럼 `.env` 를 두거나 `electron:dev` 로), 크레딧 관리
+  `test_usage_capture.mjs`, `scripts/r2_unit_check.cjs`, 옛 `seedance-gateway/test-local.mjs`, 다른 프로젝트의
+  `철강 AI 광고 공모전/scripts/generate_video_seedance.py` · `워터마크 지우기/마지막 무당/소스코드/_r2_*.py` 3개 — 전부 일회성 ·
+  몇 달 전 것. 쓸 일이 생기면 그 창에서만 키를 넣고(`$env:SEEDANCE_API_KEY = '…'` — 창을 닫으면 사라지고 레지스트리를 안 건드려
+  앱이 지울 것도 없다) 돌린다. 팀 bat 을 다시 실행해도 되지만 다음에 앱을 켜면 또 지워진다. 이 PC 만 예외로 두는 장치는 두지 않았다.
 
 ---
 
