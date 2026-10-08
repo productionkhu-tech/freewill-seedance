@@ -23,8 +23,110 @@ function getIconPath() {
     : path.join(process.resourcesPath, 'app.asar', 'electron', 'icon.png');
 }
 
+// ─── 키 (26.10.802~) ───
+// 서버를 띄우기 전에 두 단계로 process.env 에 올린다 — 서버(server.ts · ncp.ts)는 거기서 읽는다.
+//   ① secrets.cjs  팀 bat 이 setx 로 심은 평문 키를 이 PC · 이 계정만 여는 암호 파일로 옮기고 환경변수는 지운다
+//   ② gateway.cjs  그 키로 만든 입장권으로 게이트웨이 출입증을 받고, 켤 때마다 키 · 주소 묶음을 받는다 —
+//                  관리자가 Cloudflare 에서 값을 바꾸면 PC 는 다음 실행 때 새 값을 쓴다(팀 bat · PC 는 그대로)
+// 둘 다 실패해도 예전처럼 환경변수로 돈다 — 이것 때문에 앱이 안 켜지면 안 된다.
+let gateway = null;
+let pcName = '';
+// 이 PC 의 키 상태(값은 없다) — 키 확인 bat(F:\시댄스 '시댄스 키 확인')이 '앱이 지금 쓰는 팀' 을 보여 줄 때 읽는다.
+// 환경변수에서 키가 지워진 뒤에는 그 PC 가 어느 팀으로 도는지 볼 곳이 여기와 게이트웨이 관리 화면뿐이다.
+function writeKeyStatus(r) {
+  try {
+    const st = {
+      app: app.getVersion(), at: new Date().toISOString(), pc: pcName,
+      mode: (r && r.mode) || 'off',                       // gateway · cache · offline(bat 키) · revoked · off
+      team: (r && r.team) || process.env.SEEDANCE_TEAM || '',
+      label: (r && r.label) || process.env.SEEDANCE_TEAM_LABEL || '',
+      rev: (r && r.rev) || '', switched: !!(r && r.switched), why: (r && r.why) || '',
+    };
+    fs.writeFileSync(path.join(app.getPath('userData'), 'key-status.json'), JSON.stringify(st, null, 1));
+  } catch {}
+}
+async function prepareKeys() {
+  const { safeStorage } = require('electron');
+  const secrets = require('./secrets.cjs');
+  try {
+    const s = secrets.loadSecrets({
+      safeStorage,
+      userDataDir: app.getPath('userData'),
+      migrate: !isDev,   // 개발 모드는 읽기만 — 개발자 PC 의 환경변수를 몰래 지우면 다른 스크립트가 같이 끊긴다
+    });
+    console.log(`[Secrets] store=${s.store} loaded=${s.loaded.length} migrated=${s.migrated.length} removed=${s.removed.length}${s.error ? ' error=' + s.error : ''}`);
+  } catch (err) {
+    console.error('[Secrets] skipped:', err && err.message);
+  }
+  // 격리 시험용 스위치 — 게이트웨이를 아예 거치지 않고 예전처럼 환경변수 키로 돈다(시험 PC 가 진짜 게이트웨이에 등록되지 않게).
+  // SEEDANCE_GATEWAY_URL 을 막는 것으로는 안 된다: 옛 NCP 길(ncp.ts)도 그 주소를 쓴다.
+  if (process.env.SEEDANCE_GATEWAY === 'off') { console.log('[Gateway] off (SEEDANCE_GATEWAY=off)'); writeKeyStatus({ mode: 'off' }); return { mode: 'off' }; }
+  try {
+    const os = require('os');
+    let who = '';
+    try { who = os.userInfo().username; } catch {}
+    pcName = `${who ? who + '@' : ''}${os.hostname()}`.slice(0, 64);   // 관리 화면에서 어느 PC 인지
+    gateway = require('./gateway.cjs').createGateway({
+      vault: secrets.openVault({ safeStorage, userDataDir: app.getPath('userData') }),
+      app: app.getVersion(),
+      pc: pcName,
+      log: (m) => console.log(m),
+    });
+    const r = await gateway.boot();
+    console.log(`[Gateway] ${r.mode}${r.label ? ' · ' + r.label : ''}${r.rev ? ' · ' + r.rev : ''}${r.why ? ' · ' + r.why : ''}${r.switched ? ' · 팀 bat 바뀜' : ''}`);
+    writeKeyStatus(r);
+    // 서버가 BytePlus · R2 에서 '키가 틀렸다' 를 받으면 부른다(server.ts refreshKeys) — 설치본은 서버가 이 프로세스 안에서 돈다.
+    globalThis.__seedanceGateway = { refresh: (reason) => gateway.refreshNow(reason).then((x) => { if (x && x.mode === 'gateway') writeKeyStatus(x); return x; }) };
+    // 보관본으로 켠 뒤 뒤에서 받아 보니 끊겨 있었다 — 키는 이미 메모리에서 거뒀다(gateway.cjs). 알려만 준다.
+    if (r.pending) r.pending.then((p) => { if (p && p.mode !== 'offline') writeKeyStatus(p); if (p && p.mode === 'revoked') notifyCut(); }).catch(() => {});
+    return r;
+  } catch (err) {
+    console.error('[Gateway] skipped:', err && err.message);
+    writeKeyStatus({ mode: 'off', why: 'error' });
+    return { mode: 'off' };
+  }
+}
+
+// 키가 없어 서버가 못 뜨는 경우 — 예전엔 서버가 process.exit(1) 로 앱째 조용히 꺼졌다(직원은 "안 켜져요" 밖에 못 한다).
+// 무엇을 하면 되는지 말해 주고 끈다. 빈 문자열이면 문제없음.
+function keysProblem(g) {
+  const help = '\n\n팀 bat 을 실행한 뒤, 트레이 아이콘 → Quit 으로 앱을 완전히 끄고 시작 메뉴에서 다시 켜 주세요.';
+  if (g && g.mode === 'revoked') return '이 PC 의 시댄스 출입증을 관리자가 끊었어요.\n관리자에게 문의해 주세요.';
+  const why = (g && g.why) || '';
+  if (!process.env.SEEDANCE_API_KEY) {
+    if (why === 'network' || why === 'timeout') return '키를 받아 오지 못했어요. 인터넷 연결을 확인한 뒤 앱을 다시 켜 주세요.';
+    if (/closed/.test(why)) return '새 PC 등록이 닫혀 있어요. 관리자에게 알려 주세요.';
+    if (/ticket/.test(why)) return '팀 bat 의 키가 등록된 팀 키가 아니에요. 관리자에게 알려 주세요.';
+    return '이 PC 에 시댄스 키가 없어요.' + help;
+  }
+  if (!process.env.R2_ENDPOINT || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY || !process.env.R2_BUCKET) {
+    return g && g.mode === 'gateway'
+      ? '게이트웨이에 R2 설정이 빠져 있어요. 관리자에게 알려 주세요.'
+      : 'R2 설정이 없어요.\n\nR2.bat 을 실행한 뒤, 트레이 아이콘 → Quit 으로 앱을 완전히 끄고 시작 메뉴에서 다시 켜 주세요.';
+  }
+  return '';
+}
+
+function notifyCut() {
+  const msg = '이 PC 의 시댄스 출입증을 관리자가 끊었어요. 새 생성은 보낼 수 없습니다. 관리자에게 문의해 주세요.';
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Freewill Seedance 2.0', message: msg });
+    else new Notification({ title: 'Freewill Seedance 2.0', body: msg }).show();
+  } catch {}
+}
+
 // ─── Server (runs inside Electron process, no external Node.js needed) ───
-function startServer() {
+async function startServer() {
+  const g = await prepareKeys();
+  if (!isDev) {
+    const problem = keysProblem(g);
+    if (problem) {
+      dialog.showErrorBox('Freewill Seedance 2.0', problem);
+      app.isQuitting = true;
+      app.quit();
+      return;
+    }
+  }
   if (isDev) {
     // Dev mode: spawn tsx for hot reload
     const { spawn } = require('child_process');
@@ -785,7 +887,8 @@ ipcMain.handle('reveal-file', async (_event, filePath) => {
 
 // ─── App Lifecycle ───
 app.on('ready', () => {
-  startServer();
+  // 처음 켜는 PC 만 게이트웨이에서 키를 받을 때까지 기다린다(보관본이 있으면 바로). 창은 그동안 서버를 기다린다.
+  startServer().catch((err) => console.error('[Server] start failed:', err));
   createWindow();
   createTray();
   setupAutoUpdater();

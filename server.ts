@@ -30,17 +30,36 @@ import {
 
 dotenv.config();
 
-const API_KEY = process.env.SEEDANCE_API_KEY;
+// 키 · 주소는 쓸 때마다 process.env 에서 읽는다(26.10.802~). 설치본은 앱을 켤 때 게이트웨이(electron/gateway.cjs)에서
+// 묶음을 받아 process.env 에 올리고, 켠 뒤 새 묶음이 오면 같은 실행 안에서 값이 바뀐다 — 상수로 잡아 두면 그 실행 내내 옛 키를 쓴다.
+const apiKey = () => process.env.SEEDANCE_API_KEY || '';
+const BP_BASE_DEFAULT = 'https://ark.ap-southeast.bytepluses.com/api/v3';
+// 게이트웨이가 준 주소를 믿는 모양 — https, 또는 이 PC 안(http://127.0.0.1:포트 — 격리 시험의 가짜 서버). 그 밖이면 기본값.
+// ★ 시험에서 가짜 주소가 기본값으로 떨어지면 진짜 시트 · 진짜 BytePlus 로 나간다 — 127.0.0.1 을 받는 이유.
+const trustedUrl = (u: string) => /^https:\/\/[^\s/]+(\/[^\s]*)?$/.test(u) || /^http:\/\/127\.0\.0\.1:\d+(\/[^\s]*)?$/.test(u);
+// BytePlus 주소도 게이트웨이 값(SEEDANCE_BP_BASE)으로 옮길 수 있다(리전 이전 등).
+const bpTasks = () => {
+  const b = (process.env.SEEDANCE_BP_BASE || '').trim().replace(/\/+$/, '');
+  return `${trustedUrl(b) ? b : BP_BASE_DEFAULT}/contents/generations/tasks`;
+};
+// BytePlus · R2 가 '키가 틀렸다' 고 하면 게이트웨이에서 한 번 다시 받아 본다 — 관리자가 Cloudflare 에서 키를 바꾼 직후
+// 켜 둔 PC 가 멈추지 않게. 평소엔 켤 때만 받는다(사용자 결정 2026-10-08). 설치본에서만 있다(main.cjs 가 단다) —
+// 개발 실행 · 맥 소스 실행에선 없고 false.
+async function refreshKeys(reason: string): Promise<boolean> {
+  const g = (globalThis as any).__seedanceGateway;
+  if (!g || typeof g.refresh !== 'function') return false;
+  try { const r = await g.refresh(reason); return !!(r && r.changed); } catch { return false; }
+}
 
 // ★ 2.5 Demo — 2026-08-14 종료. 별도 키(SEEDANCE_25_DEMO_KEY) · 별도 엔드포인트 ·
 // 별도 계약으로 돌던 레인이었고, 키를 읽는 코드부터 모델 id, 요청 분기,
 // /api/capabilities 게이트까지 전부 제거했다. 남은 것은 은퇴한 모델 id 를 정식 2.5 로
 // 옮기는 매핑 하나뿐이다(src/lib/model-access.ts). 되살릴 일이 생기면 되돌리지 말고
 // 새로 설계할 것 — 반쯤 남은 분기가 제일 위험하다.
-const R2_ENDPOINT = process.env.R2_ENDPOINT;
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-const R2_BUCKET = process.env.R2_BUCKET;
+const r2Endpoint = () => process.env.R2_ENDPOINT || '';
+const r2KeyId = () => process.env.R2_ACCESS_KEY_ID || '';
+const r2Secret = () => process.env.R2_SECRET_ACCESS_KEY || '';
+const r2Bucket = () => process.env.R2_BUCKET || '';
 
 // Credit tracker integration — POSTs token usage to a Google Apps Script endpoint
 // when a task succeeds. The team name is derived from the SEEDANCE_API_KEY env var
@@ -50,7 +69,12 @@ const R2_BUCKET = process.env.R2_BUCKET;
 // Why hashes and not the keys themselves? An EXE installed on one team member's PC
 // would otherwise expose every other team's API key in the bundled server.cjs. With
 // hashes only, the bundle reveals nothing useful — SHA-256 is one-way.
-const TRACKER_URL = 'https://script.google.com/macros/s/AKfycbyC53V4K-CHJnP86qIbBP0WmXZ4cDD9D3CFVmd8otL4ZThzpQ7RKhnCeIXgDu4y7CFrnQ/exec';
+const TRACKER_URL_DEFAULT = 'https://script.google.com/macros/s/AKfycbyC53V4K-CHJnP86qIbBP0WmXZ4cDD9D3CFVmd8otL4ZThzpQ7RKhnCeIXgDu4y7CFrnQ/exec';
+// 게이트웨이가 SEEDANCE_TRACKER_URL 을 주면 그걸 쓴다 — GAS 를 새로 배포해 주소가 바뀌어도 앱을 다시 내지 않는다.
+const trackerUrl = () => {
+  const u = (process.env.SEEDANCE_TRACKER_URL || '').trim();
+  return trustedUrl(u) ? u : TRACKER_URL_DEFAULT;
+};
 const TEAM_KEY_HASHES: Record<string, string> = {
   '75a2bbd0f6a59fabc34712d4d1b70428156930f0a09f15089af5b7f4beff307a': '1팀',
   '276647adf6ebf0cd833aa34d849d15b3284ed620c32db93db8856042cdc110d8': '2팀',
@@ -74,12 +98,16 @@ const TEAM_KEY_HASHES: Record<string, string> = {
   '724cf3b6d22b122d01b371eb8e550ffe4053b5eef4731becd3684f5c72bf4d4d': 'Special팀',
   '0e43bc6b870b1d889724d6abe19cf23bda010114b780efcf0635e94964f1e117': 'AIP팀',
 };
-const TEAM_NAME = (() => {
-  if (!API_KEY) return 'UNKNOWN';
-  const h = crypto.createHash('sha256').update(API_KEY).digest('hex');
-  return TEAM_KEY_HASHES[h] || 'UNKNOWN';
-})();
-console.log(`[Tracker] Resolved team: ${TEAM_NAME}`);
+// 팀 이름 — 게이트웨이가 준 이름(SEEDANCE_TEAM_LABEL)이 먼저다. 게이트웨이는 출입증에 박힌 팀을 주므로 키를 재발급해도,
+// 새 팀 키를 발급해도 앱을 고쳐 다시 내지 않아도 된다(예전엔 새 키 = 재배포 전까지 UNKNOWN). 게이트웨이를 못 거친
+// 실행(개발 · 맥 · 처음 켰는데 게이트웨이가 안 닿음)은 예전처럼 키 해시 표로.
+function teamName(): string {
+  const label = (process.env.SEEDANCE_TEAM_LABEL || '').trim();
+  if (label) return label;
+  const k = apiKey();
+  if (!k) return 'UNKNOWN';
+  return TEAM_KEY_HASHES[crypto.createHash('sha256').update(k).digest('hex')] || 'UNKNOWN';
+}
 const reportedTasks = new Set<string>();
 
 // 트래커에 "우리 앱이 맞다" 고 증명하는 서명.
@@ -94,13 +122,20 @@ const reportedTasks = new Set<string>();
 //
 // 키 자체는 절대 나가지 않는다. 나가는 것은 타임스탬프와 그 서명뿐이고, GAS 는
 // 5분 창 안의 서명만 받는다 — 하나를 주워도 오래 못 쓴다.
-const TRACKER_SECRET = R2_SECRET_ACCESS_KEY
-  ? crypto.createHmac('sha256', R2_SECRET_ACCESS_KEY).update('seedance-tracker-v1').digest('hex')
-  : '';
+//
+// 26.10.802~ 게이트웨이가 이 값을 그대로 내려준다(SEEDANCE_TRACKER_SECRET) — 처음 한 번 박아 둔 값이라 R2 키를 바꿔도
+// 시트 기록이 안 끊긴다(예전엔 R2 키를 바꾸는 순간 서명이 달라져 시트가 거절했다). 없으면 예전처럼 R2 키에서.
+function trackerSecret(): string {
+  const fromGateway = process.env.SEEDANCE_TRACKER_SECRET || '';
+  if (fromGateway) return fromGateway;
+  const r = r2Secret();
+  return r ? crypto.createHmac('sha256', r).update('seedance-tracker-v1').digest('hex') : '';
+}
 function trackerAuth(): { ts: string; proof: string } | null {
-  if (!TRACKER_SECRET) return null;
+  const secret = trackerSecret();
+  if (!secret) return null;
   const ts = String(Math.floor(Date.now() / 1000));
-  return { ts, proof: crypto.createHmac('sha256', TRACKER_SECRET).update('tracker:' + ts).digest('hex') };
+  return { ts, proof: crypto.createHmac('sha256', secret).update('tracker:' + ts).digest('hex') };
 }
 // GET 은 쿼리로, POST 는 본문으로 같은 값을 싣는다.
 function signedTrackerUrl(base: string): string {
@@ -188,34 +223,48 @@ const KEY_HELP = process.platform === 'win32'
   : '  프로젝트 폴더의 .env 파일에 값을 채우세요. (맥_실행_가이드.md 참고)';
 
 async function startServer() {
-  if (!API_KEY) {
+  if (!apiKey()) {
     console.error('\n  [ERROR] SEEDANCE_API_KEY 가 설정되지 않았습니다.');
     console.error(KEY_HELP + '\n');
     process.exit(1);
   }
-  if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET) {
+  if (!r2Endpoint() || !r2KeyId() || !r2Secret() || !r2Bucket()) {
     console.error('\n  [ERROR] R2_* 환경변수가 설정되지 않았습니다.');
     console.error(KEY_HELP);
     console.error('  필요한 변수: R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET\n');
     process.exit(1);
   }
+  console.log(`[Tracker] Resolved team: ${teamName()}`);
 
   // R2 (S3-compatible) client. forcePathStyle: true so presigned URLs come out as
   // https://{account}.r2.cloudflarestorage.com/{bucket}/{key}?... — predictable for
   // extractR2Key below and the format Cloudflare recommends.
-  const r2 = new S3Client({
-    region: 'auto',
-    endpoint: R2_ENDPOINT,
-    credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
-    forcePathStyle: true,
-  });
+  // 게이트웨이가 실행 중에 R2 값을 바꾸면(관리자가 키 · 주소를 바꿈) 다음 호출부터 새 클라이언트로.
+  let r2Cache: { sig: string; client: S3Client } | null = null;
+  const r2 = (): S3Client => {
+    const sig = `${r2Endpoint()}|${r2KeyId()}|${r2Secret()}`;
+    if (!r2Cache || r2Cache.sig !== sig) {
+      r2Cache = {
+        sig,
+        client: new S3Client({
+          region: 'auto',
+          endpoint: r2Endpoint(),
+          credentials: { accessKeyId: r2KeyId(), secretAccessKey: r2Secret() },
+          forcePathStyle: true,
+        }),
+      };
+    }
+    return r2Cache.client;
+  };
+  // R2 가 '키가 틀렸다' 고 했나 — 게이트웨이에서 다시 받아 한 번만 다시 해 본다.
+  const r2AuthError = (e: any) => /InvalidAccessKeyId|SignatureDoesNotMatch|InvalidToken|AccessDenied/.test(String(e?.name || e?.Code || '')) || e?.$metadata?.httpStatusCode === 403;
 
-  const r2Hostname = (() => {
-    try { return new URL(R2_ENDPOINT).hostname; } catch { return ''; }
-  })();
+  const r2Hostname = () => {
+    try { return new URL(r2Endpoint()).hostname; } catch { return ''; }
+  };
 
   function isR2Url(url: string): boolean {
-    try { return new URL(url).hostname === r2Hostname; } catch { return false; }
+    try { return new URL(url).hostname === r2Hostname(); } catch { return false; }
   }
 
   // Pulls the object key from a path-style R2 URL.
@@ -223,7 +272,7 @@ async function startServer() {
   function extractR2Key(url: string): string | null {
     try {
       const u = new URL(url);
-      const prefix = `/${R2_BUCKET}/`;
+      const prefix = `/${r2Bucket()}/`;
       if (u.pathname.startsWith(prefix)) {
         return decodeURIComponent(u.pathname.slice(prefix.length));
       }
@@ -243,7 +292,7 @@ async function startServer() {
         continue;
       }
       r2KeyRefCount.delete(key);
-      r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET!, Key: key }))
+      r2().send(new DeleteObjectCommand({ Bucket: r2Bucket(), Key: key }))
         .then(() => console.log(`[R2] deleted ${key}`))
         .catch(err => console.warn(`[R2] delete failed for ${key}:`, err.message));
     }
@@ -479,17 +528,22 @@ async function startServer() {
     const hash = crypto.createHash('md5').update(fileBuffer).digest('hex').slice(0, 8);
     const key = `${safeBase}-${hash}-${Date.now()}${ext}`;
 
-    await r2.send(new PutObjectCommand({
-      Bucket: R2_BUCKET!,
+    const put = () => r2().send(new PutObjectCommand({
+      Bucket: r2Bucket(),
       Key: key,
       Body: fileBuffer,
       ContentType: opts?.contentType || mimeFromExt(ext),
       ...(opts?.contentDisposition ? { ContentDisposition: opts.contentDisposition } : {}),
     }));
+    try { await put(); }
+    catch (e: any) {
+      if (!r2AuthError(e) || !(await refreshKeys('R2 ' + (e?.name || '403')))) throw e;
+      await put();
+    }
 
     const url = await getSignedUrl(
-      r2,
-      new GetObjectCommand({ Bucket: R2_BUCKET!, Key: key }),
+      r2(),
+      new GetObjectCommand({ Bucket: r2Bucket(), Key: key }),
       { expiresIn: opts?.expiresIn ?? 12 * 60 * 60 }, // default 12h — covers a generation wait
     );
     return url;
@@ -520,7 +574,7 @@ async function startServer() {
     let deleted = 0;
     for (const p of list) {
       if (now - p.createdAt >= PACK_TTL_MS) {
-        try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET!, Key: p.key })); deleted++; }
+        try { await r2().send(new DeleteObjectCommand({ Bucket: r2Bucket(), Key: p.key })); deleted++; }
         catch { keep.push(p); /* delete failed (offline?) → retry next sweep */ }
       } else keep.push(p);
     }
@@ -540,14 +594,14 @@ async function startServer() {
       const buf = Buffer.from(req.body as Buffer);
       if (!buf.length) return res.status(400).json({ error: 'empty body' });
       const key = `${PACK_PREFIX}${crypto.randomBytes(8).toString('hex')}-${Date.now()}.fwsl.json`;
-      await r2.send(new PutObjectCommand({
-        Bucket: R2_BUCKET!,
+      await r2().send(new PutObjectCommand({
+        Bucket: r2Bucket(),
         Key: key,
         Body: buf,
         ContentType: 'application/json',
         ContentDisposition: 'attachment; filename="asset-pack.fwsl.json"',
       }));
-      const url = await getSignedUrl(r2, new GetObjectCommand({ Bucket: R2_BUCKET!, Key: key }), { expiresIn: 24 * 60 * 60 }); // 24h
+      const url = await getSignedUrl(r2(), new GetObjectCommand({ Bucket: r2Bucket(), Key: key }), { expiresIn: 24 * 60 * 60 }); // 24h
       const list = loadPackIndex(); list.push({ key, createdAt: Date.now() }); savePackIndex(list);
       res.json({ url, expiresInHours: 24 });
     } catch (e: any) {
@@ -565,7 +619,7 @@ async function startServer() {
       if (!url) return res.status(400).json({ error: 'no url' });
       let host = '';
       try { host = new URL(url).hostname; } catch { return res.status(400).json({ error: '잘못된 링크' }); }
-      const r2Host = (() => { try { return new URL(R2_ENDPOINT!).hostname; } catch { return ''; } })();
+      const r2Host = r2Hostname();
       if (!r2Host || host !== r2Host) return res.status(403).json({ error: '지원하지 않는 링크입니다 (Freewill 공유 링크만 가능)' });
       const r = await fetch(url);
       if (!r.ok) return res.status(502).json({ error: `링크를 불러올 수 없습니다 (${r.status}) — 만료됐거나 잘못된 링크` });
@@ -1307,8 +1361,8 @@ async function startServer() {
   // 키가 아예 없는 경우는 여기까지 오지 않는다 — startServer() 첫 줄에서 이미
   // process.exit(1) 이다. 그래서 known:false 는 '키는 있는데 모르는 키' 하나뿐이다.
   app.get('/api/team', (_req, res) => res.json({
-    team: TEAM_NAME,
-    known: TEAM_NAME !== 'UNKNOWN',
+    team: teamName(),
+    known: teamName() !== 'UNKNOWN',
   }));
 
   // ── 에이전트 작업함 (26.10.302~) ─────────────────────────────────────────────
@@ -1888,7 +1942,7 @@ async function startServer() {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 15000);
     try {
-      const r = await fetch(signedTrackerUrl(`${TRACKER_URL}?action=projects`), { redirect: 'follow', signal: ac.signal });
+      const r = await fetch(signedTrackerUrl(`${trackerUrl()}?action=projects`), { redirect: 'follow', signal: ac.signal });
       const data: any = JSON.parse(await r.text());
       if (data?.ok === true && Array.isArray(data.projects)) rememberRoster(data.projects);
     } catch { /* fall through to whatever we already hold */ } finally { clearTimeout(timer); }
@@ -1903,7 +1957,7 @@ async function startServer() {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 25000);
     try {
-      const r = await fetch(signedTrackerUrl(`${TRACKER_URL}?action=projects`), { redirect: 'follow', signal: ac.signal });
+      const r = await fetch(signedTrackerUrl(`${trackerUrl()}?action=projects`), { redirect: 'follow', signal: ac.signal });
       const text = await r.text();
       let data: any;
       // A non-JSON body is the tracker failing, not an empty roster — keep them distinct.
@@ -2030,7 +2084,8 @@ async function startServer() {
   }
 
   app.post('/api/gemini/generate', async (req, res) => {
-    const KEY = process.env.NANOBANANA_STUDIO_KEY;
+    const shared = (process.env.NANOBANANA_STUDIO_KEY || '').trim();
+    const KEY = process.env.SEEDANCE_GEMINI_KEY || (shared && shared !== 'managed-by-gateway' ? shared : '');
     if (!KEY) { console.error('[Gemini] NANOBANANA_STUDIO_KEY not set'); return res.status(500).json({ error: 'NANOBANANA_STUDIO_KEY가 설정되지 않았습니다.' }); }
     console.log('[Gemini] Omni generate...');
     try {
@@ -2198,11 +2253,15 @@ async function startServer() {
     }
 
     try {
-      const response = await fetch('https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks', {
+      const create = () => fetch(bpTasks(), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey()}` },
         body: JSON.stringify(byteplusBody)
       });
+      let response = await create();
+      // 401 = 키가 틀렸다(관리자가 Cloudflare 에서 바꾸고 옛 키를 끊음). 게이트웨이에서 새로 받았으면 한 번만 다시.
+      // 만들기는 401 이면 태스크가 안 생기므로 다시 보내도 두 번 만들어지지 않는다.
+      if (response.status === 401 && await refreshKeys('BytePlus 401')) response = await create();
 
       const text = await response.text();
       let data;
@@ -2256,9 +2315,10 @@ async function startServer() {
   // BytePlus API — Get Task
   app.get('/api/byteplus/tasks/:id', async (req, res) => {
     try {
-      const response = await fetch(`https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/${req.params.id}`, {
-        headers: { 'Authorization': `Bearer ${API_KEY}` }
+      const response = await fetch(`${bpTasks()}/${req.params.id}`, {
+        headers: { 'Authorization': `Bearer ${apiKey()}` }
       });
+      if (response.status === 401) refreshKeys('BytePlus 401').catch(() => {});   // 다음 조회부터 새 키
       const data = await response.json() as any;
 
       // Fire-and-forget report to the credit tracker. Only fires once per task
@@ -2267,12 +2327,12 @@ async function startServer() {
       // never delayed or corrupted.
       if (data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(req.params.id)) {
         reportedTasks.add(req.params.id);
-        fetch(TRACKER_URL, {
+        fetch(trackerUrl(), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             ...(trackerAuth() || {}),   // ts + proof
-            team: TEAM_NAME,
+            team: teamName(),
             project: taskToProject.get(req.params.id)?.project || '', // billing project (may be '')
             // 트래커가 이 id 로 프로젝트를 찾아 '지금 이름' 으로 적는다. 이름이 그 사이 바뀌었어도
             // 기록이 한 프로젝트로 모인다. 없으면('') 트래커가 project(이름)로 찾는다.
@@ -2344,10 +2404,12 @@ async function startServer() {
   app.delete('/api/byteplus/tasks/:id', async (req, res) => {
     console.log(`[BytePlus API] Cancelling: ${req.params.id}`);
     try {
-      const response = await fetch(`https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/${req.params.id}`, {
+      const cancel = () => fetch(`${bpTasks()}/${req.params.id}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${API_KEY}` }
+        headers: { 'Authorization': `Bearer ${apiKey()}` }
       });
+      let response = await cancel();
+      if (response.status === 401 && await refreshKeys('BytePlus 401')) response = await cancel();
       // Clean up R2 inputs whether or not the upstream cancel succeeded — by the time
       // a user clicks cancel they don't want the bytes lingering, and the 1-day
       // lifecycle rule would catch it anyway.

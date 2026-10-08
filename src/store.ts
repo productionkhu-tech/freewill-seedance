@@ -1046,10 +1046,6 @@ interface AppState {
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
   setAutoDownload: (v: boolean) => void;
-  // 받은 영상 끝에 생성 설정(프롬프트 · 파라미터 · 레퍼런스 정보)을 넣는다(26.10.801~, settings-box). 기본 켬. 끄는 경우:
-  // 받은 영상을 손대지 않고 바깥(고객 등)에 넘길 때 프롬프트가 같이 나가는 게 싫을 때.
-  embedSettings: boolean;
-  setEmbedSettings: (v: boolean) => void;
   // Billing/tracking project (시트 연동). Session-only + app-global: picked once per
   // launch, survives local-project switches AND queue sends, NOT persisted (restart
   // → must re-pick). Distinct from the local `projects` sidebar workspaces.
@@ -1648,9 +1644,9 @@ export function boundCollectionOf(projectId: string): { id: string; name: string
   const c = st.assetCollections.find(x => x.id === st.projectCollectionId[projectId]);
   return c ? { id: c.id, name: c.name } : undefined;
 }
-// 다운로드에 실어 보낼 설정 — '받은 영상에 설정 넣기' 를 끄면 없다.
+// 다운로드에 실어 보낼 설정 — 받은 영상에는 늘 넣는다(끄는 칸은 26.10.802 에서 뺐다: 사용자 "당연히 다 넣어주는 거지").
+// 예전에 껐던 PC 의 저장값(embedSettings: false)이 남아 있어도 이제 아무도 안 읽는다.
 export async function downloadMetaFor(m: ChatMessage): Promise<SettingsPayload | undefined> {
-  if (!useAppStore.getState().embedSettings) return undefined;
   return (await settingsPayloadFor(m)) || undefined;
 }
 // 받은 영상의 레퍼런스 원본을 30일 캐시 정리에서 뺀다(서버가 라이브러리 폴더로 한 벌 옮겨 둔다). 30일이 지나 그 영상을
@@ -2037,8 +2033,6 @@ export const useAppStore = create<AppState>()(
       currentProjectId: null,
       autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
-      embedSettings: true,
-      setEmbedSettings: (v) => set({ embedSettings: v }),
       billingProjectKey: '',
       billingProjects: [],
       trackerReachable: null,
@@ -2737,7 +2731,6 @@ export const useAppStore = create<AppState>()(
         projects: state.projects,
         currentProjectId: state.currentProjectId,
         autoDownload: state.autoDownload,
-        embedSettings: state.embedSettings,
         assetCollections: state.assetCollections,
         projectGroups: state.projectGroups,
         projectCollectionId: state.projectCollectionId,

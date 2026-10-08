@@ -1,0 +1,18 @@
+# seedance-gateway v3 — 머리말은 seedance-gateway.js. 배포: 이 폴더에서 `npx wrangler deploy` (단독 실행, 체이닝 금지).
+# 키는 setup-secrets.mjs (관리자가 직접 실행) 또는 Cloudflare 대시보드로 넣는다 — 이 파일은 공개 저장소에 있다.
+name = "seedance-gateway"
+main = "seedance-gateway.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+preview_urls = false   # 판마다 따로 열리는 미리보기 주소는 쓰지 않는다(다음 배포부터)
+
+# ★ 지우지 말 것. v1(2026-09-04) 때 대시보드에 평문 변수(NCP_ENDPOINT · NCP_REGION · NCP_BUCKET ·
+# NCP_PRESIGN_EXPIRES_SECONDS)로 들어간 값이 있다. 이 줄이 없으면 deploy 가 '설정 파일에 없는 변수' 로 보고 지운다
+# → 배포 순간 전 PC 의 영상 장기보관이 멈춘다. (같은 이유로 [vars] 도 두지 않는다 — 두면 배포 때마다 대시보드 값을 덮는다)
+keep_vars = true
+
+# 출입증 · 입장권 · 시트 서명 재료. 쓰기는 등록 · 입장권 기억 · PC 당 12시간 기록뿐(무료 하루 1,000회, 나노바나나와 공유).
+# 크론 없음(계정 무료 한도 5개를 이미 다 씀).
+[[kv_namespaces]]
+binding = "SD_TOKENS"
+id = "c6f9945a152f434aa6592fc4deb858f5"   # KV 'seedance-gateway' (2026-10-08 확인: 비어 있던 것을 씀)

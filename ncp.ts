@@ -59,7 +59,36 @@ export function resetNcpBackoff() { lastFailAt = 0; }
  * 계속 돌아가야 하기 때문이다. 실패 직후 1분은 재시도하지 않는다(워커 장애 시
  * 매 폴링마다 두드리는 것을 막는다).
  */
+// 26.10.802~ 앱을 켤 때 게이트웨이 묶음에 NCP 자격 증명이 같이 온다(SEEDANCE_NCP_* — electron/gateway.cjs). 있으면 그걸
+// 쓰고, 없을 때만(게이트웨이를 못 거친 실행 · 801 이하) 아래처럼 R2 키로 서명해 /ncp/credentials 에 받으러 간다.
+// 관리자가 Cloudflare 에서 값을 바꿔 묶음이 바뀌면 다음 호출부터 새 클라이언트로.
+let fromBundle: { sig: string; ready: NcpReady } | null = null;
+function ncpFromBundle(): NcpReady | null {
+  const id = process.env.SEEDANCE_NCP_ACCESS_KEY_ID || '';
+  const secret = process.env.SEEDANCE_NCP_SECRET_ACCESS_KEY || '';
+  const endpoint = process.env.SEEDANCE_NCP_ENDPOINT || '';
+  const bucket = process.env.SEEDANCE_NCP_BUCKET || '';
+  if (!id || !secret || !endpoint || !bucket) return null;
+  const region = process.env.SEEDANCE_NCP_REGION || 'kr-standard';
+  const presignExpires = Number(process.env.SEEDANCE_NCP_PRESIGN_EXPIRES_SECONDS) || 3600;
+  const sig = [id, secret, endpoint, bucket, region, presignExpires].join('|');
+  if (!fromBundle || fromBundle.sig !== sig) {
+    fromBundle = {
+      sig,
+      ready: {
+        client: new S3Client({ region, endpoint, credentials: { accessKeyId: id, secretAccessKey: secret }, forcePathStyle: true }),
+        bucket,
+        presignExpires,
+      },
+    };
+    console.log(`[NCP] 준비됨(게이트웨이 묶음) — bucket ${bucket}, presign ${presignExpires}s`);
+  }
+  return fromBundle.ready;
+}
+
 export async function ensureNcp(): Promise<NcpReady | null> {
+  const bundled = ncpFromBundle();
+  if (bundled) return bundled;
   if (ready) return ready;
   if (inFlight) return inFlight;
   if (Date.now() - lastFailAt < RETRY_COOLDOWN_MS) return null;
@@ -728,9 +757,10 @@ async function rescuePoster(taskId: string, row: IndexRow): Promise<'made' | 'fe
 }
 
 export function archiveStats() {
+  const cur = ncpFromBundle() || ready;   // 게이트웨이 묶음으로 준비된 것도 '준비됨'
   return {
-    ready: Boolean(ready),
-    bucket: ready?.bucket || null,
+    ready: Boolean(cur),
+    bucket: cur?.bucket || null,
     archived: mediaIndex.size,
     pending: queue.size,
     failing: [...queue.values()].filter(j => j.tries > 0).length,

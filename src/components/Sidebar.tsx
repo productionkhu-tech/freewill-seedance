@@ -410,7 +410,7 @@ function formatBytes(bytes: number | null): string {
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
     projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, setGroupParent, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
-    autoDownload, setAutoDownload, embedSettings, setEmbedSettings, theme, setTheme } = useAppStore();
+    autoDownload, setAutoDownload, theme, setTheme } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
@@ -1419,15 +1419,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               className="accent-[#0071e3] w-3.5 h-3.5 shrink-0" />
             <span className="text-[11px] text-white/70">생성 시 자동 다운로드</span>
           </label>
-          {/* 받은 영상 끝에 생성 설정을 암호화해 넣는다(26.10.801~) — 이 앱에 끌어다 놓아야 보이고 탐색기에는 안 보인다.
-              아무것도 안 붙인 원본이 필요하면 끈다. */}
-          <label className="flex items-center gap-2 cursor-pointer select-none"
-            title={'켜면 받은 영상 끝에 그 영상을 만든 설정(프롬프트 · 파라미터 · 레퍼런스 정보)을 암호화해 넣어요.\n이 앱에 그 영상을 끌어다 놓아야 보이고, 탐색기 속성이나 다른 프로그램에는 안 보여요. 재생 · 편집에는 영향이 없어요.\n아무것도 붙이지 않은 원본 그대로가 필요하면 끄세요.'}>
-            <input type="checkbox" checked={embedSettings}
-              onChange={(e) => setEmbedSettings(e.target.checked)}
-              className="accent-[#0071e3] w-3.5 h-3.5 shrink-0" />
-            <span className="text-[11px] text-white/70">받은 영상에 설정 넣기</span>
-          </label>
+          {/* 받은 영상에는 늘 생성 설정을 암호화해 넣는다(26.10.801~ settings-box). 끄는 칸은 802 에서 뺐다 —
+              사용자 2026-10-08: "당연히 다 넣어주는 거지". */}
         </div>
         {/* Theme. Lives beside the other app-wide switches (not per project) because it
             is a property of this installation, and it is persisted so a restart keeps it. */}

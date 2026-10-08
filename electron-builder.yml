@@ -24,6 +24,8 @@ files:
   - "dist/**/*"
   - "electron/main.cjs"
   - "electron/updater.cjs"
+  - "electron/secrets.cjs"
+  - "electron/gateway.cjs"
   - "electron/preload.cjs"
   - "electron/icon.png"
   - "public/**/*"
