@@ -40,10 +40,11 @@ const baseEnv = () => ({
 });
 const SECRET_VALUES = (env) => Object.entries(env).filter(([, v]) => typeof v === 'string' && v.startsWith('k-')).map(([, v]) => v);
 
-async function call(env, method, p, { body, token, raw } = {}) {
+async function call(env, method, p, { body, token, raw, ip } = {}) {
   const waits = [];
   const ctx = { waitUntil: (pr) => waits.push(pr) };
   const headers = {};
+  if (ip) headers['CF-Connecting-IP'] = ip;
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined || raw !== undefined) headers['Content-Type'] = 'application/json';
   const req = new Request('https://gw.test' + p, { method, headers, body: raw ?? (body !== undefined ? JSON.stringify(body) : undefined) });
@@ -229,6 +230,20 @@ console.log('\n[9b] 팀 바꿈(/v1/leave) · 입장권의 팀(/v1/ticket)');
   const old = await call(e2, 'POST', '/v1/ticket', { body: { ticket: ticket(KEY_TA) } });
   ok(old.status === 200 && old.j.label === 'TA팀', '재발급 전 키(옛 bat)도 어느 팀 것인지 앎');
   ok(e2.SD_TOKENS.writes - w0 <= 1, 'KV 쓰기는 입장권 기억 정도', `쓰기 ${e2.SD_TOKENS.writes - w0}`);
+}
+
+console.log('\n[9c] IP — 등록 · 묶음을 받은 곳(관리 화면용)');
+{
+  const e3 = baseEnv();
+  const t = (await call(e3, 'POST', '/v1/enroll', { body: { ticket: ticket(KEY_T6), pc: 'PC-IP' }, ip: '203.0.113.7' })).j;
+  ok(JSON.parse(e3.SD_TOKENS.m.get(`tok:${t.token_id}`).value).ip === '203.0.113.7', '등록할 때 IP 기록');
+  await call(e3, 'POST', '/v1/config', { token: t.token, ip: '203.0.113.7' });
+  const w0 = e3.SD_TOKENS.writes;
+  await call(e3, 'POST', '/v1/config', { token: t.token, ip: '203.0.113.7' });
+  ok(e3.SD_TOKENS.writes === w0, '같은 IP 로 또 받으면 쓰기 없음');
+  await call(e3, 'POST', '/v1/config', { token: t.token, ip: '198.51.100.20' });
+  const list = await call(e3, 'GET', '/admin/tokens', { token: e3.ADMIN_KEY });
+  ok(list.j.tokens.find((x) => x.token_id === t.token_id).ip === '198.51.100.20', 'IP 가 바뀌면 새 IP 로(관리 목록)');
 }
 
 console.log('\n[10] 앱 v1 표와 같은 이름 — 워커 표가 server.ts 표를 그대로 옮겼나');

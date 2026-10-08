@@ -203,13 +203,21 @@ function newToken() {
 const tokenMeta = (rec) => ({
   team: rec.team, label: rec.label, pc: rec.pc, created: rec.created, via: rec.via,
   seen: rec.seen || null, rev: rec.rev || null, app: rec.app || null, revoked: rec.revoked || null, left: rec.left || null,
+  ip: rec.ip || null, country: rec.country || null,
 });
 
-async function issueToken(env, team, label, pc, app, via) {
+// 그 요청이 온 곳 — Cloudflare 가 보는 공인 IP 와 나라(관리 화면용, 사용자 요청 2026-10-08). 사무실 PC 들은 공유기 하나로
+// 나가 같은 IP 로 보인다 — 사무실 · 집 · 해외를 가리는 용도. PC 의 사내 IP 는 여기서 안 보인다.
+const whereOf = (request) => ({
+  ip: clip(request.headers.get('CF-Connecting-IP'), 45),
+  country: clip(request.cf && request.cf.country, 2),
+});
+
+async function issueToken(env, team, label, pc, app, via, where = {}) {
   const token = newToken();
   const h = await sha256Hex(token);
   const id = h.slice(0, 16);
-  const rec = { h, team, label, pc, app, created: new Date().toISOString(), via };
+  const rec = { h, team, label, pc, app, created: new Date().toISOString(), via, ip: where.ip || '', country: where.country || '' };
   await env.SD_TOKENS.put(`tok:${id}`, JSON.stringify(rec), { metadata: tokenMeta(rec) });
   return { ok: true, token, token_id: id, team, label, pc };
 }
@@ -304,7 +312,7 @@ async function enroll(request, env, ctx) {
   const pc = clip(r.body.pc, 64) || 'unknown-pc';
   const app = clip(r.body.app, 24);
   ctx.waitUntil(rememberCurrentTickets(env).catch(() => {}));
-  return json(await issueToken(env, found.team, found.label, pc, app, 'ticket'));
+  return json(await issueToken(env, found.team, found.label, pc, app, 'ticket', whereOf(request)));
 }
 
 async function config(request, env, ctx, a) {
@@ -314,9 +322,10 @@ async function config(request, env, ctx, a) {
   const app = r.body ? clip(r.body.app, 24) : '';
   const now = Date.now();
   const rec = a.rec;
-  // 관리 화면용 기록 — 12시간에 한 번, 또는 묶음 · 앱 버전이 바뀌었을 때만 쓴다.
-  if (!rec.seen || now - Date.parse(rec.seen) > SEEN_EVERY_MS || rec.rev !== b.rev || (app && rec.app !== app)) {
-    const next = { ...rec, seen: new Date(now).toISOString(), rev: b.rev, ...(app ? { app } : {}) };
+  const where = whereOf(request);
+  // 관리 화면용 기록 — 12시간에 한 번, 또는 묶음 · 앱 버전 · IP 가 바뀌었을 때만 쓴다(앱은 켤 때만 오므로 그 이상은 안 쓴다).
+  if (!rec.seen || now - Date.parse(rec.seen) > SEEN_EVERY_MS || rec.rev !== b.rev || (app && rec.app !== app) || (where.ip && rec.ip !== where.ip)) {
+    const next = { ...rec, seen: new Date(now).toISOString(), rev: b.rev, ...(app ? { app } : {}), ...(where.ip ? where : {}) };
     ctx.waitUntil(env.SD_TOKENS.put(`tok:${a.id}`, JSON.stringify(next), { metadata: tokenMeta(next) }).catch(() => {}));
   }
   ctx.waitUntil(rememberCurrentTickets(env).catch(() => {}));
@@ -474,7 +483,8 @@ if(!KEY){KEY=prompt('관리자 키')||'';if(KEY)localStorage.setItem(KEY_LS,KEY)
 const H=()=>({Authorization:'Bearer '+KEY,'Content-Type':'application/json'});
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const yes=b=>b?'<span class="ok">있음</span>':'<span class="bad">없음</span>';
-const day=s=>s?String(s).replace('T',' ').slice(0,16):'';
+const kst=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+const day=s=>{if(!s)return '';try{return kst.format(new Date(s));}catch(e){return String(s).slice(0,16);}};
 async function api(p,o){const r=await fetch(p,{...o,headers:H()});if(r.status===401){localStorage.removeItem(KEY_LS);throw new Error('관리자 키가 틀렸습니다 — 새로고침해서 다시 넣으세요');}return r.json();}
 async function load(){
  try{
@@ -488,8 +498,8 @@ async function load(){
   document.getElementById('status').innerHTML=h;
   const t=await api('/admin/tokens');
   const rows=t.tokens.sort((a,b)=>String(a.label).localeCompare(String(b.label))||String(a.pc).localeCompare(String(b.pc)));
-  let g='<tr><th>팀</th><th>PC</th><th>앱</th><th>등록</th><th>마지막으로 받음</th><th>묶음</th><th></th></tr>';
-  for(const x of rows)g+='<tr'+(x.revoked?' class="muted"':'')+'><td>'+esc(x.label)+'</td><td>'+esc(x.pc)+'</td><td>'+esc(x.app||'')+'</td><td>'+day(x.created)+'</td><td>'+day(x.seen)+'</td><td><code>'+esc(x.rev||'-')+'</code></td><td>'+(x.revoked?(x.left==='team-change'?'<span title="이 PC 는 다른 팀 bat 으로 새 출입증을 받았습니다 — 할 일 없음">팀 바꿈</span>':'끊김 <button title="잘못 끊었을 때 되돌립니다" onclick="act(\\'restore\\',\\''+x.token_id+'\\')">되살리기</button>'):'<button class="danger" onclick="act(\\'revoke\\',\\''+x.token_id+'\\')">끊기</button>')+'</td></tr>';
+  let g='<tr><th>팀</th><th>PC</th><th title="Cloudflare 가 본 공인 IP · 나라. 사무실 PC 들은 같은 IP 로 보입니다">IP</th><th>앱</th><th>등록 (한국 시간)</th><th>마지막으로 받음</th><th>묶음</th><th></th></tr>';
+  for(const x of rows)g+='<tr'+(x.revoked?' class="muted"':'')+'><td>'+esc(x.label)+'</td><td>'+esc(x.pc)+'</td><td>'+(x.ip?esc(x.ip)+(x.country?' <span class="muted">'+esc(x.country)+'</span>':''):'<span class="muted">-</span>')+'</td><td>'+esc(x.app||'')+'</td><td>'+day(x.created)+'</td><td>'+day(x.seen)+'</td><td><code>'+esc(x.rev||'-')+'</code></td><td>'+(x.revoked?(x.left==='team-change'?'<span title="이 PC 는 다른 팀 bat 으로 새 출입증을 받았습니다 — 할 일 없음">팀 바꿈</span>':'끊김 <button title="잘못 끊었을 때 되돌립니다" onclick="act(\\'restore\\',\\''+x.token_id+'\\')">되살리기</button>'):'<button class="danger" onclick="act(\\'revoke\\',\\''+x.token_id+'\\')">끊기</button>')+'</td></tr>';
   document.getElementById('tok').innerHTML=g;
   document.getElementById('cnt').textContent=rows.filter(x=>!x.revoked).length+'대';
  }catch(e){document.getElementById('status').textContent=e.message;}
