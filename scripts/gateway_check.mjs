@@ -51,9 +51,9 @@ const vault = {
   write: (mutate) => { if (vaultBroken) return false; disk.obj = JSON.parse(JSON.stringify(mutate(JSON.parse(JSON.stringify(disk.obj))))); return true; },
 };
 // 앱 한 번 켜기 — 새 process.env(loadSecrets 가 bat 키를 올려 둔 상태)
-const launch = (envExtra = {}) => {
+const launch = (envExtra = {}, pc = 'user@PC-01') => {
   const env = { PATH: 'C:\\Windows', SEEDANCE_API_KEY: (disk.obj.keys || {}).SEEDANCE_API_KEY || BAT_KEY, ...envExtra };
-  const g = createGateway({ vault, env, app: '26.10.802', pc: 'user@PC-01', fetchImpl, timeoutMs: 2000 });
+  const g = createGateway({ vault, env, app: '26.10.802', pc, fetchImpl, timeoutMs: 2000 });
   return { env, g };
 };
 disk.obj.keys = { SEEDANCE_API_KEY: BAT_KEY };   // secrets.cjs 가 bat 키를 옮겨 둔 상태(환경변수는 지워짐)
@@ -301,6 +301,16 @@ console.log('\n[17] 어느 bat 으로 받았는지 기록이 없는 출입증(80
   const i = launch({ SEEDANCE_API_KEY: TA_KEY });
   const ri = await i.g.boot();
   ok(ri.switched && ri.label === 'TA팀', '다른 팀 bat — 물어보고 그 팀으로 바뀜');
+}
+
+console.log('\n[18] 윈도우에서 PC 이름을 바꿈 → 앱은 그대로, 관리 화면 이름만 따라감');
+{
+  const before = disk.obj.gw.tokenId;
+  const j = launch({ SEEDANCE_API_KEY: (disk.obj.keys || {}).SEEDANCE_API_KEY }, 'user@PC-새이름');
+  const rj = await j.g.boot();
+  const p = rj.pending ? await rj.pending : rj;
+  ok(p.mode === 'gateway' && disk.obj.gw.tokenId === before && !rj.switched, '같은 출입증으로 그대로 받음(다시 등록 안 함)');
+  ok(tokRec(before).pc === 'user@PC-새이름', '게이트웨이의 PC 이름이 새 이름으로');
 }
 
 console.log(`\n${fail ? '실패 ' + fail + ' / ' : ''}통과 ${pass}`);

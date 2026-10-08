@@ -130,7 +130,8 @@ function createGateway({ vault, env = process.env, app = '', pc = '', fetchImpl 
         if (!e.ok) return { mode: 'offline', why: e.why, message: e.message };
         token = e.token; enrolledNow = true;
       }
-      let c = await post(fetchImpl, url, '/v1/config', { app }, token, timeoutMs);
+      // 지금 PC 이름도 같이 — 윈도우에서 PC 이름을 바꾸면 관리 화면이 따라간다(이름은 표시용, PC 를 알아보는 건 출입증).
+      let c = await post(fetchImpl, url, '/v1/config', { app, pc }, token, timeoutMs);
       if (c.status === 401 && c.j.code === 'unknown' && !enrolledNow) {
         // 게이트웨이가 이 출입증을 모른다(기록이 지워졌다) — 끊긴 게 아니니 한 번 다시 등록한다.
         saveGw({ token: null });
@@ -138,7 +139,7 @@ function createGateway({ vault, env = process.env, app = '', pc = '', fetchImpl 
         const e = await enroll(url, o);
         if (!e.ok) return { mode: 'offline', why: e.why, message: e.message };
         token = e.token;
-        c = await post(fetchImpl, url, '/v1/config', { app }, token, timeoutMs);
+        c = await post(fetchImpl, url, '/v1/config', { app, pc }, token, timeoutMs);
       }
       if (c.status === 401 && c.j.code === 'revoked') {
         saveGw({ cut: new Date().toISOString(), config: null });

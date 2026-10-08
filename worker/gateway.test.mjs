@@ -244,6 +244,16 @@ console.log('\n[9c] IP — 등록 · 묶음을 받은 곳(관리 화면용)');
   await call(e3, 'POST', '/v1/config', { token: t.token, ip: '198.51.100.20' });
   const list = await call(e3, 'GET', '/admin/tokens', { token: e3.ADMIN_KEY });
   ok(list.j.tokens.find((x) => x.token_id === t.token_id).ip === '198.51.100.20', 'IP 가 바뀌면 새 IP 로(관리 목록)');
+  // PC 이름을 바꿈(앱 803~ 은 켤 때마다 지금 이름을 보낸다) — 표시만 바뀌고 출입증은 그대로
+  const w1 = e3.SD_TOKENS.writes;
+  await call(e3, 'POST', '/v1/config', { token: t.token, ip: '198.51.100.20', body: { app: '26.10.803', pc: 'user@PC-새이름' } });
+  const rec2 = JSON.parse(e3.SD_TOKENS.m.get(`tok:${t.token_id}`).value);
+  ok(rec2.pc === 'user@PC-새이름' && e3.SD_TOKENS.writes === w1 + 1, 'PC 이름이 바뀌면 관리 화면 이름도(쓰기 한 번)');
+  const w2 = e3.SD_TOKENS.writes;
+  await call(e3, 'POST', '/v1/config', { token: t.token, ip: '198.51.100.20', body: { app: '26.10.803', pc: 'user@PC-새이름' } });
+  ok(e3.SD_TOKENS.writes === w2, '같은 이름이면 쓰기 없음');
+  await call(e3, 'POST', '/v1/config', { token: t.token, ip: '198.51.100.20', body: { app: '26.10.803' } });
+  ok(JSON.parse(e3.SD_TOKENS.m.get(`tok:${t.token_id}`).value).pc === 'user@PC-새이름', '이름을 안 보내는 앱(802)은 이름을 안 건드림');
 }
 
 console.log('\n[10] 앱 v1 표와 같은 이름 — 워커 표가 server.ts 표를 그대로 옮겼나');

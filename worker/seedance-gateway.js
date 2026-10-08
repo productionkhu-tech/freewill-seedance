@@ -320,16 +320,20 @@ async function config(request, env, ctx, a) {
   if (b.error) return json({ ok: false, error: b.error }, b.status);
   const r = await readJson(request, 4096);
   const app = r.body ? clip(r.body.app, 24) : '';
+  // PC 이름은 표시용일 뿐이다(PC 를 알아보는 건 출입증). 앱(26.10.803~)이 켤 때마다 지금 이름을 보내므로, 윈도우에서 PC 이름을
+  // 바꾸면 관리 화면도 따라간다. 802 는 등록 때 한 번만 보냈다.
+  const pcNow = r.body ? clip(r.body.pc, 64) : '';
   const now = Date.now();
   const rec = a.rec;
   const where = whereOf(request);
-  // 관리 화면용 기록 — 12시간에 한 번, 또는 묶음 · 앱 버전 · IP 가 바뀌었을 때만 쓴다(앱은 켤 때만 오므로 그 이상은 안 쓴다).
-  if (!rec.seen || now - Date.parse(rec.seen) > SEEN_EVERY_MS || rec.rev !== b.rev || (app && rec.app !== app) || (where.ip && rec.ip !== where.ip)) {
-    const next = { ...rec, seen: new Date(now).toISOString(), rev: b.rev, ...(app ? { app } : {}), ...(where.ip ? where : {}) };
+  // 관리 화면용 기록 — 12시간에 한 번, 또는 묶음 · 앱 버전 · IP · PC 이름이 바뀌었을 때만 쓴다(앱은 켤 때만 오므로 그 이상은 안 쓴다).
+  if (!rec.seen || now - Date.parse(rec.seen) > SEEN_EVERY_MS || rec.rev !== b.rev || (app && rec.app !== app)
+      || (where.ip && rec.ip !== where.ip) || (pcNow && rec.pc !== pcNow)) {
+    const next = { ...rec, seen: new Date(now).toISOString(), rev: b.rev, ...(app ? { app } : {}), ...(where.ip ? where : {}), ...(pcNow ? { pc: pcNow } : {}) };
     ctx.waitUntil(env.SD_TOKENS.put(`tok:${a.id}`, JSON.stringify(next), { metadata: tokenMeta(next) }).catch(() => {}));
   }
   ctx.waitUntil(rememberCurrentTickets(env).catch(() => {}));
-  return json({ ok: true, v: 3, rev: b.rev, team: b.team, label: b.label, pc: rec.pc, env: b.env });
+  return json({ ok: true, v: 3, rev: b.rev, team: b.team, label: b.label, pc: pcNow || rec.pc, env: b.env });
 }
 
 // 이 출입증을 내려놓는다 — PC 에서 다른 팀 bat 을 돌려 그 팀으로 다시 등록했을 때 앱이 옛 출입증으로 부른다.
