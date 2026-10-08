@@ -5,6 +5,7 @@ import { get, set, del, keys } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail, makeJpegPreview } from './lib/utils';
 import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
 import { createBackupClock } from './lib/backup-clock';
+import { buildSettingsPayload, type SettingsPayload } from './lib/settings-box';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -829,7 +830,10 @@ export interface ChatMessage {
   usedAssets?: Asset[];
   promptText?: string;
   promptHtml?: string; // innerHTML snapshot (with mention pills) for exact 재사용 — element mentions are stored as bare names in promptText and can't be re-pillified from it
+  apiPrompt?: string;  // BytePlus·구글에 실제로 보낸 문장(@hero → [Image 3], 옴니는 <IMAGE_REF_N>). 26.10.801~ 카드만 — 받은 영상의
+                       // 설정(settings-box)에 참고로 싣는다. 되살리기는 promptHtml 로 한다.
   usedElementImages?: { id: string; elementId: string; imageId: string; name: string; category: string; url: string }[]; // element-mention images shown on the card reference strip (url = thumbnail; full-res for hover-zoom is looked up live by elementId+imageId)
+  usedCollection?: { id: string; name: string }; // 보낼 때 이 채팅에 연결돼 있던 어셋 컬렉션(26.10.801~) — 받은 영상에서 '그때 설정 그대로' 가 다시 연결한다
   downloadedAt?: number; // last time the user downloaded this video — flips the
                          // download button to "다시 다운로드" styling
   starred?: boolean; // 채택된 컷. Selecting takes is the core of the editing workflow and
@@ -1042,6 +1046,10 @@ interface AppState {
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
   setAutoDownload: (v: boolean) => void;
+  // 받은 영상 끝에 생성 설정(프롬프트 · 파라미터 · 레퍼런스 정보)을 넣는다(26.10.801~, settings-box). 기본 켬. 끄는 경우:
+  // 받은 영상을 손대지 않고 바깥(고객 등)에 넘길 때 프롬프트가 같이 나가는 게 싫을 때.
+  embedSettings: boolean;
+  setEmbedSettings: (v: boolean) => void;
   // Billing/tracking project (시트 연동). Session-only + app-global: picked once per
   // launch, survives local-project switches AND queue sends, NOT persisted (restart
   // → must re-pick). Distinct from the local `projects` sidebar workspaces.
@@ -1608,8 +1616,53 @@ function fireAutoDownload(m: ChatMessage) {
   // downloadedAt 은 남기지 않는다 — 그 표시는 수동 클릭("다시 다운로드") 전용이다.
   // 저장 폴더는 여기서 정하지 않는다. 폴더 지정(sessionDownloadDir)은 electron 쪽
   // will-download / saveBlob 이 공통으로 처리하므로 레인과 무관하게 따라온다.
-  downloadViaProxy(m.videoUrl, downloadFilenameFor(m))
-    .catch(err => console.warn('[AutoDownload] 실패:', err?.message || err));
+  pinMessageReferences(m);
+  void (async () => {
+    const meta = await downloadMetaFor(m);
+    await downloadViaProxy(m.videoUrl!, downloadFilenameFor(m), meta);
+  })().catch(err => console.warn('[AutoDownload] 실패:', err?.message || err));
+}
+
+// ─── 받은 영상에 넣는 생성 설정 (26.10.801~, src/lib/settings-box.ts) ─────────────────────────
+// 카드 메시지 → 영상 끝에 넣을 설정. 그 메시지가 있는 프로젝트를 찾아 이름도 싣는다(다른 PC 에서 '어느 프로젝트' 를 보여 준다).
+export async function settingsPayloadFor(m: ChatMessage): Promise<SettingsPayload | null> {
+  const st = useAppStore.getState();
+  const owner = st.projects.find(p => p.messages.some(x => x.id === m.id));
+  try { return await buildSettingsPayload({ ...m, usedCollection: usedCollectionOf(m) }, { id: owner?.id, name: owner?.name }, __APP_VERSION__); }
+  catch (e) { console.warn('[Settings] 설정 만들기 실패(영상은 그대로 받는다):', e); return null; }
+}
+// 그 카드를 만들 때 채팅에 연결돼 있던 어셋 컬렉션. 26.10.801~ 카드는 보낼 때 적어 두고, 그 전 카드는 멘션한 어셋이 든 컬렉션으로 본다.
+export function usedCollectionOf(m: Pick<ChatMessage, 'usedCollection' | 'usedElementImages'>): { id: string; name: string } | undefined {
+  if (m.usedCollection?.id) return m.usedCollection;
+  const st = useAppStore.getState();
+  for (const e of m.usedElementImages || []) {
+    const cid = st.elementAssets.find(x => x.id === e.elementId)?.collectionId;
+    const c = cid ? st.assetCollections.find(x => x.id === cid) : undefined;
+    if (c) return { id: c.id, name: c.name };
+  }
+  return undefined;
+}
+// 지금 이 채팅에 연결된 어셋 컬렉션 — 보낼 때 카드에 적는다(usedCollection).
+export function boundCollectionOf(projectId: string): { id: string; name: string } | undefined {
+  const st = useAppStore.getState();
+  const c = st.assetCollections.find(x => x.id === st.projectCollectionId[projectId]);
+  return c ? { id: c.id, name: c.name } : undefined;
+}
+// 다운로드에 실어 보낼 설정 — '받은 영상에 설정 넣기' 를 끄면 없다.
+export async function downloadMetaFor(m: ChatMessage): Promise<SettingsPayload | undefined> {
+  if (!useAppStore.getState().embedSettings) return undefined;
+  return (await settingsPayloadFor(m)) || undefined;
+}
+// 받은 영상의 레퍼런스 원본을 30일 캐시 정리에서 뺀다(서버가 라이브러리 폴더로 한 벌 옮겨 둔다). 30일이 지나 그 영상을
+// 끌어다 놓아도 이 PC 에서는 레퍼런스까지 되살아나게. 어셋 라이브러리 그림(libId)은 원래 지워지지 않는다.
+export function pinMessageReferences(m: Pick<ChatMessage, 'usedAssets' | 'usedElementImages'>): void {
+  const ids = [...new Set([
+    ...((m.usedAssets as any[]) || []).map(a => a?.cacheId),
+    ...((m.usedElementImages as any[]) || []).filter(e => !e?.libId).map(e => e?.cacheId),
+  ].filter((x): x is string => typeof x === 'string' && !!x))];
+  if (!ids.length) return;
+  fetch('/api/cache/pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
+    .catch(() => { /* 다음에 받을 때 다시 */ });
 }
 
 // The key an @mention actually resolves on. Paste-to-mention matches a typed name against
@@ -1984,6 +2037,8 @@ export const useAppStore = create<AppState>()(
       currentProjectId: null,
       autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
+      embedSettings: true,
+      setEmbedSettings: (v) => set({ embedSettings: v }),
       billingProjectKey: '',
       billingProjects: [],
       trackerReachable: null,
@@ -2682,6 +2737,7 @@ export const useAppStore = create<AppState>()(
         projects: state.projects,
         currentProjectId: state.currentProjectId,
         autoDownload: state.autoDownload,
+        embedSettings: state.embedSettings,
         assetCollections: state.assetCollections,
         projectGroups: state.projectGroups,
         projectCollectionId: state.projectCollectionId,

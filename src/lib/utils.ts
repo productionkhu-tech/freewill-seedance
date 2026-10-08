@@ -706,7 +706,9 @@ export function clearBlobCache() {
 // where main writes the file itself). The Electron download path can't know it here —
 // the file isn't written yet — so it returns '' and the caller picks the path up from
 // the 'download-done' event instead.
-export async function downloadViaProxy(remoteUrl: string, filename: string): Promise<string> {
+// meta(26.10.801~): 받은 영상 끝에 넣을 생성 설정(src/lib/settings-box.ts). 앱(Electron)에서만 넣는다 — main 이 파일을
+// 다 쓴 뒤 붙인다. 브라우저 실행은 브라우저가 파일을 쓰므로 넣을 수 없다.
+export async function downloadViaProxy(remoteUrl: string, filename: string, meta?: unknown): Promise<string> {
   // Fast path: serve from in-memory blob (instant, no CDN round-trip)
   const cached = blobCache.get(remoteUrl);
   if (cached) {
@@ -717,7 +719,7 @@ export async function downloadViaProxy(remoteUrl: string, filename: string): Pro
     if (api?.saveBlob) {
       try {
         const buffer = await cached.arrayBuffer();
-        const r = await api.saveBlob({ filename, buffer });
+        const r = await api.saveBlob({ filename, buffer, meta });
         if (r?.ok) {
           window.dispatchEvent(new CustomEvent('seedance:download-instant', { detail: { filename, size: cached.size } }));
           return r.path || '';
@@ -762,7 +764,7 @@ export async function downloadViaProxy(remoteUrl: string, filename: string): Pro
     // process's pendingDownloads map, so the local URL needs no Content-Disposition.
     const target = localUrl
       || `${location.origin}/api/download?url=${encodeURIComponent(remoteUrl)}&filename=${encodeURIComponent(filename)}`;
-    await api.download({ url: target, filename });
+    await api.download({ url: target, filename, meta });
     return ''; // path arrives later via 'download-done'
   }
   // Browser/dev fallback

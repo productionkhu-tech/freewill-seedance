@@ -25,6 +25,7 @@ import {
   putPoster, presignPoster, hasPoster,
   presignPreview, previewState,
   lastNcpError, resetNcpBackoff,
+  initC2paIndex, taskIdForC2pa,
 } from './ncp';
 
 dotenv.config();
@@ -365,10 +366,13 @@ async function startServer() {
     'media-index.json',
     'ncp-archive-queue.json',
     'ncp-archive-dead.json',
+    // 영상 안 C2PA 고유번호 → taskId(26.10.801~, ncp.ts). 영상 사본이 30일 뒤 지워져도 이름 바꾼 옛 영상을 찾는 단서.
+    'c2pa-index.json',
   ]);
 
   initNcpIndex(CACHE_DIR);
   initNcpQueue(CACHE_DIR);
+  initC2paIndex(CACHE_DIR);
 
   // ★ NCP 는 R2 와 같은 급의 필수 의존성으로 취급한다 — 없으면 앱이 켜지지 않는다.
   //
@@ -807,6 +811,10 @@ async function startServer() {
   const BACKUP_LIB_DIR = path.join(BACKUP_DIR, 'element-library');
   const BACKUP_LIB_PREVIEW_DIR = path.join(BACKUP_LIB_DIR, 'preview');
   const LIB_ID = /^[0-9a-f]{12}\.[a-z0-9]{2,5}$/;
+  // 캐시 id 모양(/api/cache 가 짓는다: 내용 해시 12자 + 원래 확장자 그대로 — '.JPG' · '.jpeg' · 확장자 없음도 있다).
+  // 받은 영상의 레퍼런스를 라이브러리 폴더에 고정(/api/cache/pin)하고 다시 찾을 때(libraryFile) 쓴다 — LIB_ID 로 거르면
+  // 대문자 · 긴 확장자 레퍼런스가 고정되지 않고 30일 뒤 지워졌다(26.10.801 검토). 폴더 구분자 · 드라이브 문자는 여전히 막는다.
+  const PIN_ID = /^[0-9a-f]{12}(\.[^\\/:*?"<>|#%\s\0]{1,16})?$/;
 
   // 머리 바이트로 형식을 정한다. 옛 어셋에는 파일 이름이 없는 것도 있고, 이름의 확장자가 틀린
   // 파일도 있다. 원본 바이트는 그대로 두고, 이름(→ 보낼 때의 Content-Type)만 실제 형식을 따른다.
@@ -839,7 +847,7 @@ async function startServer() {
   }
 
   function libraryFile(id: string): string | null {
-    if (!LIB_ID.test(id)) return null;
+    if (!PIN_ID.test(id)) return null;   // LIB_ID 를 포함한다
     const p = path.join(LIB_DIR, id);
     if (fs.existsSync(p)) return p;
     const b = path.join(BACKUP_LIB_DIR, id);
@@ -1218,6 +1226,37 @@ async function startServer() {
       }
       res.json({ ok: true, copied, present, previews, missing });
     } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // 받은 영상의 레퍼런스 원본을 30일 정리에서 뺀다(26.10.801~) — 라이브러리 폴더로 한 벌 옮겨 둔다(이름 = 내용이라 같은 이름).
+  // /api/cache/<id> 는 캐시에 없으면 라이브러리에서 찾으므로(resolveMediaFile) 주소는 그대로다. 그 영상을 30일 뒤 앱에 끌어다
+  // 놓아도 이 PC 에서는 레퍼런스까지 되살아난다(src/lib/settings-box.ts). 라이브러리 폴더는 아무도 자동으로 지우지 않는다.
+  // 같은 레퍼런스로 테이크를 여럿 받아도 한 벌이다.
+  app.post('/api/cache/pin', async (req, res) => {
+    try {
+      const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+      let pinned = 0, already = 0, gone = 0;
+      for (const id of ids) {
+        if (!PIN_ID.test(id)) continue;
+        const dst = path.join(LIB_DIR, id);
+        if (fs.existsSync(dst)) { already++; continue; }
+        const src = path.join(CACHE_DIR, id);
+        if (!fs.existsSync(src)) { gone++; continue; }
+        await copyAtomic(src, dst);
+        pinned++;
+      }
+      if (pinned) console.log(`[Cache] 받은 영상의 레퍼런스 ${pinned}개를 영구 보관${gone ? ` (이미 지워진 것 ${gone})` : ''}`);
+      res.json({ ok: true, pinned, already, gone });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
+  // 이름을 바꾼 옛 영상 → 카드(26.10.801~). 영상 안 C2PA 고유번호로 taskId 를 찾는다(ncp.ts 'C2PA 고유번호').
+  app.get('/api/media/by-c2pa/:id', (req, res) => {
+    const id = String(req.params.id || '').toLowerCase();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) return res.status(400).json({ ok: false });
+    const taskId = taskIdForC2pa(id);
+    if (!taskId) return res.status(404).json({ ok: false });
+    res.json({ ok: true, taskId });
   });
 
   // Wipe the ENTIRE media-cache. Wired to the sidebar cleanup button — explicit

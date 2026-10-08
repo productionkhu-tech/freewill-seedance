@@ -93,10 +93,10 @@ function createWindow() {
   mainWindow.webContents.session.on('will-download', (event, item) => {
     const downloadsPath = sessionDownloadDir || app.getPath('downloads');
     const url = item.getURL();
-    const customName = pendingDownloads.get(url);
-    if (customName) pendingDownloads.delete(url);
-    const filename = customName || item.getFilename();
-    const savePath = path.join(downloadsPath, filename);
+    const pending = pendingDownloads.get(url);
+    if (pending) pendingDownloads.delete(url);
+    const filename = (pending && pending.filename) || item.getFilename();
+    const savePath = path.join(downloadsPath, safeFileName(filename));   // 알림에는 받은 이름 그대로 — 렌더러가 그 이름으로 짝짓는다
     item.setSavePath(savePath);
 
     try { mainWindow?.webContents.send('download-started', { filename }); } catch {}
@@ -104,6 +104,8 @@ function createWindow() {
       try { mainWindow?.webContents.send('download-progress', { filename, received: item.getReceivedBytes(), total: item.getTotalBytes(), state }); } catch {}
     });
     item.on('done', (_e, state) => {
+      // 다 받았으면 '다 받음' 을 알리기 전에 생성 설정을 붙인다 — 알린 뒤에 붙이면 그 사이 파일을 연 사람은 설정 없는 영상을 본다.
+      if (state === 'completed' && pending && pending.meta) embedSettings(savePath, pending.meta);
       // savePath rides along so the renderer can offer "폴더에서 보기" later. The
       // download folder is a session-only override, so resolving the path at click
       // time would break for anything downloaded before the folder was changed.
@@ -369,6 +371,15 @@ function setupAutoUpdater() {
 // restart always returns to the default. Used by will-download + save-blob.
 let sessionDownloadDir = null;
 
+// 저장할 파일 이름 — 렌더러가 준 이름에서 폴더 부분과 윈도우가 못 쓰는 글자를 뺀다(26.10.801 검토: '..\' 가 섞이면 받는 폴더
+// 밖에 쓸 수 있었고, ':' 는 NTFS 에서 숨은 스트림이 된다). 지금 이름은 태스크 ID 라 바뀌는 일이 없다 — 막는 것은 이상한 이름이다.
+function safeFileName(name) {
+  let s = path.basename(String(name || '').replace(/\\/g, '/'));
+  s = s.replace(/[<>:"|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i.test(s)) s = '_' + s;
+  return s.slice(-200) || 'download';
+}
+
 ipcMain.handle('get-download-dir', async () => {
   return {
     dir: sessionDownloadDir || app.getPath('downloads'),
@@ -397,23 +408,92 @@ ipcMain.handle('pick-download-dir', async () => {
 // Write an in-memory blob (blobCache fast-path download) straight to the
 // session download folder. Without this, blobCache hits would go to the
 // browser's default folder via <a download>, bypassing the chosen folder.
-ipcMain.handle('save-blob', async (_e, { filename, buffer }) => {
+ipcMain.handle('save-blob', async (_e, { filename, buffer, meta }) => {
   try {
     const dir = sessionDownloadDir || app.getPath('downloads');
-    const savePath = path.join(dir, filename);
+    const savePath = path.join(dir, safeFileName(filename));
     fs.writeFileSync(savePath, Buffer.from(buffer));
+    // 받은 영상이면 생성 설정을 넣는다(아래 '받은 영상에 생성 설정 넣기').
+    if (meta) embedSettings(savePath, meta);
     return { ok: true, path: savePath };
   } catch (err) {
     return { ok: false, error: err.message };
   }
 });
 
+// ─── 받은 영상에 생성 설정 넣기 (26.10.801~) ───
+// ComfyUI 가 PNG 에 워크플로를 넣듯, 앱에서 받은 영상 끝에 그 영상을 만든 설정을 넣는다 — 맨 끝 top-level free 상자
+// [크기 4][free][FWSD][판 1바이트 = 2][IV 12][암호문 + 태그 16]. 모양 · 읽는 쪽은 src/lib/settings-box.ts.
+// ★ 탐색기에는 아무것도 안 보인다(사용자 결정 2026-10-08 — 광고주에게 영상을 넘기면 프롬프트 · 설정이 다 보이는 건 보안상
+//   안 된다). 그래서 탐색기 칸(ilst ©nam · ©cmt, Xtra 태그)은 쓰지 않고, 상자 안 JSON 도 이 앱만 아는 열쇠로 AES-256-GCM 암호화한다
+//   — 메모장 · 헥스 뷰어 · 일반 메타데이터 도구로는 안 읽히고, 이 앱에 끌어다 놓아야 보인다. (앱을 뜯어 열쇠를 꺼내는 사람까지
+//   막지는 못한다 — 막으려는 것은 받는 쪽이 우연히 · 손쉽게 보는 것이다.)
+// moov · mdat 은 한 바이트도 안 건드리고 끝에 붙이기만 한다 — BytePlus · 구글 영상의 C2PA 증명서(AI 생성 표시)도 그대로 유효하다
+// (c2patool 실측: 끝의 free 상자는 증명서 지문에서 빠지는 칸). 이미 우리 상자가 끝에 있으면(다시 받기) 그것만 바꾼다.
+// top-level 상자가 처음부터 끝까지 맞아떨어지는 영상에만 손댄다 — 덜 받았거나 다른 형식이면 그대로 둔다.
+const BMFF_TOP = new Set(['ftyp', 'wide', 'free', 'skip', 'mdat', 'moov', 'uuid', 'pnot', 'meta', 'moof', 'mfra', 'sidx', 'styp', 'pdin']);
+const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+const mkBox = (type, ...parts) => { const body = Buffer.concat(parts); return Buffer.concat([u32(8 + body.length), Buffer.from(type, 'latin1'), body]); };
+// 열쇠는 src/lib/settings-box.ts 의 SETTINGS_KEY_HEX 와 같아야 한다(바꾸면 그 전에 받은 영상은 못 읽는다).
+const SETTINGS_KEY = Buffer.from('1a124b2cd9f9effdd942e3f8dc661d9f77c6ce9ec23bbf51d881a2e210ef226a', 'hex');
+const SETTINGS_BOX_VERSION = 2;   // 1 = 암호화 전 시험판(평문 JSON, 배포된 적 없음) · 2 = AES-256-GCM
+function settingsBox(meta) {
+  const iv = require('crypto').randomBytes(12);
+  const c = require('crypto').createCipheriv('aes-256-gcm', SETTINGS_KEY, iv);
+  const sealed = Buffer.concat([c.update(Buffer.from(JSON.stringify(meta), 'utf8')), c.final(), c.getAuthTag()]);   // WebCrypto 와 같은 순서(암호문 뒤에 태그)
+  return mkBox('free', Buffer.from('FWSD', 'latin1'), Buffer.from([SETTINGS_BOX_VERSION]), iv, sealed);
+}
+// 상자 목록. 처음부터 끝까지 맞아떨어지지 않으면 null. 크기 0(파일 끝까지) 상자는 toEnd 로 표시한다.
+function topBoxes(readAt, size) {
+  const out = []; let pos = 0;
+  while (pos < size) {
+    if (pos + 8 > size || out.length > 4096) return null;
+    const h = Buffer.alloc(16);
+    readAt(pos, 16).copy(h);
+    let len = h.readUInt32BE(0), hl = 8, toEnd = false;
+    const type = h.toString('latin1', 4, 8);
+    if (!BMFF_TOP.has(type)) return null;
+    if (len === 1) { len = Number(h.readBigUInt64BE(8)); hl = 16; } else if (len === 0) { len = size - pos; toEnd = true; }
+    if (len < hl) return null;
+    out.push({ type, pos, len, hl, toEnd });
+    pos += len;
+  }
+  return pos === size ? out : null;
+}
+function embedSettings(filePath, meta) {
+  try {
+    const fd = fs.openSync(filePath, 'r+');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const readAt = (at, n) => { const b = Buffer.alloc(n); const r = fs.readSync(fd, b, 0, n, at); return b.subarray(0, r); };
+      const boxes = topBoxes(readAt, size);
+      if (!boxes) { console.warn('[Settings] 영상 형식이 아니라 설정을 넣지 않음:', filePath); return false; }
+      // 크기 0(파일 끝까지) 상자 뒤에 붙이면 우리 상자가 그 상자 속으로 들어가 버린다 — 그 상자가 커져 증명서도 깨지고 읽을 수도 없다.
+      if (boxes.some(b => b.toEnd)) { console.warn('[Settings] 끝까지 가는 상자가 있어 설정을 넣지 않음:', filePath); return false; }
+      // 끝에 이미 우리 상자가 있으면 그 자리부터 새로 쓴다(남의 free 상자는 그대로 둔다).
+      let cut = size;
+      for (let i = boxes.length - 1; i >= 0; i--) {
+        const b = boxes[i];
+        if (b.type !== 'free' || readAt(b.pos + b.hl, 4).toString('latin1') !== 'FWSD') break;
+        cut = b.pos;
+      }
+      const out = settingsBox(meta);
+      fs.ftruncateSync(fd, cut);
+      fs.writeSync(fd, out, 0, out.length, cut);
+      return true;
+    } finally { fs.closeSync(fd); }
+  } catch (e) {
+    console.warn('[Settings] 설정 넣기 실패:', e && e.message);
+    return false;
+  }
+}
+
 // ─── IPC: direct downloads (bypass server proxy for speed) ───
-const pendingDownloads = new Map(); // url → custom filename
-ipcMain.handle('download', async (_e, { url, filename }) => {
+const pendingDownloads = new Map(); // url → { filename, meta? } — meta 는 받은 뒤 영상 끝에 넣을 생성 설정
+ipcMain.handle('download', async (_e, { url, filename, meta }) => {
   if (!mainWindow) return { ok: false, error: 'window not ready' };
   try {
-    pendingDownloads.set(url, filename);
+    pendingDownloads.set(url, { filename, meta });
     mainWindow.webContents.downloadURL(url);
     return { ok: true };
   } catch (err) {

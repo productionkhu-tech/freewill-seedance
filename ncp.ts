@@ -219,6 +219,67 @@ function saveIndex() {
   } catch (e: any) { console.warn('[NCP] 색인 저장 실패:', e?.message); }
 }
 
+// ── 영상 안 C2PA 고유번호 → taskId (26.10.801~) ─────────────────────────────────
+// BytePlus·구글 영상에는 C2PA 증명서가 들어 있고, 그 안의 instanceID 는 파일마다 다르다(실측: 캐시 578개 중복 0, 받은
+// 파일에도 그대로). 받은 영상의 이름을 바꿔도 이 번호는 남아서, 생성 설정 상자가 없는 옛 영상을 앱에 끌어다 놓으면 이것으로
+// 카드를 찾는다(src/lib/settings-box.ts readVideoClues → GET /api/media/by-c2pa/:id). API 는 이 번호를 주지 않으므로 앱이
+// 영상 파일을 손에 쥘 때(보관 시작 · 켤 때 캐시 훑기) 읽어 적어 둔다 — 30일 뒤 사본이 지워져도 번호는 남게.
+// media-cache/c2pa-index.json — 캐시 비우기 · 30일 정리에서 빠지는 제어 파일(server.ts CONTROL_FILES).
+let C2PA_FILE = '';
+const c2paIndex = new Map<string, string>();      // instanceID → taskId
+const C2PA_ID = /instanceID[\s\S]{0,8}?(?:xmp:iid:)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
+
+export function readC2paInstanceId(file: string): string | null {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const b = Buffer.alloc(65536);
+      const n = fs.readSync(fd, b, 0, b.length, 0);
+      const s = b.toString('latin1', 0, n);
+      return s.includes('c2pa') ? (s.match(C2PA_ID)?.[1] || null) : null;
+    } finally { fs.closeSync(fd); }
+  } catch { return null; }
+}
+function saveC2pa() {
+  if (!C2PA_FILE) return;
+  try { fs.writeFileSync(C2PA_FILE, JSON.stringify(Object.fromEntries(c2paIndex))); }
+  catch (e: any) { console.warn('[C2PA] 색인 저장 실패:', e?.message); }
+}
+/** 그 영상의 고유번호를 적어 둔다. 새로 적었으면 true. */
+export function noteC2pa(taskId: string, file: string, save = true): boolean {
+  const id = readC2paInstanceId(file);
+  if (!id || c2paIndex.get(id) === taskId) return false;
+  c2paIndex.set(id, taskId);
+  if (save) saveC2pa();
+  return true;
+}
+export function taskIdForC2pa(id: string): string | null {
+  return c2paIndex.get(String(id || '').toLowerCase()) || null;
+}
+// 켤 때 한 번: 파일을 불러오고, 캐시에 있는데 아직 안 적은 영상을 훑는다(첫 실행은 수백 개 × 64KB — 1초 안팎).
+export function initC2paIndex(cacheDir: string) {
+  C2PA_FILE = path.join(cacheDir, 'c2pa-index.json');
+  c2paIndex.clear();
+  try {
+    const raw = JSON.parse(fs.readFileSync(C2PA_FILE, 'utf8')) as Record<string, string>;
+    for (const [k, v] of Object.entries(raw || {})) if (typeof v === 'string') c2paIndex.set(k, v);
+  } catch { /* 없으면 지금부터 */ }
+  setTimeout(() => {
+    try {
+      const known = new Set(c2paIndex.values());
+      const byLocal = new Map<string, string>();   // 구글 영상은 이름이 내용 해시라 색인의 local 로 taskId 를 안다
+      for (const [taskId, row] of mediaIndex) if (row.local) byLocal.set(path.basename(row.local), taskId);
+      let added = 0;
+      for (const f of fs.readdirSync(cacheDir)) {
+        const taskId = f.match(/^(cgt-\d{14}-[a-z0-9]{5})\.(mp4|mov)$/)?.[1] || (/\.(mp4|mov)$/.test(f) ? byLocal.get(f) : undefined);
+        if (!taskId || known.has(taskId)) continue;
+        if (noteC2pa(taskId, path.join(cacheDir, f), false)) added++;
+      }
+      if (added) { saveC2pa(); console.log(`[C2PA] 영상 고유번호 ${added}건 새로 적음 (모두 ${c2paIndex.size})`); }
+    } catch (e: any) { console.warn('[C2PA] 캐시 훑기 실패:', e?.message); }
+  }, 8000);
+}
+
 /**
  * 로컬 썸네일 보관 위치. media-cache 아래의 별도 폴더다.
  *
@@ -425,6 +486,8 @@ async function archiveOne(job: Job) {
       job.localPath = local;
       saveQueue();
     }
+    // 영상 안 고유번호를 적어 둔다 — 이름을 바꾼 옛 영상을 앱에 끌어다 놓았을 때 카드를 찾는 단서(위 'C2PA 고유번호').
+    noteC2pa(job.taskId, local);
 
     // 2. 올린다.
     //

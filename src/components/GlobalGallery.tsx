@@ -4,6 +4,7 @@ import { X, Star, Download, RefreshCw, FolderOpen, LayoutGrid, ArrowRight, Filte
 import { useAppStore, MODELS, groupTree, requestFindMessage, type ChatMessage } from '../store';
 import { VideoPlayer, ClipStamp, downloadClip, revealClipFile, posterSrcFor , playbackChain } from './ChatArea';
 import { formatStamp, formatStampFull } from '../lib/utils';
+import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // All-projects gallery.
@@ -273,8 +274,9 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
       dur: (r: Row) => durFilter === ALL || durKey(r.usedSettings?.duration) === durFilter,
       when: (r: Row) => r.timestamp >= since && r.timestamp <= until,
       star: (r: Row) => !starredOnly || !!r.starred,
-      draft: (r: Row) => withDrafts || !r.usedSettings?.draft,
-      q: (r: Row) => !qn || (r.promptText || '').toLowerCase().includes(qn),
+      // 태스크 ID 로 찾은 카드는 초안이어도 보인다 — 그 영상 하나를 찾는 검색이라 'Draft 포함' 을 켜라고 할 일이 아니다.
+      draft: (r: Row) => withDrafts || !r.usedSettings?.draft || taskIdMatches(r.taskId, qn),
+      q: (r: Row) => !qn || messageMatchesQuery(r, qn),   // 프롬프트 · 태스크 ID(받은 파일 이름째도) — src/lib/search-match.ts
     };
     type Dim = keyof typeof pass;
     const dims = Object.keys(pass) as Dim[];
@@ -453,7 +455,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
             <input type="text" value={query} onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Escape' && query) { e.stopPropagation(); setQuery(''); } }}
-              placeholder="프롬프트 검색..."
+              placeholder="프롬프트 · 태스크 ID 검색..."
               className="w-56 pl-8 pr-7 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all" />
             {query && (
               <button onClick={() => setQuery('')} title="검색 지우기"

@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
 import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
+import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, type ChatMessage } from '../store';
+import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
+import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
@@ -497,6 +500,9 @@ function LiveTimer({ startTime, endTime }: { startTime?: number, endTime?: numbe
 }
 
 /* ─── Helpers ─── */
+// 평문 → 작성 칸 HTML. 평문은 글자다 — '<' 가 태그가 되면 안 된다(26.10.801 검토: 받은 영상 속 글이 여기로 들어오면 그 안의
+// 스크립트가 돌 수 있었다). 알약에 넣는 값도 따옴표를 막는다.
+const escHtml = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const textToHtml = (text: string, assets: any[]) => {
   const regex = /(\[(?:Image|Video|Audio) \d+\])/g;
   const parts = text.split(regex);
@@ -507,12 +513,12 @@ const textToHtml = (text: string, assets: any[]) => {
       if (asset) {
         const thumbSrc = (asset.type === 'image_url' || asset.type === 'video_url') ? (asset.thumbnailUrl || (asset.type === 'image_url' ? asset.url : '')) : '';
         const iconHtml = thumbSrc
-          ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px;" />`
+          ? `<img src="${escHtml(thumbSrc)}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px;" />`
           : `<span style="display:inline-block;width:16px;height:16px;background:#f0f0f5;border-radius:2px;vertical-align:middle;margin-right:4px;text-align:center;line-height:16px;font-size:10px;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
-        return `<span contenteditable="false" class="mention-pill" data-name="${asset.name}" data-asset-id="${asset.id}" style="display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;">${iconHtml}<span style="font-weight:500;">[${asset.name}]</span></span>&nbsp;`;
+        return `<span contenteditable="false" class="mention-pill" data-name="${escHtml(asset.name)}" data-asset-id="${escHtml(asset.id)}" style="display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;">${iconHtml}<span style="font-weight:500;">[${escHtml(asset.name)}]</span></span>&nbsp;`;
       }
     }
-    return part;
+    return escHtml(part);
   }).join('');
 };
 
@@ -935,8 +941,15 @@ export async function downloadClip(msgId: string, videoUrl: string, taskId: stri
     // ★ 마스터를 받는다. 예전에는 생성 API 가 준 원본 URL 을 그대로 썼는데, 그 링크는
     //   약 24시간 뒤 죽어서 보관된 영상조차 다운로드가 403 으로 실패했다. 서버가
     //   로컬 사본 → NCP → 원본 순으로 내려가며 언제나 원본 화질을 준다(프록시가 아니다).
-    const masterSrc = mediaSrcFor({ videoUrl, taskId, usedSettings: { model: msgModel } as any });
-    const savedPath = await downloadViaProxy(masterSrc || videoUrl, filename);
+    // 보관 힌트(확장자 · 프로젝트)도 넘긴다 — 재생은 넘기는데 다운로드만 안 넘겨서, 이 PC 의 보관 색인이 없으면(재설치 ·
+    // AppData 정리) 서버가 .mp4 로 찾다가 2.5(.mov) 영상을 못 찾고 다운로드가 조용히 실패했다(26.10.801 격리 시험에서 발견).
+    const msg = owner.messages.find(m => m.id === msgId);
+    const masterSrc = mediaSrcFor({ videoUrl, taskId, usedSettings: { model: msgModel } as any, videoStorage: msg?.videoStorage });
+    // 받은 영상 끝에 이 영상을 만든 설정을 넣고(26.10.801~, settings-box), 레퍼런스 원본은 30일 정리에서 뺀다 — 나중에 이
+    // 파일을 앱에 끌어다 놓으면 작성 칸이 되살아난다.
+    if (msg) pinMessageReferences(msg);
+    const meta = msg ? await downloadMetaFor(msg) : undefined;
+    const savedPath = await downloadViaProxy(masterSrc || videoUrl, filename, meta);
     useAppStore.getState().updateMessage(owner.id, msgId, {
       downloadedAt: Date.now(),
       // Blob fast path knows the path immediately; otherwise the done-listener fills it.
@@ -1065,6 +1078,165 @@ const renderPromptHtml = (html: string, namedAssets: any[]): React.ReactNode[] =
 };
 
 /* ─── Collapsible prompt: 1-line truncated by default, expand/collapse + copy ─── */
+// ─── 받은 영상에서 되살리기 (26.10.801~, src/lib/settings-box.ts) ─────────────────────────
+// 받은 영상(끝에 생성 설정이 든 것)을 끌어다 놓으면 뜨는 창. 이 PC 에 그 카드가 있으면 그 카드 그대로(재사용과
+// 같다), 없으면(다른 PC · 지운 카드) 파일에 실려 온 설정으로 채운다. 설정이 없는 옛 영상은 파일 이름의 작업 번호 · 영상 안의
+// BytePlus 고유번호로 이 PC 카드를 찾고, 그것도 없으면 만든 시각이 가까운 카드를 후보로 보여 주고 고르게 한다.
+type LocalMatch = { projectId: string; projectName: string; msg: ChatMessage };
+type RestoreTarget = {
+  payload: SettingsPayload | null;
+  local: LocalMatch | null;
+  file?: File;                     // 영상이면 '레퍼런스로 붙이기' 에 쓴다
+  candidates?: LocalMatch[];       // 설정도 번호도 없을 때 — 만든 시각이 가까운 이 PC 카드
+};
+// 불러오기 직전의 작성 칸 · 레퍼런스 · 오른쪽 설정 · 컬렉션 연결 — 불러오기는 초기화부터 하므로 안내의 '되돌리기' 를 위해 둔다.
+type ComposerSnapshot = { projectId: string; promptHtml: string; assets: any[]; settings: any; collectionId: string | null };
+// 불러온 뒤 작성 칸 위에 남는 안내 — 머리 한 줄 + 앱이 대신 바꾼 것(notes)과 빠졌거나 그때와 다른 것(missing)만. 닫기를 눌러야 닫힌다.
+type RestoreReport = {
+  how: 'paste' | 'restore';
+  source: string;
+  sourceTitle: string;             // 마우스를 올리면 — 만든 시각 · 어디서 왔는지 자세히
+  notes: string[];                 // 앱이 대신 바꾼 것(컬렉션 연결) — 회색
+  missing: string[];               // 빠졌거나 그때와 다른 것 — 주황
+  local: LocalMatch | null;        // '그 카드로 가기'
+  target: RestoreTarget;           // '프롬프트만' 뒤에 '그때 설정 그대로' 로 다시 불러오기
+  snapshot: ComposerSnapshot;      // '되돌리기'
+};
+type ReportSink = { notes: string[]; missing: string[] };
+// 레퍼런스 알약 → '[Image 1]' 같은 글자('프롬프트만': 레퍼런스는 안 붙이고 번호만 남긴다). 어셋 알약은 그대로. 읽기만 하는 문서로 다룬다.
+function unpillReferences(html: string): string {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.body.querySelectorAll('.mention-pill').forEach(p => p.replaceWith(doc.createTextNode(`[${p.getAttribute('data-name') || ''}]`)));
+  return doc.body.innerHTML;
+}
+
+function SettingsRestoreDialog({ target, onPaste, onFill, onGoToCard, onAttach, onClose }: {
+  target: RestoreTarget;
+  onPaste: (pick: LocalMatch | null) => void;      // 프롬프트만(초기화 → 프롬프트 · 레퍼런스 · 어셋, 모델 · 모드만 그 영상대로)
+  onFill: (pick: LocalMatch | null) => void;       // 그때 설정 그대로(초기화 → 작성 칸 · 레퍼런스 · 모델 · 파라미터 · 컬렉션)
+  onGoToCard: (pick: LocalMatch) => void;
+  onAttach?: () => void;
+  onClose: () => void;
+}) {
+  const [pick, setPick] = useState<LocalMatch | null>(target.local);
+  const src: any = pick ? pick.msg : target.payload?.message;
+  const thumbs = pick ? {} : (target.payload?.thumbs || {});
+  const elementAssets = useAppStore(s => s.elementAssets);
+  // 레퍼런스 원본이 이 PC 에 있는가(캐시 또는 라이브러리 — 받은 영상의 것은 30일 정리에서 빠져 있다).
+  const [have, setHave] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    let alive = true;
+    const ids = ((src?.usedAssets as any[]) || []).map(a => a?.cacheId).filter(Boolean) as string[];
+    (async () => {
+      const out: Record<string, boolean> = {};
+      for (const id of ids) { try { out[id] = (await fetch(`/api/cache/${id}`, { method: 'HEAD', cache: 'no-store' })).ok; } catch { out[id] = false; } }
+      if (alive) setHave(out);
+    })();
+    return () => { alive = false; };
+  }, [src]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const when = (m: any) => m?.endTime || m?.timestamp;
+  const source = pick
+    ? `이 PC 의 카드 · ${pick.projectName} · ${when(pick.msg) ? formatStampFull(when(pick.msg)) : ''}`
+    : target.payload
+      ? `${target.payload.project.name || '이름 없는 프로젝트'}${when(src) ? ' · ' + formatStampFull(when(src)) : ''} · 이 PC 에는 이 카드가 없어요(다른 PC 이거나 지운 카드)`
+      : '설정이 들어 있지 않은 영상이에요 — 만든 시각이 가까운 이 PC 카드를 골라 주세요';
+  const named = getAssetNames(((src?.usedAssets as any[]) || []) as any);
+  // 어셋 멘션은 어셋 하나에 그림이 여러 장일 수 있다 — 어셋마다 한 줄.
+  const elements = Object.values(((src?.usedElementImages as any[]) || []).reduce((acc: Record<string, any>, e: any) => {
+    const k = e?.elementId || e?.name; if (k && !acc[k]) acc[k] = e; return acc;
+  }, {})) as any[];
+  const roleLabel = (r: string) => r === 'first_frame' ? '시작 프레임' : r === 'last_frame' ? '끝 프레임' : r === 'reference_video' ? '참조 영상' : r === 'reference_audio' ? '참조 오디오' : '참조 이미지';
+
+  return (
+    <div className="fixed inset-0 z-[90] bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-2xl w-full max-w-xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="px-5 pt-4 pb-3 border-b border-gray-100 flex items-start gap-3">
+          <div className="flex-1 min-w-0">
+            <h3 className="text-[15px] font-semibold text-gray-900">이 영상을 만든 설정</h3>
+            <p className="text-[12px] text-gray-500 mt-0.5">{source}</p>
+          </div>
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700 rounded-md" title="닫기 (Esc)"><X size={16} /></button>
+        </div>
+        <div className="px-5 py-4 overflow-y-auto space-y-4">
+          {target.candidates && target.candidates.length > 0 && (
+            <div className="space-y-1.5">
+              {target.candidates.map(c => (
+                <button key={c.msg.id} onClick={() => setPick(c)}
+                  className={`w-full text-left px-3 py-2 rounded-lg border transition-colors ${pick?.msg.id === c.msg.id ? 'border-indigo-400 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                  <div className="text-[11px] text-gray-500">{c.projectName} · {formatStampFull(when(c.msg))}</div>
+                  <div className="text-[13px] text-gray-800 truncate">{c.msg.promptText || '(프롬프트 없음)'}</div>
+                </button>
+              ))}
+            </div>
+          )}
+          {src && (
+            <>
+              {src.usedSettings && (
+                <div className="flex flex-wrap gap-1.5">
+                  {settingsTagList(src.usedSettings).map((tag, i) => (
+                    <span key={i} className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${tagTone(tag, 'bg-gray-100 text-gray-600')}`}>{tag}</span>
+                  ))}
+                </div>
+              )}
+              <div className="text-[13px] text-gray-800 whitespace-pre-wrap break-words max-h-48 overflow-y-auto bg-gray-50 rounded-lg px-3 py-2 border border-gray-100">
+                {src.promptText || '(프롬프트 없음)'}
+              </div>
+              {(named.length > 0 || elements.length > 0) && (
+                <div className="space-y-1.5">
+                  <div className="text-[12px] font-semibold text-gray-500">레퍼런스</div>
+                  {named.map((a: any, i: number) => {
+                    const ok = a.cacheId ? have[a.cacheId] : undefined;
+                    const img = a.type === 'image_url' ? thumbSrc(a.thumbnailUrl || a.url, thumbs) : '';
+                    return (
+                      <div key={'a' + i} className="flex items-center gap-2 text-[12px]">
+                        {img ? <img src={img} className="w-8 h-8 object-cover rounded border border-gray-200 shrink-0" alt="" />
+                          : <div className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center shrink-0">{a.type === 'video_url' ? <Video size={14} className="text-purple-500" /> : <Music size={14} className="text-green-500" />}</div>}
+                        <span className="font-medium text-gray-700">[{a.name}]</span>
+                        <span className="text-gray-400 truncate">{a.file_name || ''} · {roleLabel(a.role)}</span>
+                        <span className={`ml-auto shrink-0 ${ok === false ? 'text-red-500' : ok ? 'text-emerald-600' : 'text-gray-400'}`}>{ok === false ? '이 PC 에 없음' : ok ? '있음' : '확인 중'}</span>
+                      </div>
+                    );
+                  })}
+                  {elements.map((e: any, i: number) => {
+                    const ok = elementAssets.some(x => x.id === e.elementId || mentionKey(x.name) === mentionKey(e.name || ''));
+                    const img = thumbSrc(e.url, thumbs);
+                    return (
+                      <div key={'e' + i} className="flex items-center gap-2 text-[12px]">
+                        {img ? <img src={img} className="w-8 h-8 object-cover rounded border border-gray-200 shrink-0" alt="" /> : <div className="w-8 h-8 rounded bg-gray-100 shrink-0" />}
+                        <span className="font-medium text-gray-700">@{e.name}</span>
+                        <span className="text-gray-400">어셋 라이브러리</span>
+                        <span className={`ml-auto shrink-0 ${ok ? 'text-emerald-600' : 'text-red-500'}`}>{ok ? '있음' : '이 PC 에 없음'}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {src.apiPrompt && (
+                <details className="text-[12px] text-gray-500">
+                  <summary className="cursor-pointer select-none">실제로 보낸 문장</summary>
+                  <div className="mt-1 whitespace-pre-wrap break-words bg-gray-50 rounded-lg px-3 py-2 border border-gray-100 max-h-40 overflow-y-auto">{src.apiPrompt}</div>
+                </details>
+              )}
+            </>
+          )}
+        </div>
+        <div className="px-5 py-3 border-t border-gray-100 flex items-center gap-2 justify-end flex-wrap">
+          {onAttach && <button onClick={onAttach} className="px-3 py-1.5 text-[13px] font-medium text-gray-600 hover:text-indigo-600 bg-gray-50 hover:bg-indigo-50 border border-gray-200 rounded-lg">레퍼런스로 붙이기</button>}
+          {pick && <button onClick={() => onGoToCard(pick)} className="px-3 py-1.5 text-[13px] font-medium text-gray-600 hover:text-indigo-600 bg-gray-50 hover:bg-indigo-50 border border-gray-200 rounded-lg">그 카드로 가기</button>}
+          {src && <button onClick={() => onFill(pick)} title="초기화하고 작성 칸 · 레퍼런스 · 어셋 컬렉션 · 모델 · 파라미터까지 이 영상을 만든 그대로" className="px-3 py-1.5 text-[13px] font-medium text-violet-600 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-lg">그때 설정 그대로</button>}
+          {src && <button onClick={() => onPaste(pick)} title="초기화하고 프롬프트만 불러와요. 어셋 언급은 함께, 레퍼런스는 빼고(모델 · 모드는 그 영상대로)" className="px-3 py-1.5 text-[13px] font-semibold text-white bg-emerald-500 hover:bg-emerald-600 rounded-lg">프롬프트만</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText: string; promptHtml?: string; namedAssets: any[] }) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -1143,6 +1315,8 @@ export function ChatArea() {
   const [hasText, setHasText] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [dragVideo, setDragVideo] = useState(false);                       // 끄는 것에 영상이 있다 → 막이 셋으로
+  const [dropZone, setDropZone] = useState<'prompt' | 'restore' | 'attach' | null>(null);
   const [headerSearch, setHeaderSearch] = useState('');
   // 갤러리의 프롬프트 검색(26.10.203~). 채팅 검색과 따로 둔다 — 갤러리에서 '찾기' 로 채팅에 가면 그 대화의
   // 앞뒤가 보여야 하고, 갤러리로 돌아오면 검색해 둔 결과가 그대로 있어야 한다.
@@ -1180,6 +1354,12 @@ export function ChatArea() {
   // 화면 토스트는 평소처럼 뜬다 — 사용자도 왜 안 나갔는지 본다.
   const agentWarnRef = useRef<string[] | null>(null);
   const warn = (msg: string) => { agentWarnRef.current?.push(msg); showToast(msg, false); };
+  // 받은 영상에서 되살리기(26.10.801~). 작성 칸 쪽 두 칸 — '프롬프트만' · '그때 설정 그대로' — 에 놓으면 바로 채우고, 무엇을
+  // 되살렸고 무엇이 빠졌는지 작성 칸 위에 남긴다(restoreReport — 닫기를 눌러야 닫힌다). 설정이 없는 옛 영상은 창(restoreTarget).
+  const [restoreTarget, setRestoreTarget] = useState<RestoreTarget | null>(null);
+  const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
+  useEffect(() => { setRestoreReport(null); }, [currentProjectId]);   // 다른 채팅의 작성 칸 이야기다
+  const composerBoxRef = useRef<HTMLDivElement>(null);
   // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적.
   // 슬롯 id를 함께 저장해서, 슬롯이 다른 경로(피커·삭제 후 재추가·프로젝트
   // 전환)로 바뀌었으면 사이클을 버리고 무조건 first부터 다시 시작한다.
@@ -1590,7 +1770,7 @@ export function ChatArea() {
     if (q) {
       const st = useAppStore.getState();
       const m = st.projects.find(p => p.id === st.currentProjectId)?.messages.find(x => x.id === messageId);
-      if (m && !(m.promptText || '').toLowerCase().includes(q)) setHeaderSearch('');
+      if (m && !messageMatchesQuery(m, q)) setHeaderSearch('');
     }
     const t0 = Date.now();
     const attempt = () => {
@@ -1714,6 +1894,7 @@ export function ChatArea() {
   // handleSend 아래에 있고, 렌더마다 새 함수로 바꿔 끼운다 — 그래야 지금 화면의 상태(isGenerating 등)를 본다.
   const agentScreenId = useMemo(() => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, []);
   const agentBusyRef = useRef(false);   // 작업 하나를 보내는 중(작성 칸을 빌려 쓰는 중)
+  const restoreBusyRef = useRef(false); // 받은 영상을 작성 칸에 불러오는 중(26.10.801~ runRestore — 둘이 섞이지 않게)
   const lastTypedAtRef = useRef(0);     // 마지막 타자 시각 — 입력 중에는 가져가지 않는다
   const agentActiveRef = useRef(new Map<string, { projectId: string; ids: string[]; last: string }>());   // 보낸 뒤 카드 상태를 올리는 작업
   const agentTickRef = useRef<() => Promise<void>>(async () => {});
@@ -1771,8 +1952,9 @@ export function ChatArea() {
     return [...assetItems, ...elementItems];
   }, [mentionableAssets, collectionElements, mentionState.query]);
 
+  // 프롬프트 글자와 태스크 ID(받은 파일 이름째 붙여 넣어도) — src/lib/search-match.ts
   const displayMessages = useMemo(() => headerSearch.trim()
-    ? project.messages.filter(m => m.promptText?.toLowerCase().includes(headerSearch.toLowerCase()))
+    ? project.messages.filter(m => messageMatchesQuery(m, headerSearch.trim().toLowerCase()))
     : project.messages, [project.messages, headerSearch]);
 
   // '여기부터 새로 생성됨' 구분선이 들어갈 자리.
@@ -1812,7 +1994,7 @@ export function ChatArea() {
   const isDraftClip = (m: any) => !!m.usedSettings?.draft;
   const galleryClips = useMemo(() => project.messages.filter(m => m.status === 'succeeded' && m.videoUrl), [project.messages]);
   const gq = gallerySearch.trim().toLowerCase();
-  const matchesGallerySearch = (m: any) => !gq || (m.promptText || '').toLowerCase().includes(gq);
+  const matchesGallerySearch = (m: any) => !gq || messageMatchesQuery(m, gq);
   // 버튼을 보일지는 검색과 상관없이 정한다 — 검색어를 치는 동안 버튼이 사라졌다 나타나면 안 된다.
   const hasDraftClips = useMemo(() => galleryClips.some(isDraftClip), [galleryClips]);
   const hasStarredClips = useMemo(() => galleryClips.some(m => m.starred), [galleryClips]);
@@ -1820,8 +2002,9 @@ export function ChatArea() {
     () => galleryClips.filter(m => isDraftClip(m) && matchesGallerySearch(m)).length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [galleryClips, gq]);
+  // 태스크 ID 로 찾은 카드는 초안이어도 보인다 — 그 영상 하나를 찾는 검색이라 'Draft 포함' 을 켜라고 할 일이 아니다.
   const galleryVideos = useMemo(() => galleryClips
-    .filter(m => withDrafts || !isDraftClip(m))
+    .filter(m => withDrafts || !isDraftClip(m) || taskIdMatches(m.taskId, gq))
     .filter(m => !starredOnly || m.starred)
     .filter(matchesGallerySearch)
     .sort((a, b) => b.timestamp - a.timestamp),
@@ -1829,7 +2012,7 @@ export function ChatArea() {
     [galleryClips, starredOnly, withDrafts, gq]);
   // 채택 숫자도 지금 보이는 범위(초안 포함 여부 · 검색)에 맞춘다 — 누르면 나오는 개수와 같아야 한다.
   const starredCount = useMemo(
-    () => galleryClips.filter(m => m.starred && (withDrafts || !isDraftClip(m)) && matchesGallerySearch(m)).length,
+    () => galleryClips.filter(m => m.starred && (withDrafts || !isDraftClip(m) || taskIdMatches(m.taskId, gq)) && matchesGallerySearch(m)).length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [galleryClips, withDrafts, gq]);
 
@@ -1870,9 +2053,17 @@ export function ChatArea() {
   const previewDownloadedPath = previewItem ? project.messages.find(m => m.id === previewItem.id)?.downloadedPath : undefined;
 
   /* ─── Drag & Drop ─── */
-  const handleDragEnter = (e: React.DragEvent) => { e.preventDefault(); dragCounter.current += 1; if (e.dataTransfer.items?.length) setIsDragging(true); };
+  // 영상을 끌어오면(26.10.801~) 막이 둘로 나뉜다 — 작성 칸 자리 '프롬프트 불러오기' · 나머지 '레퍼런스로 첨부'.
+  // 끄는 동안에는 파일 내용을 못 읽고 형식(type)만 보인다 — 그 영상에 설정이 있는지는 놓은 뒤에 안다.
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault(); dragCounter.current += 1;
+    if (e.dataTransfer.items?.length) {
+      setIsDragging(true);
+      setDragVideo([...e.dataTransfer.items].some(it => it.kind === 'file' && /^video\//.test(it.type)));
+    }
+  };
   const handleDragOver = (e: React.DragEvent) => e.preventDefault();
-  const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); dragCounter.current -= 1; if (dragCounter.current === 0) setIsDragging(false); };
+  const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); dragCounter.current -= 1; if (dragCounter.current === 0) { setIsDragging(false); setDropZone(null); } };
 
   // 파일 붙이기 — 드래그와 에이전트 작업함(경로로 받은 파일)이 같이 쓴다. 규칙이 갈라지지 않게 한 곳에 둔다.
   // 모델·모드는 파일마다 스토어에서 새로 읽는다. 에이전트는 설정을 바꾼 바로 그 틱에(렌더 전에) 붙이기 때문이다 —
@@ -2061,21 +2252,246 @@ export function ChatArea() {
     return rejected;
   };
 
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault(); dragCounter.current = 0; setIsDragging(false);
-    const mode = project.settings.mode;
-    const allFiles = Array.from(e.dataTransfer.files) as File[];
-    if (allFiles.length === 0) return;
-    // Seedance-only guard: for Omni the stale `mode` is irrelevant (Omni routes by omniTask
-    // in attachFiles). After 초기화 mode resets to 'text_to_video', which would otherwise
-    // wrongly block an Omni Edit/Reference drop with a "Text to Video" message.
-    if (!isOmni && mode === 'text_to_video') {
-      warn('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
+  // ─── 받은 영상에서 되살리기 (26.10.801~) ───
+  const findLocalByTask = (taskId?: string): LocalMatch | null => {
+    if (!taskId) return null;
+    for (const p of useAppStore.getState().projects) {
+      const m = p.messages.find(x => x.taskId === taskId && x.status === 'succeeded');
+      if (m) return { projectId: p.id, projectName: p.name, msg: m };
+    }
+    return null;
+  };
+  // 끌어다 놓은 파일이 '설정이 있는 영상 · 이 PC 카드를 찾을 수 있는 옛 영상' 인가.
+  const inspectDroppedFile = async (file: File): Promise<RestoreTarget | null> => {
+    const isVideo = /^video\//.test(file.type) || /\.(mp4|mov|m4v)$/i.test(file.name);
+    if (!isVideo) return null;
+    const payload = await readSettingsFromFile(file).catch(() => null);
+    if (payload) return { payload, local: findLocalByTask(payload.taskId), file };
+    // 설정이 없는 영상(이 기능 전에 받은 것): 파일 이름의 작업 번호 → 영상 안 BytePlus 고유번호(앱이 받을 때 적어 둔다).
+    const clues = await readVideoClues(file);
+    let local = findLocalByTask(clues.taskId);
+    if (!local && clues.c2paId) {
+      const r = await fetch(`/api/media/by-c2pa/${clues.c2paId}`).then(x => (x.ok ? x.json() : null)).catch(() => null);
+      local = findLocalByTask(r?.taskId);
+    }
+    if (local) return { payload: null, local, file };
+    if (!clues.madeAt) return null;
+    // 마지막으로 만든 시각(증명서)이 가까운 카드 — 같이 돌린 영상은 몇 초 차이로 끝나서 하나로 정하지 않고 고르게 한다
+    // (실측: 시각만으로는 405개 중 25개만 하나로 좁혀졌다).
+    const near: (LocalMatch & { d: number })[] = [];
+    for (const p of useAppStore.getState().projects) for (const m of p.messages) {
+      if (m.status !== 'succeeded' || !m.endTime) continue;
+      const d = Math.abs(m.endTime - clues.madeAt);
+      if (d <= 10 * 60 * 1000) near.push({ projectId: p.id, projectName: p.name, msg: m, d });
+    }
+    near.sort((a, b) => a.d - b.d);
+    return near.length ? { payload: null, local: null, file, candidates: near.slice(0, 4) } : null;
+  };
+  // 안내의 머리 — 어디서 불러왔나(짧게. 만든 시각 · 자세한 설명은 마우스를 올리면).
+  const reportSource = (t: RestoreTarget, pick: LocalMatch | null): { source: string; sourceTitle: string } => {
+    const when = (m: any) => m?.endTime || m?.timestamp;
+    const at = (m: any) => (when(m) ? ` · ${formatStampFull(when(m))}` : '');
+    if (pick) return { source: `${pick.projectName} 카드`, sourceTitle: `이 PC 의 카드 · ${pick.projectName}${at(pick.msg)}` };
+    const m = t.payload?.message;
+    const name = t.payload?.project.name || '이름 없는 프로젝트';
+    return { source: `영상 속 설정 · ${name}`, sourceTitle: `이 PC 에 그 카드가 없어 영상에 든 설정으로 불러왔어요 · ${name}${at(m)}` };
+  };
+  // 불러오기 전의 작성 칸 · 레퍼런스 · 오른쪽 설정 · 컬렉션 연결 — 안내의 '되돌리기' 가 되돌린다(잘못 놓아도 쓰던 글이 안 사라지게).
+  const takeSnapshot = (pid: string): ComposerSnapshot => {
+    const st = useAppStore.getState();
+    const p = st.projects.find(x => x.id === pid);
+    return { projectId: pid, promptHtml: contentEditableRef.current?.innerHTML || '', assets: p?.assets || [], settings: { ...(p?.settings || {}) }, collectionId: st.projectCollectionId[pid] || null };
+  };
+  // 오른쪽 패널의 '초기화' 와 같다 — 설정을 기본값으로(keep 만 남기고), 레퍼런스를 비우고, 작성 칸을 비운다. 받은 영상을 불러올 때는
+  // 언제나 여기서 시작한다(사용자 2026-10-08: 쓰던 글 · 레퍼런스 · 설정이 남은 채 섞이면 안 된다).
+  const resetComposer = (pid: string, keep: Record<string, any>) => {
+    const st = useAppStore.getState();
+    st.updateProjectSettings(pid, { ...defaultSettings, ...keep });
+    st.replaceAllAssets(pid, []);
+    window.dispatchEvent(new CustomEvent('seedance:reset', { detail: { projectId: pid } }));
+  };
+  // 받은 영상의 메시지 — 이 PC 카드면 그 카드, 아니면 파일 속 설정(미리보기를 먼저 라이브러리에 넣는다).
+  // ★ 파일에서 온 글은 늘 HTML 로 만들어 거른다 — promptHtml 이 없으면 평문을 글자 그대로(태그가 되지 않게) 짓는다. 평문을 그대로
+  //   넘기면 handleReuse 가 작성 칸에 HTML 로 넣는다(26.10.801 검토: 조작한 파일의 스크립트가 거기서 돌 수 있었다).
+  const sourceMessage = async (t: RestoreTarget, pick: LocalMatch | null): Promise<any | null> => {
+    if (pick) return pick.msg;
+    if (!t.payload) return null;
+    await storePayloadThumbs(t.payload.thumbs);   // 칩 · 레퍼런스 미리보기 — 이름이 곧 내용이라 같은 주소로 살아난다
+    const m = t.payload.message;
+    return { ...m, promptHtml: sanitizePromptHtml(m.promptHtml || plainTextToHtml(m.promptText || '')) };
+  };
+  // 그때 이 채팅에 연결돼 있던 어셋 컬렉션과 이 PC 의 그 컬렉션(다른 PC 에서 온 것은 id 가 달라 같은 이름으로).
+  const findUsedCollection = (msg: any, fromFile: boolean) => {
+    const want: { id: string; name: string } | undefined = fromFile ? msg.usedCollection : usedCollectionOf(msg);
+    if (!want) return { want: undefined, found: undefined };
+    const st = useAppStore.getState();
+    const found = st.assetCollections.find(x => x.id === want.id) || (fromFile ? st.assetCollections.find(x => x.name === want.name) : undefined);
+    return { want, found };
+  };
+  // 아는 모델인가 — 없어진 모델은 이어받는 모델로, 모르는 모델 id(파일에서 온 것)는 쓰지 않고 지금 모델 그대로.
+  const knownModel = (raw: unknown, fallback: string): { model: string; unknown?: string } => {
+    if (typeof raw !== 'string' || !raw) return { model: fallback };
+    const m = resolveModelId(raw);
+    return MODELS.some(x => x.id === m) ? { model: m } : { model: fallback, unknown: raw };
+  };
+  // 지금 고른 과금 프로젝트로 그 모델을 쓸 수 있는가(과금 프로젝트는 사람이 고른다 — 안 골랐으면 보낼 때 묻는다).
+  const checkModelAllowed = (pid: string, sink: ReportSink) => {
+    const st = useAppStore.getState();
+    const model = st.projects.find(p => p.id === pid)?.settings.model;
+    const bill = selectedBillingProject(st);
+    if (model && bill && !isModelAllowed(model, { billingProjectKey: bill.key, billingProjects: st.billingProjects })) {
+      sink.missing.push(`과금 프로젝트 '${bill.project}' 에 ${MODELS.find(m => m.id === model)?.name || model} 권한 없음`);
+    }
+  };
+  // '그때 설정 그대로' — 초기화한 뒤 작성 칸 · 레퍼런스 · 어셋(그때 연결한 컬렉션까지) · 모델 · 파라미터를 그 영상을 만든 그대로.
+  const restoreAll = async (pid: string, msg: any, fromFile: boolean, sink: ReportSink, before: ComposerSnapshot) => {
+    const { want, found } = findUsedCollection(msg, fromFile);
+    if (want && !found) sink.missing.push(`어셋 컬렉션 '${want.name}' 없음(지워졌거나 다른 PC 것)`);
+    if (found) {
+      const st = useAppStore.getState();
+      const prev = st.assetCollections.find(x => x.id === st.projectCollectionId[pid]);
+      if (prev?.id !== found.id) {
+        st.setProjectCollection(pid, found.id);
+        sink.notes.push(`어셋 컬렉션을 '${found.name}' 로 연결했어요${prev ? ` (전: ${prev.name})` : ''}`);
+      }
+    }
+    const km = knownModel(msg.usedSettings?.model, before.settings.model);
+    if (km.unknown) sink.missing.push(`모르는 모델(${km.unknown}) — 지금 모델로 두었어요`);
+    resetComposer(pid, { model: km.model });
+    await handleReuse(km.unknown ? { ...msg, usedSettings: { ...msg.usedSettings, model: km.model } } : msg,
+      { fromFile, report: sink, collectionId: found?.id });
+  };
+  // '프롬프트만' — 초기화한 뒤 그 영상의 프롬프트만. 어셋 언급은 이 PC 라이브러리 어셋에 묶어 함께 오고, 레퍼런스는 붙이지 않는다 —
+  // 알약은 '[Image 1]' 같은 글자로 남아 새로 붙이는 레퍼런스의 순서를 가리킨다(BytePlus 는 [Image N] 을 패널 순서로 읽는다).
+  // 사용자: "프롬프트만 가져오기 했는데 래퍼런스도 다 오는데 … 설정 그대로도 같은 내용 아님?" — 레퍼런스까지는 '그때 설정 그대로'.
+  // 모델 · 모드만 그 영상대로(어셋 언급은 레퍼런스 → 영상 · 영상 편집에서만 쓰인다), 나머지 설정은 그 조합의 기본값. 컬렉션 연결은 그대로.
+  const restorePromptOnly = async (pid: string, msg: any, fromFile: boolean, sink: ReportSink, before: ComposerSnapshot) => {
+    const us = msg.usedSettings || {};
+    const km = knownModel(us.model, before.settings.model);
+    if (km.unknown) sink.missing.push(`모르는 모델(${km.unknown}) — 지금 모델로 두었어요`);
+    const mode = (us.mode || defaultSettings.mode) as GenerationMode;
+    const keep: Record<string, any> = { model: km.model, mode, ...settingsDefaultsFor(km.model, mode) };
+    if (us.omniTask) keep.omniTask = us.omniTask;
+    resetComposer(pid, keep);
+    const refCount = Array.isArray(msg.usedAssets) ? msg.usedAssets.length : 0;
+    await handleReuse({ ...msg, promptHtml: msg.promptHtml ? unpillReferences(msg.promptHtml) : undefined, usedAssets: [], usedSettings: undefined },
+      { fromFile, report: sink, collectionId: findUsedCollection(msg, fromFile).found?.id });
+    if (refCount) sink.notes.push(`레퍼런스 ${refCount}개는 빼고 불러왔어요`);
+  };
+  // 두 칸의 공통 틀(26.10.801 검토): 하나가 끝날 때까지 다음 것을 받지 않고(두 초기화가 섞이지 않게), 시작한 채팅을 고정하고
+  // (기다리는 사이 다른 채팅으로 옮기면 거기에 섞이지 않게 — 초기화 전이면 멈추고, 뒤면 원래 채팅에 넣어 둔다), 도중에 실패하면
+  // 불러오기 전으로 되돌린다(초기화만 되고 끝나면 쓰던 글을 잃는다). 에이전트가 작성 칸을 빌려 쓰는 동안에는 받지 않는다.
+  // (restoreBusyRef 는 위 agentBusyRef 옆에 있다 — 훅은 'if (!project) return' 보다 앞이어야 한다.)
+  const runRestore = async (how: 'paste' | 'restore', t: RestoreTarget, pick: LocalMatch | null, snapshot?: ComposerSnapshot) => {
+    if (restoreBusyRef.current) { warn('앞의 영상을 불러오는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
+    if (agentBusyRef.current) { warn('에이전트가 작성 칸을 쓰는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
+    restoreBusyRef.current = true;
+    setRestoreTarget(null);
+    const pid = project.id;
+    const here = () => useAppStore.getState().currentProjectId === pid;
+    let before: ComposerSnapshot | null = null;
+    try {
+      if (showGallery) { exitGallery(); await new Promise(r => setTimeout(r, 80)); }   // 작성 칸이 다시 그려진 뒤에 채운다
+      const msg = await sourceMessage(t, pick);
+      if (!msg) return;
+      if (!here()) { warn('다른 채팅으로 옮겨서 불러오기를 멈췄어요'); return; }
+      before = snapshot || takeSnapshot(pid);
+      const sink: ReportSink = { notes: [], missing: [] };
+      if (how === 'restore') await restoreAll(pid, msg, !pick, sink, before);
+      else await restorePromptOnly(pid, msg, !pick, sink, before);
+      checkModelAllowed(pid, sink);
+      if (!here()) { showToast('다른 채팅으로 옮겨서, 불러온 내용은 원래 채팅에 넣어 뒀어요', true); return; }
+      setRestoreReport({ how, ...reportSource(t, pick), notes: sink.notes, missing: sink.missing, local: pick, target: t, snapshot: before });
+    } catch (e: any) {
+      console.warn('[Restore] 불러오기 실패:', e);
+      if (before) undoRestore(before, true);
+      warn(`영상을 불러오다 멈췄어요 — 불러오기 전으로 돌려놨어요.\n${e?.message || e}`);
+    } finally {
+      restoreBusyRef.current = false;
+    }
+  };
+  const applyRestore = (t: RestoreTarget, pick: LocalMatch | null, snapshot?: ComposerSnapshot) => runRestore('restore', t, pick, snapshot);
+  const pasteFrom = (t: RestoreTarget, pick: LocalMatch | null, snapshot?: ComposerSnapshot) => runRestore('paste', t, pick, snapshot);
+  // 안내의 '되돌리기' — 불러오기 직전의 작성 칸 · 레퍼런스 · 오른쪽 설정 · 컬렉션 연결로. 에이전트 작업이 작성 칸을 돌려주는 것과
+  // 같은 방식이다(agentBorrow): 레퍼런스는 다시 찾지 않고 그대로 넣고(주소만 있는 레퍼런스도 되돌아온다), 알약은 이름으로 다시 묶는다.
+  const undoRestore = (snap: ComposerSnapshot, quiet = false) => {
+    setRestoreReport(null);
+    const st = useAppStore.getState();
+    const pid = snap.projectId;
+    st.setProjectCollection(pid, snap.collectionId);
+    const now = st.projects.find(p => p.id === pid)?.settings || {};
+    const restore: Record<string, unknown> = { ...snap.settings };
+    for (const k of Object.keys(now)) if (!(k in snap.settings)) restore[k] = undefined;   // 새로 생긴 키는 비운다 — 합치기라서
+    st.updateProjectSettings(pid, restore as Partial<GenerationSettings>);
+    st.replaceAllAssets(pid, snap.assets.map(({ id: _id, ...rest }: any) => rest));
+    const html = rebindMentionPills(snap.promptHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
+    if (useAppStore.getState().currentProjectId === pid && contentEditableRef.current) {
+      contentEditableRef.current.innerHTML = html;
+      setHasText(!!contentEditableRef.current.innerText.trim());
+      syncMentionCount();
+    }
+    useAppStore.getState().updateDraftPrompt(pid, html);
+    if (!quiet) showToast('불러오기 전으로 되돌렸어요', true);
+  };
+  // 이름으로 어셋 찾기 — 그때 컬렉션 · 지금 이 채팅 컬렉션의 것을 먼저(같은 이름이 여러 컬렉션에 있을 수 있다).
+  const findElementByName = (nm: string, prefer: (string | undefined)[]) => {
+    const lib = useAppStore.getState().elementAssets;
+    const key = mentionKey(nm);
+    for (const cid of prefer) if (cid) { const e = lib.find(x => x.collectionId === cid && mentionKey(x.name) === key); if (e) return e; }
+    return lib.find(x => mentionKey(x.name) === key) || null;
+  };
+  // 그 어셋의 그림이 그때와 같은가 — 내용 해시 앞 12자로 비교한다(이름이 곧 내용이라 다른 PC 것도 비교된다). 확장자는 보지 않는다 —
+  // 26.7~26.9 카드는 cacheId 에 원래 확장자(.jpeg · .JPG)를, 지금 어셋은 libId 에 알아낸 확장자(.jpg)를 적어서 같은 그림이 달라 보였다.
+  const elementImagesChanged = (msg: any, el: { id: string; name: string; images: any[] }, oldId: string | null, oldName: string): boolean => {
+    const key = (x: any) => String(x?.libId || x?.cacheId || '').slice(0, 12);
+    const then = ((msg.usedElementImages as any[]) || [])
+      .filter(x => x && (x.elementId === oldId || mentionKey(x.name || '') === mentionKey(oldName)))
+      .map(key).filter(Boolean);
+    if (!then.length) return false;
+    const now = el.images.map(key).filter(Boolean);
+    return then.length !== now.length || then.some((x: string) => !now.includes(x));
+  };
+  // 작성 칸 쪽 두 칸('프롬프트만' · '그때 설정 그대로')에 놓은 영상.
+  const loadPromptFromFile = async (file: File, how: 'paste' | 'restore') => {
+    if (restoreBusyRef.current) { warn('앞의 영상을 불러오는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
+    if (agentBusyRef.current) { warn('에이전트가 작성 칸을 쓰는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
+    const t = await inspectDroppedFile(file).catch(() => null);
+    if (!t) {
+      warn('이 영상에는 불러올 설정이 없어요.\n이 앱에서 받은 영상이 아니거나, 카톡처럼 다시 압축되면서 정보가 지워진 영상이에요.');
       return;
     }
+    if (!t.payload && !t.local) { setRestoreTarget(t); return; }   // 시각이 가까운 후보 — 창에서 골라 붙인다
+    await (how === 'restore' ? applyRestore(t, t.local) : pasteFrom(t, t.local));
+  };
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault(); dragCounter.current = 0; setIsDragging(false); setDropZone(null);
+    const allFiles = Array.from(e.dataTransfer.files) as File[];
+    if (allFiles.length === 0) return;
+    // 영상을 끌어오면 막이 셋으로 나뉜다(아래 isDragging 막) — 작성 칸 쪽 '프롬프트만' · '그때 설정 그대로', 나머지 '레퍼런스로 첨부'.
+    const zone = (e.target as HTMLElement)?.closest?.('[data-drop-zone]')?.getAttribute('data-drop-zone');
+    const isVideo = (f: File) => /^video\//.test(f.type) || /\.(mp4|mov|m4v)$/i.test(f.name);
 
     (async () => {
-      const rejected = await attachFiles(allFiles);
+      const toAttach: File[] = [];
+      let loaded = false;
+      for (const f of allFiles) {
+        // 작성 칸 쪽 두 칸 — 첫 영상 하나만 불러온다.
+        if (!loaded && (zone === 'prompt' || zone === 'restore') && isVideo(f)) {
+          loaded = true; await loadPromptFromFile(f, zone === 'restore' ? 'restore' : 'paste'); continue;
+        }
+        toAttach.push(f);
+      }
+      if (toAttach.length === 0) return;
+      // 모델 · 모드는 지금 것으로 읽는다 — 위에서 영상을 불러왔으면 그 영상대로 바뀌어 있다(26.10.801 검토).
+      const now = useAppStore.getState().projects.find(p => p.id === project.id)?.settings || project.settings;
+      // Seedance-only guard: for Omni the stale `mode` is irrelevant (Omni routes by omniTask
+      // in attachFiles). After 초기화 mode resets to 'text_to_video', which would otherwise
+      // wrongly block an Omni Edit/Reference drop with a "Text to Video" message.
+      if (modelProvider(now.model) !== 'gemini' && now.mode === 'text_to_video') {
+        warn('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
+        return;
+      }
+      const rejected = await attachFiles(toAttach);
       if (rejected.length > 0) warn(`일부 파일이 추가되지 않았습니다:\n\n${rejected.join('\n')}`);
     })();
   };
@@ -2507,10 +2923,19 @@ export function ChatArea() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
-  const handleReuse = async (msg: any): Promise<boolean> => {
+  // opts.fromFile(26.10.801~): 끌어다 놓은 받은 영상에서 온 메시지 — 다른 PC 것일 수 있다. 어셋 멘션을 id 대신
+  // 이름으로도 찾고(그때 컬렉션 opts.collectionId 의 것을 먼저), 이 PC 에 없는 어셋은 지우지 않고 '@이름' 글자로 남긴다.
+  // opts.report: 받은 영상에서 불러올 때 — 결과를 토스트 대신 작성 칸 위 안내에 모은다.
+  const handleReuse = async (msg: any, opts?: { fromFile?: boolean; report?: ReportSink; collectionId?: string }): Promise<boolean> => {
+    const report = opts?.report;
+    const say = (m: string) => { if (report) report.missing.push(m); else warn(m); };
     // Returns false if any reference asset could not be restored (already alerted).
     // 재사용 ignores the return; 재생성 uses it to abort before sending.
     let assetsOk = true;
+    // 카드의 레퍼런스 이름(Image 2 …) → 되살린 레퍼런스. 하나라도 못 되살리면 뒤 번호가 당겨진다(Image 3 이 Image 2 가 된다).
+    // 그래서 알약을 이름이 아니라 이 표로 묶는다 — 예전에는 이름으로 묶어서 [Image 2] 알약이 원래의 Image 3 을 가리켰고
+    // 빠진 것도 모른 채 다른 그림으로 보냈다(26.10.801 고침). 못 되살린 레퍼런스의 알약은 '[빠진 레퍼런스: 이름]' 글자가 된다.
+    const pillMap = new Map<string, { ok: true; index: number } | { ok: false; label: string }>();
     // Past messages keep the model they were generated on, and one of those (the 2.5 demo)
     // no longer exists. Reusing such a card would restore a dead id into the live settings
     // and the send would 400 — map it forward here, the same way hydration does for the
@@ -2535,6 +2960,9 @@ export function ChatArea() {
         // 값을 비워 두면 Draft 이전에 1080p 로 만든 카드를 재생성해도 480p Draft 가 나간다.
         draft: !!msg.usedSettings.draft,
       });
+      if (report && targetModel && msg.usedSettings.model && targetModel !== msg.usedSettings.model) {
+        report.missing.push(`그때 모델은 없어져서 ${MODELS.find(m => m.id === targetModel)?.name || targetModel} 로 바꿨어요`);
+      }
     }
     if (msg.usedAssets) {
       // Build the full restored list FIRST, then commit in one atomic store call.
@@ -2542,8 +2970,12 @@ export function ChatArea() {
       // with re-renders or any double-invocation pattern and produce duplicates.
       const restored: any[] = [];
       const failures: string[] = [];
-      for (const a of msg.usedAssets) {
+      const failedNames: string[] = [];   // 안내(report)에는 이름만
+      const oldNamed = getAssetNames(msg.usedAssets);
+      for (const [i, a] of (msg.usedAssets as any[]).entries()) {
         const label = a.file_name || a.type.replace('_url', '');
+        const oldName = oldNamed[i]?.name;
+        const before = restored.length;
         // strip snapshot id — replaceAllAssets assigns fresh ones
         const { id, ...rest } = a;
         let recovered = false;
@@ -2587,40 +3019,68 @@ export function ChatArea() {
         } else if (!recovered && a.originalPath) {
           // catch above already pushed the failure
         } else if (!recovered) {
-          failures.push(`${label}: 복원 실패`);
+          failures.push(opts?.fromFile ? `${label}: 이 PC 에 원본이 없음` : `${label}: 복원 실패`);
         }
+        if (oldName) pillMap.set(oldName, recovered ? { ok: true, index: before } : { ok: false, label });
+        if (!recovered) failedNames.push(label);
       }
       useAppStore.getState().replaceAllAssets(project.id, restored);
       if (failures.length > 0) {
         assetsOk = false;
-        warn(`일부 래퍼런스 복원 실패:\n\n${failures.join('\n')}\n\n파일을 다시 첨부해주세요.`);
+        say(report ? `레퍼런스 원본 없음: ${failedNames.join(', ')}`
+          : `일부 래퍼런스 복원 실패:\n\n${failures.join('\n')}\n\n파일을 다시 첨부해주세요.`);
       }
     }
-    if ((msg.promptHtml || msg.promptText) && contentEditableRef.current) {
+    if (msg.promptHtml || msg.promptText) {
+      // 화면 밖(box)에서 짓고 마지막에 넣는다 — 위의 기다림(캐시 확인 · 원본 다시 읽기) 사이에 사용자가 다른 채팅으로 옮겼으면 그 채팅
+      // 작성 칸이 아니라 이 채팅의 작성 중 글(draftPrompt)로 들어가야 한다(26.10.801 검토).
+      const box = document.createElement('div');
       // Prefer the exact innerHTML snapshot — it carries element-library mention
       // pills too, which resolve to bare names in promptText and can't be rebuilt
       // from it. Fall back to text→pill reconstruction for pre-promptHtml messages
       // (those still lose element mentions — unavoidable, the data isn't there).
-      contentEditableRef.current.innerHTML = msg.promptHtml
+      box.innerHTML = msg.promptHtml
         ? msg.promptHtml
         : textToHtml(msg.promptText, getAssetNames(msg.usedAssets || []));
-      // Panel pills: re-bind data-asset-id by name — replaceAllAssets just gave the
-      // restored assets fresh ids, so the snapshot's ids are stale.
+      // Panel pills: re-bind data-asset-id — replaceAllAssets just gave the restored assets
+      // fresh ids, so the snapshot's ids are stale. 되살린 순서(pillMap)로 묶고, 번호가 당겨졌으면 알약 글자도 지금 이름으로.
       const freshAssets = getAssetNames(useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []);
-      contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
-        const name = pill.getAttribute('data-name');
-        const match = freshAssets.find(a => a.name === name);
-        if (match) pill.setAttribute('data-asset-id', match.id);
-        else pill.removeAttribute('data-asset-id');
+      box.querySelectorAll('.mention-pill').forEach(pill => {
+        const name = pill.getAttribute('data-name') || '';
+        const hit = pillMap.get(name);
+        if (hit && hit.ok === false) { pill.replaceWith(document.createTextNode(`[빠진 레퍼런스: ${hit.label}]`)); return; }
+        const match = hit && hit.ok === true ? freshAssets[hit.index] : freshAssets.find(a => a.name === name);
+        if (!match) { pill.removeAttribute('data-asset-id'); return; }
+        pill.setAttribute('data-asset-id', match.id);
+        if (match.name !== name) {
+          pill.setAttribute('data-name', match.name);
+          const label = [...pill.querySelectorAll('span')].reverse().find(s => /^\[.*\]$/.test(s.textContent || ''));
+          if (label) label.textContent = `[${match.name}]`;
+        }
       });
       // Element pills: validate against the live (global) library. Drop pills whose
       // element was deleted; refresh name + thumbnail for the rest so a renamed or
       // re-imaged asset shows current state and the next send merges its images.
+      // 파일에서 온 설정(다른 PC 일 수 있다)은 id 가 이 PC 와 다르다 — 같은 이름(멘션 규칙 mentionKey)의 어셋으로 묶고,
+      // 없으면 지우지 않고 '@이름' 글자로 남긴다.
       const droppedElements: string[] = [];
-      contentEditableRef.current.querySelectorAll('.element-pill').forEach(pill => {
+      const missingByName: string[] = [];
+      const changedEls: string[] = [];
+      const elNames = new Set<string>();
+      box.querySelectorAll('.element-pill').forEach(pill => {
         const id = pill.getAttribute('data-element-id');
-        const el = id ? useAppStore.getState().elementAssets.find(e => e.id === id) : null;
-        if (!el) { droppedElements.push(pill.getAttribute('data-name') || '(이름 없음)'); pill.remove(); return; }
+        const nm = pill.getAttribute('data-name') || '';
+        elNames.add(mentionKey(nm));
+        const lib = useAppStore.getState().elementAssets;
+        let el = id ? lib.find(e => e.id === id) : null;
+        // 받은 영상에서 불러올 때(파일 · 안내)는 '그때 그대로' 를 최대한 — 같은 이름의 어셋으로도 묶고, 없으면 지우지 않고 '@이름' 글자로.
+        const keep = !!(opts?.fromFile || report);
+        const once = (list: string[]) => { if (!list.some(x => mentionKey(x) === mentionKey(nm))) list.push(nm || '(이름 없음)'); };
+        if (!el && keep && nm) el = findElementByName(nm, [opts?.collectionId, useAppStore.getState().projectCollectionId[project.id]]);
+        if (!el && keep) { once(missingByName); pill.replaceWith(document.createTextNode(`@${nm}`)); return; }
+        if (!el) { once(droppedElements); pill.remove(); return; }
+        if (report && elementImagesChanged(msg, el, id, nm) && !changedEls.includes(el.name)) changedEls.push(el.name);
+        pill.setAttribute('data-element-id', el.id);
         pill.setAttribute('data-name', el.name);
         const textSpan = pill.querySelector('span[data-el-text]');
         if (textSpan) textSpan.textContent = `[${el.name}]`;
@@ -2635,9 +3095,19 @@ export function ChatArea() {
         assetsOk = false;
         warn(`멘션한 어셋이 삭제되어 빠졌습니다:\n\n${droppedElements.join(', ')}\n\n어셋 라이브러리에서 복구하거나, 프롬프트에서 해당 멘션을 지운 뒤 다시 시도해주세요.`);
       }
-      setHasText(true);
-      syncMentionCount();
-      if (currentProjectId) useAppStore.getState().updateDraftPrompt(currentProjectId, contentEditableRef.current.innerHTML);
+      if (missingByName.length > 0) {
+        assetsOk = false;
+        say(report ? `라이브러리에 없는 어셋: ${missingByName.map(n => '@' + n).join(', ')}`
+          : `이 PC 어셋 라이브러리에 없는 어셋이라 이름만 글자로 남겼어요:\n\n${missingByName.join(', ')}\n\n어셋을 넣은 뒤 @로 다시 멘션해 주세요.`);
+      }
+      if (changedEls.length) say(`그때와 그림이 다른 어셋(지금 그림으로 보내요): ${changedEls.map(n => '@' + n).join(', ')}`);
+      const html = box.innerHTML;
+      if (useAppStore.getState().currentProjectId === project.id && contentEditableRef.current) {
+        contentEditableRef.current.innerHTML = html;
+        setHasText(!!contentEditableRef.current.innerText.trim());
+        syncMentionCount();
+      }
+      useAppStore.getState().updateDraftPrompt(project.id, html);
     }
     if (showGallery) exitGallery();
     setPreviewItem(null);
@@ -2897,7 +3367,8 @@ export function ChatArea() {
 
     // All checks passed — keep prompt/settings/assets intact for fast iteration; user manually clears if needed
 
-    const outputCount = project.settings.output_count || 1;
+    // 1~3 으로 막는다 — 설정은 받은 영상이나 에이전트 요청에서도 들어온다(26.10.801 검토: 50 이 들어오면 50번 결제된다).
+    const outputCount = Math.min(Math.max(1, Math.floor(Number(project.settings.output_count) || 1)), OUTPUT_COUNT_MAX);
     const systemMessageIds: string[] = [];
 
     // Build a snapshot of the assets at send time. Used by past message cards
@@ -2929,7 +3400,7 @@ export function ChatArea() {
       systemMessageIds.push(id);
       // 보낼 때의 프로젝트를 메시지에 굽는다. billingProjectKey 는 세션 전용이라 앱을 껐다
       // 켜면 비어 있고, 시트에서 이름이 바뀔 수도 있다 — NCP 폴더를 되찾는 힌트다.
-      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key } } as any);
+      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, usedCollection: boundCollectionOf(project.id), videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key } } as any);
     }
     setTimeout(() => scrollToBottom(), 150);
 
@@ -2995,7 +3466,7 @@ export function ChatArea() {
           if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
           const taskId = data.id || data.data?.task_id;
           if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml });
+          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, apiPrompt: apiText });
           useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
         } catch (error: any) {
           updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
@@ -3257,7 +3728,7 @@ export function ChatArea() {
 
     const settingsSnapshot = { ...s };
     try {
-      const count = s.output_count || 1;
+      const count = Math.min(Math.max(1, Math.floor(Number(s.output_count) || 1)), OUTPUT_COUNT_MAX);   // 위 Seedance 와 같이 1~3
       const ids: string[] = [];
       // 과금 프로젝트는 보낼 때 한 번 정한다(handleSend 가 이미 있는지 확인했다). 이름은 NCP 폴더,
       // id·key 는 이름이 바뀌어도 같은 프로젝트를 가리키는 값.
@@ -3265,7 +3736,7 @@ export function ChatArea() {
       const omniStorage = { project: omniBill?.project || '', projectId: omniBill?.id || '', projectKey: omniBill?.key || '' };
       for (let i = 0; i < count; i++) {
         const id = crypto.randomUUID(); ids.push(id);
-        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, videoStorage: omniStorage } as any);
+        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, apiPrompt: typeof payload?.input === 'string' ? payload.input : (payload?.input?.find?.((x: any) => x?.type === 'text')?.text ?? undefined), usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, usedCollection: boundCollectionOf(project.id), videoStorage: omniStorage } as any);
       }
       sentIds = ids;
       setTimeout(() => scrollToBottom(), 150);
@@ -3882,9 +4353,10 @@ export function ChatArea() {
     // 그대로 쓰고, 해상도만 1080p 로, 초안 표시는 끈다.
     const usedSettings = { ...us, model, resolution: DRAFT_FINAL_RESOLUTION, draft: false };
     const id = crypto.randomUUID();
+    // apiPrompt 도 초안 것 — 본편 요청은 초안 태스크만 가리키고, 모델이 본 글은 초안 때 보낸 그 글이다.
     addMessage(owner.id, { id, role: 'system', content: '본편 생성 시작... (Draft → 1080p)', status: 'queued',
-      promptText: base.promptText, promptHtml: base.promptHtml, usedSettings,
-      usedAssets: base.usedAssets, usedElementImages: base.usedElementImages,
+      promptText: base.promptText, promptHtml: base.promptHtml, apiPrompt: base.apiPrompt, usedSettings,
+      usedAssets: base.usedAssets, usedElementImages: base.usedElementImages, usedCollection: usedCollectionOf(base),
       videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key }, draftOf: draftTaskId } as any);
 
     // 다시 정할 수 있는 값은 빠뜨리면 '초안 때 값' 이 아니라 모델 기본값이 된다(문서).
@@ -3948,6 +4420,22 @@ export function ChatArea() {
   const dismissAllDownloads = () => setDownloads({});
   return (
     <div className="flex-1 flex flex-col bg-[#fafafa] dark:bg-[#242426] h-full relative min-w-0" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+      {/* 받은 영상에서 되살리기 (26.10.801~) */}
+      {restoreTarget && (
+        <SettingsRestoreDialog
+          target={restoreTarget}
+          onClose={() => setRestoreTarget(null)}
+          onPaste={(pick) => { void pasteFrom(restoreTarget, pick); }}
+          onFill={(pick) => { void applyRestore(restoreTarget, pick); }}
+          onGoToCard={(pick) => { setRestoreTarget(null); if (showGallery) exitGallery(); requestFindMessage(pick.projectId, pick.msg.id); }}
+          onAttach={restoreTarget.file ? () => {
+            const f = restoreTarget.file!;
+            setRestoreTarget(null);
+            if (!isOmni && project.settings.mode === 'text_to_video') { warn('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.'); return; }
+            void attachFiles([f]).then(rej => { if (rej.length) warn(`일부 파일이 추가되지 않았습니다:\n\n${rej.join('\n')}`); });
+          } : undefined}
+        />
+      )}
       {/* Non-blocking validation toast — replaces alert() so the prompt caret/IME stay intact */}
       <AnimatePresence>
         {toast && (
@@ -4041,11 +4529,37 @@ export function ChatArea() {
       </AnimatePresence>
 
       {/* Drag overlay */}
-      {isDragging && (
+      {isDragging && !dragVideo && (
         <div className="absolute inset-0 z-50 bg-indigo-50/90 flex flex-col items-center justify-center border-4 border-dashed border-indigo-400 m-4 rounded-2xl animate-fade-in">
           <UploadCloud size={64} className="text-indigo-500 mb-4" />
           <h2 className="text-2xl font-bold text-indigo-700">파일을 여기에 놓으세요</h2>
           <p className="text-indigo-500 mt-2">이미지 / 비디오 / 오디오 래퍼런스로 추가됩니다</p>
+        </div>
+      )}
+      {/* 영상을 끌어오면 막이 셋으로(26.10.801~): 작성 칸 쪽은 '프롬프트만' · '그때 설정 그대로', 나머지는 '레퍼런스로 첨부'.
+          어디에 놓았는지는 handleDrop 이 data-drop-zone 으로 안다. */}
+      {isDragging && dragVideo && (
+        <div className="absolute inset-0 z-50 m-4 flex flex-col gap-3 animate-fade-in">
+          <div data-drop-zone="attach" onDragOver={() => dropZone !== 'attach' && setDropZone('attach')}
+            className={`flex-1 min-h-0 rounded-2xl border-4 border-dashed flex flex-col items-center justify-center transition-colors ${dropZone === 'attach' ? 'border-indigo-500 bg-indigo-100/95' : 'border-indigo-300 bg-indigo-50/90'}`}>
+            <UploadCloud size={48} className="text-indigo-500 mb-3 pointer-events-none" />
+            <h2 className="text-xl font-bold text-indigo-700 pointer-events-none">레퍼런스로 첨부</h2>
+            <p className="text-indigo-500 mt-1 text-sm pointer-events-none">영상을 참조 영상으로 붙여요</p>
+          </div>
+          <div className="shrink-0 flex gap-3" style={{ height: Math.max(170, (composerBoxRef.current?.offsetHeight || 0) + 40) }}>
+            <div data-drop-zone="prompt" onDragOver={() => dropZone !== 'prompt' && setDropZone('prompt')}
+              className={`flex-1 min-w-0 rounded-2xl border-4 border-dashed flex flex-col items-center justify-center transition-colors ${dropZone === 'prompt' ? 'border-emerald-500 bg-emerald-100/95' : 'border-emerald-300 bg-emerald-50/90'}`}>
+              <Sparkles size={36} className="text-emerald-600 mb-2 pointer-events-none" />
+              <h2 className="text-lg font-bold text-emerald-700 pointer-events-none">프롬프트만</h2>
+              <p className="text-emerald-600 mt-1 text-[13px] text-center px-4 pointer-events-none">초기화하고 프롬프트만 — 어셋 언급은 함께, 레퍼런스는 빼고(모델 · 모드는 그 영상대로)</p>
+            </div>
+            <div data-drop-zone="restore" onDragOver={() => dropZone !== 'restore' && setDropZone('restore')}
+              className={`flex-1 min-w-0 rounded-2xl border-4 border-dashed flex flex-col items-center justify-center transition-colors ${dropZone === 'restore' ? 'border-violet-500 bg-violet-100/95' : 'border-violet-300 bg-violet-50/90'}`}>
+              <RefreshCw size={36} className="text-violet-600 mb-2 pointer-events-none" />
+              <h2 className="text-lg font-bold text-violet-700 pointer-events-none">그때 설정 그대로</h2>
+              <p className="text-violet-600 mt-1 text-[13px] text-center px-4 pointer-events-none">초기화하고 프롬프트 · 레퍼런스 · 어셋 컬렉션 · 모델 · 파라미터까지 그 영상대로</p>
+            </div>
+          </div>
         </div>
       )}
 
@@ -4086,7 +4600,7 @@ export function ChatArea() {
             <input type="text" value={showGallery ? gallerySearch : headerSearch}
               onChange={(e) => (showGallery ? setGallerySearch : setHeaderSearch)(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Escape') (showGallery ? setGallerySearch : setHeaderSearch)(''); }}
-              placeholder="프롬프트 검색..."
+              placeholder="프롬프트 · 태스크 ID 검색..."
               className="w-44 pl-8 pr-7 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all" />
             {(showGallery ? gallerySearch : headerSearch) && (
               <button onClick={() => (showGallery ? setGallerySearch : setHeaderSearch)('')} title="검색 지우기 (Esc)"
@@ -4590,7 +5104,41 @@ export function ChatArea() {
             </div>
             )}
 
-            <div className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white dark:focus-within:bg-[#1c1c1e] transition-all duration-200">
+            {/* 받은 영상을 불러온 결과 — 닫기를 눌러야 닫힌다(무엇이 빠졌는지 보고 손볼 때까지 남아 있게). */}
+            {restoreReport && (
+              <div data-restore-report className="max-w-4xl mx-auto mb-2 text-[13px] bg-white dark:bg-[#1c1c1e] border border-gray-200 rounded-xl px-3 py-1.5 shadow-sm">
+                {/* 한 줄: 무엇을 했는지 · 어디서 — 버튼. 빠졌거나 다른 것이 있을 때만 그 아래 짧은 줄로. */}
+                <div className="flex items-center gap-2 min-w-0">
+                  {restoreReport.missing.length > 0
+                    ? <AlertCircle size={14} className="shrink-0 text-amber-500" />
+                    : <Check size={14} className="shrink-0 text-emerald-500" />}
+                  <span className="shrink-0 font-semibold text-gray-800 dark:text-gray-100">{restoreReport.how === 'restore' ? '그때 설정 그대로 불러왔어요' : '프롬프트를 불러왔어요'}</span>
+                  <span className="min-w-0 truncate text-gray-400" title={restoreReport.sourceTitle}>{restoreReport.source}</span>
+                  <div className="ml-auto flex items-center gap-3 shrink-0 text-[12px]">
+                    {restoreReport.how === 'paste' && (
+                      <button onClick={() => { const r = restoreReport; void applyRestore(r.target, r.local, r.snapshot); }}
+                        title="모델 · 파라미터 · 어셋 컬렉션까지 이 영상을 만든 그대로 다시 불러와요"
+                        className="font-semibold text-violet-600 hover:underline">그때 설정 그대로</button>
+                    )}
+                    <button onClick={() => { void undoRestore(restoreReport.snapshot); }}
+                      title="불러오기 직전의 작성 칸 · 레퍼런스 · 오른쪽 설정으로 되돌려요"
+                      className="text-gray-500 hover:text-gray-800 hover:underline">되돌리기</button>
+                    {restoreReport.local && (
+                      <button onClick={() => { const l = restoreReport.local!; setRestoreReport(null); if (showGallery) exitGallery(); requestFindMessage(l.projectId, l.msg.id); }}
+                        className="text-gray-500 hover:text-gray-800 hover:underline">카드로 가기</button>
+                    )}
+                    <button onClick={() => setRestoreReport(null)} className="text-gray-400 hover:text-gray-700" title="닫기"><X size={14} /></button>
+                  </div>
+                </div>
+                {(restoreReport.missing.length > 0 || restoreReport.notes.length > 0) && (
+                  <ul className="mt-0.5 mb-0.5 pl-[22px] space-y-0.5 text-[12px]">
+                    {restoreReport.missing.map((m, i) => <li key={'m' + i} className="text-amber-700 dark:text-amber-400 break-words">{m}</li>)}
+                    {restoreReport.notes.map((m, i) => <li key={'n' + i} className="text-gray-500 break-words">{m}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+            <div ref={composerBoxRef} className="max-w-4xl mx-auto relative flex flex-col gap-2 bg-gray-50 border-2 border-gray-200 rounded-2xl p-2 focus-within:border-indigo-400 focus-within:bg-white dark:focus-within:bg-[#1c1c1e] transition-all duration-200">
               <AnimatePresence>
               {(omniFramesOn || (!isOmni && (project.settings.mode === 'image_to_video_first' || project.settings.mode === 'image_to_video_first_last'))) && (
                 <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2, ease: 'easeInOut' }} className="overflow-hidden">

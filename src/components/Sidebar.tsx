@@ -2,7 +2,8 @@ import { useState, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type R
 import { createPortal } from 'react-dom';
 import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw, Sun, Moon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useAppStore, groupTree, type Project, type ProjectGroup } from '../store';
+import { useAppStore, groupTree, requestFindMessage, type Project, type ProjectGroup } from '../store';
+import { taskIdMatches } from '../lib/search-match';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
 import { GlobalGallery } from './GlobalGallery';
 
@@ -409,7 +410,7 @@ function formatBytes(bytes: number | null): string {
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
     projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, setGroupParent, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
-    autoDownload, setAutoDownload, theme, setTheme } = useAppStore();
+    autoDownload, setAutoDownload, embedSettings, setEmbedSettings, theme, setTheme } = useAppStore();
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
@@ -865,11 +866,23 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     setEditingId(null);
   };
 
+  // 이름에 더해 태스크 ID(받은 파일 이름째 붙여 넣어도)로도 찾는다(26.10.801~, src/lib/search-match.ts). ID 로 찾은 카드는
+  // 목록 맨 위에 '카드로 가기' 로 따로 보인다 — 프로젝트를 연 뒤 다시 찾을 필요가 없게.
+  const taskHits = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (q.length < 5) return [] as { project: Project; msgId: string; taskId: string }[];
+    const hits: { project: Project; msgId: string; taskId: string }[] = [];
+    for (const p of projects) for (const m of p.messages) {
+      if (m.taskId && taskIdMatches(m.taskId, q)) { hits.push({ project: p, msgId: m.id, taskId: m.taskId }); if (hits.length >= 20) return hits; }
+    }
+    return hits;
+  }, [projects, searchQuery]);
   const filteredProjects = useMemo(() => {
     if (!searchQuery.trim()) return projects;
-    const query = searchQuery.toLowerCase();
-    return projects.filter(p => p.name.toLowerCase().includes(query));
-  }, [projects, searchQuery]);
+    const query = searchQuery.trim().toLowerCase();
+    const byTask = new Set(taskHits.map(h => h.project.id));
+    return projects.filter(p => p.name.toLowerCase().includes(query) || byTask.has(p.id));
+  }, [projects, searchQuery, taskHits]);
 
   // A project whose groupId points at a group that no longer exists counts as ungrouped.
   // Without that fallback a stale id would make the project invisible — present in the
@@ -1332,7 +1345,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40" />
           <input
             type="text"
-            placeholder="Search projects..."
+            placeholder="프로젝트 · 태스크 ID 검색"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-[#2a2a2d] border border-transparent focus:border-[#0071e3] rounded-[8px] pl-9 pr-3 py-1.5 text-[13px] text-white placeholder-white/40 outline-none transition-colors"
@@ -1354,6 +1367,14 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       >
         {/* Groups are skipped entirely while searching — see the note on `renderProjectRow`
             callers below. */}
+        {searchQuery.trim() && taskHits.map(h => (
+          <button key={h.msgId} onClick={() => requestFindMessage(h.project.id, h.msgId)}
+            className="w-full text-left px-3 py-1.5 rounded-[8px] bg-[#0071e3]/15 hover:bg-[#0071e3]/25 text-white/85 transition-colors"
+            title={`태스크 ${h.taskId}\n${h.project.name} 의 그 카드로 갑니다`}>
+            <div className="text-[11px] text-white/50 font-mono truncate">{h.taskId}</div>
+            <div className="text-[12.5px] truncate">{h.project.name} · 카드로 가기 →</div>
+          </button>
+        ))}
         {!searchQuery.trim() && tree.roots.map((g) => renderGroup(g, 0))}
         {/* Tail slot for top-level folder reordering — measurable even when idle. */}
         {!searchQuery.trim() && projectGroups.length > 0 && renderGroupTailDrop(undefined, '맨 아래 그룹으로')}
@@ -1397,6 +1418,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               onChange={(e) => setAutoDownload(e.target.checked)}
               className="accent-[#0071e3] w-3.5 h-3.5 shrink-0" />
             <span className="text-[11px] text-white/70">생성 시 자동 다운로드</span>
+          </label>
+          {/* 받은 영상 끝에 생성 설정을 암호화해 넣는다(26.10.801~) — 이 앱에 끌어다 놓아야 보이고 탐색기에는 안 보인다.
+              아무것도 안 붙인 원본이 필요하면 끈다. */}
+          <label className="flex items-center gap-2 cursor-pointer select-none"
+            title={'켜면 받은 영상 끝에 그 영상을 만든 설정(프롬프트 · 파라미터 · 레퍼런스 정보)을 암호화해 넣어요.\n이 앱에 그 영상을 끌어다 놓아야 보이고, 탐색기 속성이나 다른 프로그램에는 안 보여요. 재생 · 편집에는 영향이 없어요.\n아무것도 붙이지 않은 원본 그대로가 필요하면 끄세요.'}>
+            <input type="checkbox" checked={embedSettings}
+              onChange={(e) => setEmbedSettings(e.target.checked)}
+              className="accent-[#0071e3] w-3.5 h-3.5 shrink-0" />
+            <span className="text-[11px] text-white/70">받은 영상에 설정 넣기</span>
           </label>
         </div>
         {/* Theme. Lives beside the other app-wide switches (not per project) because it
