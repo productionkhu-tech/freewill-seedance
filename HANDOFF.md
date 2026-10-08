@@ -97,6 +97,21 @@ npx electron-builder --win --publish always
 **`npx electron-builder` 를 파이프/체이닝에 물리지 마라.** 실행이 통째로 누락된다(에러도 안
 남는다). 단독 실행하고 릴리스 존재를 API 로 검증할 것.
 
+**★ 패키징하는 동안 저장소 파일이 바뀌면 asar 가 깨진 채 게시된다**(2026-10-08 v26.10.801 실제 사고). electron-builder 는
+asar 목차(파일마다 위치 · 크기)를 먼저 짜고 내용은 나중에 읽는다. 그 사이 같은 저장소에서 일하던 다른 Claude 세션이
+`electron/main.cjs` 에 13줄을 넣자, 목차엔 커밋 크기(45,092B) · 데이터엔 고친 파일(46,066B)이 들어가 뒤 파일 전부가 974B
+밀렸다 — 그 판으로 업데이트한 PC 는 켜지지 않는다. 오류 없이 업로드까지 끝나므로 로그로는 모른다. 그날 한 일:
+릴리스를 초안으로 돌려 숨김(업데이터는 초안을 못 본다 — 몇 분 노출) → 커밋을 `git archive` 로 따로 풀어 그 사본에서 다시
+패키징 → 같은 릴리스에 자산 덮어쓰기(electron-builder 가 초안이면 그대로 올리고 같은 이름은 덮어쓴다) → 확인 뒤 공개.
+- 다른 세션이 같은 폴더에서 일하고 있으면(데스크톱 앱 세션 목록 · `git status` 의 남의 변경) **패키징은 깨끗한 사본에서**:
+  `git archive <커밋> | tar -x -C <사본>` 뒤 사본에서 빌드 · 패키징. node_modules 를 정션으로 연결하면 esbuild 가 실제 경로를
+  따라가 서버 번들에 이 PC 폴더 경로(`../../Desktop/기획 파일/…`)를 박는다 — 화면 · 서버 번들(dist · dist-server)은 저장소에서
+  만든 것(그때 소스 = 커밋 확인)을 쓰거나 node_modules 를 복사할 것. 다 쓴 정션은 `cmd /c rmdir` 로 링크만 지운다(지우는 도구가
+  정션을 따라가면 원래 node_modules 가 지워진다).
+- 게시 전에 asar 목차와 데이터가 맞는지 본다 — `electron/main.cjs` 를 asar 목차 위치 · 크기 그대로 꺼내 커밋과 같은지,
+  `node --check` 가 되는지(`@electron/asar` `getRawHeader` · `extractFile`). 목차가 밀렸으면 package.json 자리에서 다른 파일
+  글자가 나온다.
+
 ### 2-3b. `quitAndInstall` 은 반드시 `(true, true)` — 인자 없이 부르지 마라
 
 2026-08-13, 팀에서 **"업데이트하니까 앱이 안 켜진다. 트레이에도 작업관리자에도 없다"**.
@@ -144,6 +159,7 @@ Update installer has already been triggered. Quitting application.
 4. latest.yml 의 sha512 == 로컬 exe 의 sha512
 5. semver 비교: 직전 배포본보다 큰가
 ```
++ app.asar 의 `electron/main.cjs` · `package.json` 이 목차 위치 그대로 꺼내 커밋과 같은가(§2-3 ★ — 1~5 는 망가진 asar 도 통과한다)
 
 ### 2-5. 남의 PC 에서 업그레이드될 때 — 확인된 것
 
