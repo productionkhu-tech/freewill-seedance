@@ -5,7 +5,7 @@ import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollecti
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
 import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight } from 'lucide-react';
 import { getAssetNames } from './SettingsPanel';
 import { agentSettings, buildAgentManual, AGENT_COMMANDS } from '../lib/agent-inbox';
 import { CATEGORY_META, fileToElementImage, MAX_ELEMENT_IMAGES } from './ElementLibrary';
@@ -223,7 +223,28 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
       { threshold: 0, rootMargin: '500px' }
     );
     observer.observe(container);
-    return () => observer.disconnect();
+    // 멀리 벗어나면 영상을 내린다(26.10.2001~). 예전에는 한 번 붙은 영상이 카드가 사라질 때까지 붙어 있어서, 큰
+    // 프로젝트를 끝까지 훑기만 해도 지나간 영상이 전부 메모리에 남았다(실측 2026-10-20: 226편 프로젝트 끝까지 → 렌더러
+    // +1.27GB, 붙은 <video> 226개). 작업창을 두 칸으로 나누면 그게 두 배가 된다. 이제 목록(스크롤 영역)에서 위아래로
+    // 2000px 넘게 멀어지면 내리고, 다시 보이면 붙인다 — 바이트는 blobCache · 로컬 사본에서 바로 다시 온다.
+    // ★ 뿌리(root)를 스크롤 영역으로 잡는다. 뷰포트를 뿌리로 두면 rootMargin 은 뷰포트에만 붙고, 카드는 안쪽 스크롤
+    //   영역에서 먼저 잘려서 '화면 밖 = 멀리' 가 된다(벗어나자마자 내렸다 붙였다 깜빡인다).
+    let scroller: HTMLElement | null = container.parentElement;
+    while (scroller) {
+      const oy = getComputedStyle(scroller).overflowY;
+      if (oy === 'auto' || oy === 'scroll') break;
+      scroller = scroller.parentElement;
+    }
+    const far = scroller ? new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) return;
+        if (videoRef.current && document.fullscreenElement === videoRef.current) return;
+        setMounted(false);
+      },
+      { root: scroller, threshold: 0, rootMargin: '2000px 0px' }
+    ) : null;
+    far?.observe(container);
+    return () => { observer.disconnect(); far?.disconnect(); };
   }, [eager]);
 
   // ── Keep your place across fullscreen ──────────────────────────────────────
@@ -1292,8 +1313,22 @@ function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText
 }
 
 /* ─── Main Component ─── */
-export function ChatArea() {
-  const { projects, currentProjectId, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages, billingProjectKey } = useAppStore();
+// 작업창 한 칸(26.10.2001~ 나누기 — Workspace 가 칸마다 하나씩 띄운다). 자기 칸의 프로젝트(projectId)만 그린다.
+//   slot    0번 칸은 늘 있다 — 받은 영상 다운로드 표시는 0번 칸 몫이다(두 칸이 같이 받으면 두 번 뜬다).
+//   active  지금 손대는 칸. 앱 전체에 하나뿐이어야 하는 일 — 에이전트 작업 받기 · 마우스 뒤로/앞으로 · 다른 곳에서 보낸
+//           토스트 — 은 이 칸만 한다. 나누지 않았으면 늘 true(예전 그대로).
+// ★ 아래 코드의 `currentProjectId` 는 '이 칸의 프로젝트' 다(앱 전체의 지금 프로젝트가 아니다 — 그건 손대는 칸의 것).
+//   async 흐름에서 "아직 그 프로젝트를 보고 있나" 를 물을 때는 스토어가 아니라 paneProjectRef 를 본다.
+export function ChatArea({ projectId, slot = 0, split = false, active = true }: {
+  projectId: string; slot?: 0 | 1; split?: boolean; active?: boolean;
+}) {
+  const { projects, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages, billingProjectKey } = useAppStore();
+  const currentProjectId: string | null = projectId;
+  const paneProjectRef = useRef<string | null>(projectId);
+  paneProjectRef.current = projectId;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const rootRef = useRef<HTMLDivElement>(null);
   const project = projects.find((p) => p.id === currentProjectId);
   // Block sends (reactive mirror for the button's disabled state) whenever no
   // project is picked — strict: no project ⇒ no generate. handleSend re-checks via
@@ -1399,7 +1434,10 @@ export function ChatArea() {
   };
 
   // Listen to download events from Electron main process
+  // 0번 칸만 듣는다(나누기 26.10.2001~) — 두 칸이 같이 들으면 진행 표시가 두 번 뜬다. 0번 칸은 나누고 닫아도 내려가지
+  // 않으므로(Workspace) 여기 붙인 리스너가 한 벌로 남는다.
   useEffect(() => {
+    if (slot !== 0) return;
     const api = (window as any).electronAPI;
     if (api?.onDownloadStarted) {
       api.onDownloadStarted(({ filename }: { filename: string }) => {
@@ -1446,6 +1484,7 @@ export function ChatArea() {
   // that have no toast UI of their own. One owner for the toast, many senders.
   useEffect(() => {
     const onToast = (e: Event) => {
+      if (!activeRef.current) return;   // 나눠 보는 중이면 손대는 칸만 띄운다
       const d = (e as CustomEvent).detail || {};
       showToast(d.msg || '', d.ok === true);
     };
@@ -1457,7 +1496,8 @@ export function ChatArea() {
   // message polling in that case, so the user needs to be told the work is still going
   // and will still be billed — silently doing nothing would look like a dead button.
   useEffect(() => {
-    const onCancelFailed = (e: Event) => warn((e as CustomEvent).detail?.message || '취소하지 못했습니다.');
+    // 손대는 칸만 — 취소는 카드를 눌러야 하니 그 칸이 손대는 칸이고, 에이전트 card.cancel 도 손대는 칸에서 돈다(agentWarnRef).
+    const onCancelFailed = (e: Event) => { if (activeRef.current) warn((e as CustomEvent).detail?.message || '취소하지 못했습니다.'); };
     window.addEventListener('seedance:cancel-failed', onCancelFailed);
     return () => window.removeEventListener('seedance:cancel-failed', onCancelFailed);
   }, []);
@@ -1532,6 +1572,28 @@ export function ChatArea() {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [currentProjectId]);
+
+  // 작성 칸의 글을 지금 바로 초안으로(나누기 26.10.2001~). 칸을 닫을 때 남는 칸이 닫히는 칸의 프로젝트를 이어받을 수
+  // 있어서(store closePane) 그 전에 부른다 — 0.5초 디바운스를 기다리면 이어받는 칸이 옛 초안을 읽는다. 칸이 내려갈
+  // 때(언마운트)도 한다: 디바운스 타이머는 편집기가 사라진 뒤에 돌아 마지막 글자를 잃는다.
+  // ★ 레이아웃 effect 의 정리 함수다 — 내려갈 때 DOM ref 가 풀리기 전에 돈다(일반 effect 정리 때는 이미 null).
+  const flushDraftNow = () => {
+    const el = contentEditableRef.current || lastEditorRef.current;
+    const pid = previousProjectIdRef.current;
+    if (!el || !pid) return;
+    if (draftSaveTimerRef.current) { clearTimeout(draftSaveTimerRef.current); draftSaveTimerRef.current = null; }
+    useAppStore.getState().updateDraftPrompt(pid, el.innerHTML);
+  };
+  const flushDraftRef = useRef(flushDraftNow);
+  flushDraftRef.current = flushDraftNow;
+  useLayoutEffect(() => {
+    const onFlush = () => flushDraftRef.current();
+    window.addEventListener('seedance:flush-drafts', onFlush);
+    return () => {
+      window.removeEventListener('seedance:flush-drafts', onFlush);
+      flushDraftRef.current();
+    };
+  }, []);
 
   // Listen for SettingsPanel reset → also clear prompt
   useEffect(() => {
@@ -1769,7 +1831,7 @@ export function ChatArea() {
     const q = headerSearchRef.current.trim().toLowerCase();
     if (q) {
       const st = useAppStore.getState();
-      const m = st.projects.find(p => p.id === st.currentProjectId)?.messages.find(x => x.id === messageId);
+      const m = st.projects.find(p => p.id === paneProjectRef.current)?.messages.find(x => x.id === messageId);
       if (m && !messageMatchesQuery(m, q)) setHeaderSearch('');
     }
     const t0 = Date.now();
@@ -1795,8 +1857,10 @@ export function ChatArea() {
   // 지금 보고 있는 프로젝트 안에서의 전체 갤러리 '찾기'(store.ts requestFindMessage).
   useEffect(() => {
     const onFind = (e: Event) => {
-      const id = (e as CustomEvent).detail?.messageId;
-      if (typeof id === 'string') revealMessage(id);
+      const d = (e as CustomEvent).detail || {};
+      // 나눠 보는 중이면 그 프로젝트가 떠 있는 칸이 받는다(store requestFindMessage 가 projectId 를 싣는다).
+      if (typeof d.projectId === 'string' ? d.projectId !== paneProjectRef.current : !activeRef.current) return;
+      if (typeof d.messageId === 'string') revealMessage(d.messageId);
     };
     window.addEventListener('seedance:find-message', onFind);
     return () => window.removeEventListener('seedance:find-message', onFind);
@@ -1826,7 +1890,8 @@ export function ChatArea() {
   // (browser-backward)으로 오기도 해서 그것도 받는다(main.cjs → preload). 한 번 누른 게 두 경로로
   // 두 번 와도 괜찮다 — 뒤로 끝에서 또 뒤로는 아무 일도 없다. 규칙은 store.ts navigateProjectHistory.
   useEffect(() => {
-    const go = (dir: -1 | 1) => { navigateProjectHistory(dir); };
+    // 손대는 칸만 옮긴다 — 두 칸이 같이 받으면 한 번 누른 것이 두 번 간다(나누기 26.10.2001~).
+    const go = (dir: -1 | 1) => { if (activeRef.current) navigateProjectHistory(dir); };
     const onMouse = (e: MouseEvent) => {
       if (e.button !== 3 && e.button !== 4) return;
       e.preventDefault();                  // 페이지 자체의 뒤로가기 같은 기본 동작은 막는다
@@ -1911,6 +1976,7 @@ export function ChatArea() {
   };
   // 열린 프로젝트가 없을 때(아래 가드에서 멈춤)도 '화면은 켜져 있음' 과 설명서는 알린다 — 가드 뒤에서 진짜 처리로 바꿔 끼운다.
   agentTickRef.current = async () => {
+    if (!activeRef.current) return;   // 에이전트에게 '화면' 은 하나 — 손대는 칸만 알린다(나누기 26.10.2001~)
     try {
       const r = await fetch('/api/agent/jobs/claim', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2388,7 +2454,7 @@ export function ChatArea() {
     restoreBusyRef.current = true;
     setRestoreTarget(null);
     const pid = project.id;
-    const here = () => useAppStore.getState().currentProjectId === pid;
+    const here = () => paneProjectRef.current === pid;   // 이 칸이 아직 그 채팅인가(나눠 보는 중엔 다른 칸에 손대도 그대로다)
     let before: ComposerSnapshot | null = null;
     try {
       if (showGallery) { exitGallery(); await new Promise(r => setTimeout(r, 80)); }   // 작성 칸이 다시 그려진 뒤에 채운다
@@ -2425,7 +2491,7 @@ export function ChatArea() {
     st.updateProjectSettings(pid, restore as Partial<GenerationSettings>);
     st.replaceAllAssets(pid, snap.assets.map(({ id: _id, ...rest }: any) => rest));
     const html = rebindMentionPills(snap.promptHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
-    if (useAppStore.getState().currentProjectId === pid && contentEditableRef.current) {
+    if (paneProjectRef.current === pid && contentEditableRef.current) {
       contentEditableRef.current.innerHTML = html;
       setHasText(!!contentEditableRef.current.innerText.trim());
       syncMentionCount();
@@ -2498,7 +2564,8 @@ export function ChatArea() {
 
   /* ─── Input handlers ─── */
   const highlightMentionItem = useCallback(() => {
-    document.querySelectorAll('.mention-item').forEach((item, i) => {
+    // 이 칸의 목록만 — 나눠 보는 중 다른 칸에도 @ 목록이 떠 있으면 번호가 섞인다.
+    (rootRef.current || document).querySelectorAll('.mention-item').forEach((item, i) => {
       if (i === mentionIndexRef.current) {
         item.classList.add('bg-indigo-50', 'text-indigo-700');
         item.classList.remove('text-gray-700');
@@ -3102,7 +3169,7 @@ export function ChatArea() {
       }
       if (changedEls.length) say(`그때와 그림이 다른 어셋(지금 그림으로 보내요): ${changedEls.map(n => '@' + n).join(', ')}`);
       const html = box.innerHTML;
-      if (useAppStore.getState().currentProjectId === project.id && contentEditableRef.current) {
+      if (paneProjectRef.current === project.id && contentEditableRef.current) {
         contentEditableRef.current.innerHTML = html;
         setHasText(!!contentEditableRef.current.innerText.trim());
         syncMentionCount();
@@ -3853,7 +3920,7 @@ export function ChatArea() {
       useAppStore.getState().updateProjectSettings(pid, restore as Partial<GenerationSettings>);
       useAppStore.getState().replaceAllAssets(pid, prevAssets);
       const html = rebindMentionPills(prevHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
-      if (useAppStore.getState().currentProjectId === pid && contentEditableRef.current === editor) {
+      if (paneProjectRef.current === pid && contentEditableRef.current === editor) {
         editor.innerHTML = html;
         setHasText(!!editor.innerText.trim());
         syncMentionCount();
@@ -3879,7 +3946,8 @@ export function ChatArea() {
 
   const agentProcess = async (job: any) => {
     const st = useAppStore.getState();
-    const proj = st.projects.find(p => p.id === st.currentProjectId);
+    // 이 칸의 프로젝트 — 작업은 손대는 칸만 받으므로(agentTick) 받는 순간에는 앱의 지금 프로젝트와 같다.
+    const proj = st.projects.find(p => p.id === paneProjectRef.current);
     const editor = contentEditableRef.current;
     const fail = (error: string) => agentReport(job.id, { status: 'failed', error, ...(proj ? { project: proj.name } : {}) });
     if (!proj || !editor) return fail('앱에 열린 프로젝트가 없습니다. 앱에서 프로젝트를 연 뒤 다시 보내 주세요.');
@@ -3919,7 +3987,7 @@ export function ChatArea() {
         const rejected = await attachFiles(files, f => given.get(f));
         if (rejected.length) throw new Error(`레퍼런스를 붙이지 못했습니다:\n${rejected.join('\n')}`);
         // 여기부터 handleSend 가 프롬프트를 읽을 때까지는 await 없이 이어진다 — 그 사이 프로젝트가 바뀔 틈이 없다.
-        if (useAppStore.getState().currentProjectId !== pid || contentEditableRef.current !== editor) throw new Error('보내기 전에 앱의 프로젝트(화면)가 바뀌어 보내지 않았습니다.');
+        if (paneProjectRef.current !== pid || contentEditableRef.current !== editor) throw new Error('보내기 전에 앱의 프로젝트(화면)가 바뀌어 보내지 않았습니다.');
         const missing: string[] = [];
         const html = agentPromptHtml(String(job.prompt || ''), getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []), agentElementPill(pid), missing);
         if (missing.length) {
@@ -4254,6 +4322,8 @@ export function ChatArea() {
     }
     // 2) 새 요청 · 명령. 생성 요청은 받을 수 없는 때 peek(화면 상태만 알림) — 입력 중 · 생성 중 · 갤러리 화면.
     //    명령은 그때도 받는다(작성 칸이 필요한 재생성은 명령 안에서 다시 따진다). 다른 일을 하는 중이면 둘 다 안 받는다.
+    //    ★ 손대는 칸만 받는다(나누기 26.10.2001~). 1) 은 칸마다 한다 — 자기가 보낸 작업의 카드는 손을 뗀 칸도 계속 올린다.
+    if (!activeRef.current) return;
     const st = useAppStore.getState();
     const proj = st.projects.find(p => p.id === st.currentProjectId);
     const composer = !!contentEditableRef.current;
@@ -4419,7 +4489,7 @@ export function ChatArea() {
   const dismissDownload = (filename: string) => setDownloads(d => { const n = { ...d }; delete n[filename]; return n; });
   const dismissAllDownloads = () => setDownloads({});
   return (
-    <div className="flex-1 flex flex-col bg-[#fafafa] dark:bg-[#242426] h-full relative min-w-0" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+    <div ref={rootRef} className="flex-1 flex flex-col bg-[#fafafa] dark:bg-[#242426] h-full relative min-w-0" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
       {/* 받은 영상에서 되살리기 (26.10.801~) */}
       {restoreTarget && (
         <SettingsRestoreDialog
@@ -4445,7 +4515,8 @@ export function ChatArea() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -12, scale: 0.98 }}
             transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="fixed top-4 left-1/2 -translate-x-1/2 z-[70] w-[min(92%,28rem)]"
+            // 나눠 보는 중이면 그 칸 위에 — 어느 칸의 이야기인지 보이게. 한 칸이면 예전처럼 창 가운데.
+            className={`${split ? 'absolute top-16' : 'fixed top-4'} left-1/2 -translate-x-1/2 z-[70] w-[min(92%,28rem)]`}
           >
             <div className={`flex items-start gap-2.5 border rounded-xl shadow-lg px-3.5 py-2.5 ${toast.ok ? 'bg-emerald-50 border-emerald-300 text-emerald-900' : 'bg-amber-50 border-amber-300 text-amber-900'}`}>
               {toast.ok
@@ -4564,15 +4635,15 @@ export function ChatArea() {
       )}
 
       {/* Header */}
-      <div className="h-14 border-b border-gray-200/80 bg-white/90 dark:bg-[#1c1c1e]/90 backdrop-blur-xl flex items-center justify-between px-6 shrink-0 z-10 sticky top-0">
+      <div className={`h-14 border-b border-gray-200/80 bg-white/90 dark:bg-[#1c1c1e]/90 backdrop-blur-xl flex items-center justify-between gap-2 shrink-0 z-10 sticky top-0 ${split ? 'px-4' : 'px-6'}`}>
         {showGallery ? (
-          <button onClick={exitGallery} className="flex items-center gap-2 text-[15px] font-medium text-gray-500 hover:text-indigo-600 transition-colors">
+          <button onClick={exitGallery} className="flex items-center gap-2 text-[15px] font-medium text-gray-500 hover:text-indigo-600 transition-colors whitespace-nowrap">
             ← 채팅으로 돌아가기
           </button>
         ) : (
-          <h1 className="text-[20px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight truncate">{project.name}</h1>
+          <h1 className={`min-w-0 font-semibold tracking-tight truncate ${split ? 'text-[17px]' : 'text-[20px]'} ${split && !active ? 'text-gray-500 dark:text-gray-500' : 'text-[#1d1d1f] dark:text-gray-900'}`} title={project.name}>{project.name}</h1>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           {/* 갤러리의 채택만 · Draft 포함은 머리에 둔다(26.10.203~). 목록 맨 위에 두었더니 스크롤하면
               같이 올라가 버려, 채택만 보면서 내려가다 끄려면 다시 맨 위까지 가야 했다. */}
           {showGallery && (hasStarredClips || starredOnly) && (
@@ -4600,8 +4671,9 @@ export function ChatArea() {
             <input type="text" value={showGallery ? gallerySearch : headerSearch}
               onChange={(e) => (showGallery ? setGallerySearch : setHeaderSearch)(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Escape') (showGallery ? setGallerySearch : setHeaderSearch)(''); }}
-              placeholder="프롬프트 · 태스크 ID 검색..."
-              className="w-44 pl-8 pr-7 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all" />
+              placeholder={split ? '검색...' : '프롬프트 · 태스크 ID 검색...'}
+              title="프롬프트 · 태스크 ID 검색"
+              className={`${split ? 'w-32' : 'w-44'} pl-8 pr-7 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all`} />
             {(showGallery ? gallerySearch : headerSearch) && (
               <button onClick={() => (showGallery ? setGallerySearch : setHeaderSearch)('')} title="검색 지우기 (Esc)"
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-gray-400 hover:text-gray-700">
@@ -4612,6 +4684,19 @@ export function ChatArea() {
           <button onClick={showGallery ? exitGallery : enterGallery} className={`p-2 rounded-lg transition-all ${showGallery ? 'bg-indigo-500 text-white shadow-md' : 'text-gray-400 hover:bg-gray-100 hover:text-indigo-600'}`} title="갤러리">
             <LayoutGrid size={18} />
           </button>
+          {/* 나눠 보는 중(26.10.2001~) — 두 칸 자리 바꾸기 · 이 칸 닫기. 닫으면 남은 칸이 넓게 펴진다. */}
+          {split && (
+            <div className="flex items-center gap-0.5 pl-1.5 ml-0.5 border-l border-gray-200 dark:border-white/10">
+              <button onClick={() => useAppStore.getState().swapPanes()} title="두 칸 자리 바꾸기"
+                className="p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-indigo-600 transition-colors">
+                <ArrowLeftRight size={16} />
+              </button>
+              <button onClick={() => useAppStore.getState().closePane(slot)} title="이 칸 닫기 (프로젝트는 그대로 남아요)"
+                className="p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-red-500 transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

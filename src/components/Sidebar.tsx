@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type RefObject, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw, Sun, Moon } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw, Sun, Moon, PanelLeft, PanelRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppStore, groupTree, requestFindMessage, type Project, type ProjectGroup } from '../store';
 import { taskIdMatches } from '../lib/search-match';
 import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
 import { GlobalGallery } from './GlobalGallery';
+import { sideOf, visibleProjectIds, type PaneSide } from '../lib/split';
+import { paneDragMove, paneDragEnd, paneDrop, paneSideAt } from '../lib/pane-drag';
 
 // ─── Project icon ────────────────────────────────────────────────────────────
 // Emoji are just characters — the OS font draws them (Apple emoji on macOS, Segoe UI
@@ -307,7 +309,7 @@ function useWheelToHorizontal(ref: RefObject<HTMLElement | null>) {
 // Exists because drag-and-drop is the wrong and only way to file a project when the list
 // is long: dragging across a scrolling sidebar to reach a folder is fiddly, and there was
 // no way at all to make a folder *around* the project you're looking at.
-function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
+function ProjectMenu({ at, project, groups, onPick, onNewGroup, onOpenSide, openSideOff, onClose }: {
   at: { x: number; y: number };
   project: Project;
   // Already in tree order (parent, then its children) — the menu is a flat list of
@@ -315,6 +317,9 @@ function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
   groups: ProjectGroup[];
   onPick: (groupId: string | undefined) => void;
   onNewGroup: () => void;
+  // 작업창 칸에 열기(나누기 26.10.2001~) — 끌어다 놓기와 같은 일. 끌기를 모르는 사람도 찾을 수 있게 메뉴에도 둔다.
+  onOpenSide: (side: PaneSide) => void;
+  openSideOff: string;   // 비어 있지 않으면 못 여는 이유(한 칸에 이미 이 프로젝트만 열려 있음)
   onClose: () => void;
 }) {
   const [q, setQ] = useState('');
@@ -338,6 +343,19 @@ function ProjectMenu({ at, project, groups, onPick, onNewGroup, onClose }: {
         className="absolute bg-white dark:bg-[#1c1c1e] rounded-xl shadow-2xl border border-gray-200 py-1 text-gray-900 overflow-hidden"
       >
         <div className="px-3 py-1.5 text-[11px] text-gray-400 truncate border-b border-gray-100">{project.name}</div>
+        <div className="flex px-1.5 pt-1.5 pb-1 gap-1" title={openSideOff || undefined}>
+          {(['left', 'right'] as PaneSide[]).map((side) => {
+            const Icon = side === 'left' ? PanelLeft : PanelRight;
+            return (
+              <button key={side} disabled={!!openSideOff} onClick={() => { onOpenSide(side); onClose(); }}
+                className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[12px] text-gray-700 hover:bg-indigo-50 hover:text-indigo-700 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-gray-700 transition-colors">
+                <Icon size={13} className="shrink-0" />
+                {side === 'left' ? '왼쪽 칸에' : '오른쪽 칸에'}
+              </button>
+            );
+          })}
+        </div>
+        <div className="border-t border-gray-100 mb-1" />
         <button onClick={() => { onNewGroup(); onClose(); }}
           className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] text-gray-700 hover:bg-gray-100 transition-colors">
           <FolderPlus size={13} className="shrink-0 text-indigo-500" />
@@ -410,7 +428,12 @@ function formatBytes(bytes: number | null): string {
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
     projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, setGroupParent, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
-    autoDownload, setAutoDownload, theme, setTheme } = useAppStore();
+    autoDownload, setAutoDownload, theme, setTheme, split, openInPane } = useAppStore();
+  // 작업창에 떠 있는 프로젝트(나누기 26.10.2001~) — 둘 다 '보고 있는' 것이라 새 완성 배지를 달지 않는다.
+  const shown = visibleProjectIds({ split, currentProjectId });
+  // 나눠 보는 중이면 그 프로젝트가 떠 있는 쪽.
+  const sideShown = (id: string): PaneSide | null =>
+    !split ? null : split.slots[0] === id ? sideOf(split, 0) : split.slots[1] === id ? sideOf(split, 1) : null;
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
@@ -500,6 +523,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const beginDrag = (kind: 'project' | 'group', id: string) => {
     setDragKind(kind); setDragId(id);
     dragRef.current = { kind, id };
+    // 끄는 동안 글자 선택을 막는다 — 목록 밖(작업창, 26.10.2001~)까지 끌고 가면 지나가는 글자가 전부 파랗게 잡힌다.
+    // 누른 자리에서 이미 시작된 선택도 지운다. endDrag 가 되돌린다.
+    try { window.getSelection()?.removeAllRanges(); } catch { /* 없으면 그만 */ }
+    document.body.style.userSelect = 'none';
     // ★ This snapshot is taken BEFORE React has re-rendered — setDragId above is async.
     // If anything in the list changes size in response to a drag starting, every measured
     // position below it is wrong by that much for the rest of the drag.
@@ -609,6 +636,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     stopAutoScroll();
     setDragKind(null); setDragId(null); setPlan(null); setGroupPlan(null);
     snapRef.current = null; dragRef.current = null; snapFresh.current = false;
+    paneDragEnd();   // 작업창 위의 '왼쪽/오른쪽' 판도 걷는다
+    document.body.style.userSelect = '';
   };
 
   // ── Why this is a POINTER drag and not HTML5 drag-and-drop ──────────────────
@@ -668,6 +697,12 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       if (!dragRef.current) return;
       e.preventDefault();                       // no text selection while dragging
       placeGhost(e.clientX, e.clientY);
+      // 프로젝트를 작업창 위로 끌고 가면(나누기 26.10.2001~) 목록 안의 자리 대신 작업창 칸에 놓는다 — 목록의 틈은
+      // 닫고, 작업창이 '왼쪽/오른쪽' 판을 띄운다(src/lib/pane-drag.ts). 다시 목록으로 오면 예전처럼 틈이 열린다.
+      if (dragRef.current.kind === 'project') {
+        paneDragMove(dragRef.current.id, e.clientX, e.clientY);
+        if (paneSideAt(e.clientX, e.clientY)) { stopAutoScroll(); setPlan(null); return; }
+      }
       if (!snapFresh.current) { snapFresh.current = true; captureSlots(); }
       updateAutoScroll(e.clientY);
       planFor(e.clientY);
@@ -679,6 +714,9 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       // Swallow the click that follows, or letting go on top of a row would also select it.
       justDragged.current = true;
       setTimeout(() => { justDragged.current = false; }, 0);
+      // 작업창 칸 위에서 놓았으면 그 칸에 연다 — 목록 순서는 그대로 둔다.
+      const d = dragRef.current, pt = lastPt.current;
+      if (d && d.kind === 'project' && pt && paneDrop(d.id, pt.x, pt.y)) { endDrag(); return; }
       applyDrop();
     },
     key: (e: KeyboardEvent) => {
@@ -700,6 +738,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       window.removeEventListener('pointerup', u);
       window.removeEventListener('pointercancel', u);
       window.removeEventListener('keydown', k);
+      document.body.style.userSelect = '';   // 끄는 도중 사이드바가 내려가도 글자 선택이 막힌 채 남지 않게
     };
   }, []);
 
@@ -1023,7 +1062,10 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               className={cn(
                 "group flex items-center justify-between px-3 py-2 rounded-[8px] cursor-pointer transition-colors",
                 dragId === project.id && "opacity-40",
-                currentProjectId === project.id ? "bg-[#2a2a2d] text-white" : "text-white/70 hover:bg-[#2a2a2d]/50 hover:text-white"
+                currentProjectId === project.id ? "bg-[#2a2a2d] text-white"
+                  // 나눠 본 다른 칸에 떠 있는 프로젝트 — 손대는 칸보다 옅게.
+                  : sideShown(project.id) ? "bg-[#2a2a2d]/50 text-white/90 hover:bg-[#2a2a2d]/80"
+                  : "text-white/70 hover:bg-[#2a2a2d]/50 hover:text-white"
               )}
               onClick={() => { if (justDragged.current) return; if (editingId !== project.id) setCurrentProjectId(project.id); }}
               onDoubleClick={() => { setEditingId(project.id); setEditName(project.name); }}
@@ -1059,6 +1101,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
                 ) : (
                   <span className="truncate text-[14px] font-medium">{project.name}</span>
                 )}
+                {/* 나눠 보는 중 — 어느 칸에 떠 있는지. 손대는 칸이면 파랗게. */}
+                {editingId !== project.id && (() => {
+                  const side = sideShown(project.id);
+                  if (!side) return null;
+                  const Icon = side === 'left' ? PanelLeft : PanelRight;
+                  return <span title={`${side === 'left' ? '왼쪽' : '오른쪽'} 칸에 열려 있음`} className="shrink-0 flex">
+                    <Icon size={12} className={currentProjectId === project.id ? 'text-[#4da3ff]' : 'text-white/35'} />
+                  </span>;
+                })()}
                 {/* Which folder this match came from — search flattens the tree, and two
                     projects may legitimately share a name in different folders (that is
                     the whole point of per-folder naming). Without this the two rows are
@@ -1071,7 +1122,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
               </div>
               {!editingId && (() => {
                 const running = project.messages.some(m => m.status === 'running' || m.status === 'queued');
-                const unseen = unseenDoneCount(project, currentProjectId === project.id);
+                const unseen = unseenDoneCount(project, shown.includes(project.id));
                 return (
                   // Status lives on the RIGHT, not on the icon. Stacking a badge on a 16px
                   // icon buries whatever the user picked — the point of choosing an icon is
@@ -1134,7 +1185,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     // total for its whole subtree. Unfolded: it shows nothing, and each child — subfolder
     // header or project row — carries its own. Showing both double-counts the same clips
     // in a single glance; with two levels it would treble-count.
-    const unseen = all.reduce((n, p) => n + unseenDoneCount(p, currentProjectId === p.id), 0);
+    const unseen = all.reduce((n, p) => n + unseenDoneCount(p, shown.includes(p.id)), 0);
     const running = all.some(p => p.messages.some(m => m.status === 'running' || m.status === 'queued'));
     const aimed = !!liveGroupPlan && liveGroupPlan.beforeId === g.id;
     const dropInto = !!livePlan && livePlan.into === true && livePlan.groupId === g.id;
@@ -1494,6 +1545,8 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
             setEditingGroupId(gid);
             setEditGroupName('');
           }}
+          onOpenSide={(side) => openInPane(p.id, side)}
+          openSideOff={!split && currentProjectId === p.id ? '지금 열려 있는 프로젝트예요 — 다른 프로젝트를 옆 칸으로 끌어오거나 메뉴로 여세요' : ''}
           onClose={() => setMenu(null)}
         />
       );

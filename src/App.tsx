@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
-import { ChatArea } from './components/ChatArea';
+import { Workspace } from './components/Workspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useAppStore, billingKeyOf, reconcileBillingSelection } from './store';
+import { visibleProjectIds } from './lib/split';
 
 export default function App() {
   const { projects, createProject, currentProjectId, _hasHydrated } = useAppStore();
@@ -27,8 +28,10 @@ export default function App() {
   // Keyed on the newest completion time (not a count): a deletion could lower a count and
   // wrongly re-badge, and re-running with an unchanged timestamp costs nothing because
   // markProjectSeen no-ops when there is nothing newer to record.
-  const openProjectNewestDone = useAppStore((s) => {
-    const p = s.projects.find((x) => x.id === s.currentProjectId);
+  // 나눠 보는 중(26.10.2001~)이면 두 칸 다 '보고 있는' 프로젝트다. 문자열로 묶어 둔다 — 셀렉터가 배열을 새로
+  // 만들어 돌려주면 값이 같아도 매번 다시 그린다.
+  const openProjectNewestDone = useAppStore((s) => visibleProjectIds(s).map((id) => {
+    const p = s.projects.find((x) => x.id === id);
     if (!p) return 0;
     let newest = 0;
     for (const m of p.messages) {
@@ -37,10 +40,12 @@ export default function App() {
       if (t > newest) newest = t;
     }
     return newest;
-  });
+  }).join(','));
+  const shownProjects = useAppStore((s) => visibleProjectIds(s).join(','));
   useEffect(() => {
-    if (_hasHydrated && currentProjectId) useAppStore.getState().markProjectSeen(currentProjectId);
-  }, [_hasHydrated, currentProjectId, openProjectNewestDone]);
+    if (!_hasHydrated) return;
+    for (const id of visibleProjectIds(useAppStore.getState())) useAppStore.getState().markProjectSeen(id);
+  }, [_hasHydrated, shownProjects, openProjectNewestDone]);
 
 
   // Tell the server which reference originals the history still points at, so its 30-day
@@ -238,7 +243,7 @@ export default function App() {
   return (
     <div className="flex h-screen w-full bg-[#000000] text-gray-900 overflow-hidden font-sans relative">
       <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
-      <ChatArea />
+      <Workspace />
       <SettingsPanel />
       {projectEndedNote && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[80] w-[min(92%,30rem)] flex items-start gap-2.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl shadow-lg px-3.5 py-2.5">

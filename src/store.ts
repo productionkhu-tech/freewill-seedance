@@ -6,6 +6,7 @@ import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, build
 import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
 import { createBackupClock } from './lib/backup-clock';
 import { buildSettingsPayload, type SettingsPayload } from './lib/settings-box';
+import { pointAt, openAt, focusSlot, swapSides, closeSlot, afterRemoval, sanitizeSplit, repairSplit, splitValid, visibleProjectIds, type SplitLayout, type PaneSide, type PaneSlot, type PaneState } from './lib/split';
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -983,6 +984,12 @@ function namesInContainer(
 // the header while the sidebar shows no selection at all — it reads as "nothing happened".
 // Returns the SAME array when nothing is folded: this runs on every project click, and
 // rebuilding it each time would re-serialize the persisted state for no change.
+// 작업창 나누기 — 스토어 상태에서 칸 정보만 떼어 낸다(split.ts 함수들이 받는 모양).
+const paneOf = (s: { split: SplitLayout | null; paneFocus: PaneSlot; currentProjectId: string | null }): PaneState =>
+  ({ split: s.split, paneFocus: s.paneFocus, currentProjectId: s.currentProjectId });
+const samePane = (a: PaneState, b: PaneState) =>
+  a.split === b.split && a.paneFocus === b.paneFocus && a.currentProjectId === b.currentProjectId;
+
 function revealProject(groups: ProjectGroup[], projects: Project[], projectId: string | null): ProjectGroup[] {
   if (!projectId) return groups;
   const p = projects.find(x => x.id === projectId);
@@ -1080,6 +1087,16 @@ interface AppState {
   // shared "panel + element" image budget in the Reference Assets hint.
   mentionedElementImages: number;
   setMentionedElementImages: (n: number) => void;
+  // 작업창 나누기(26.10.2001~, src/lib/split.ts). split 은 저장한다(껐다 켜도 그대로). paneFocus(지금 손대는 칸)는
+  // 저장하지 않는다 — 칸 사이를 오갈 때마다 기록 전체(수십 MB)를 다시 쓰지 않게(partialize 주석). 켜면 0번 칸이다.
+  // ★ 나눴을 때 currentProjectId 는 늘 손대는 칸의 프로젝트다(split.ts 불변식 ②). 바꾸는 길은 아래 함수들과
+  //   setCurrentProjectId 뿐 — currentProjectId 만 따로 set 하면 칸과 어긋난다(안전망이 고치긴 한다).
+  split: SplitLayout | null;
+  paneFocus: PaneSlot;
+  openInPane: (projectId: string, side: PaneSide) => void;
+  focusPane: (slot: PaneSlot) => void;
+  swapPanes: () => void;
+  closePane: (slot: PaneSlot) => void;
   setCurrentProjectId: (id: string) => void;
   // groupId 를 주면 그 그룹 안에 만든다(사이드바 그룹 머리의 +). 없거나 모르는 값이면 최상위.
   createProject: (groupId?: string) => void;
@@ -2044,6 +2061,35 @@ export const useAppStore = create<AppState>()(
       setTrackerReachable: (v) => { if (get().trackerReachable !== v) set({ trackerReachable: v }); },
       mentionedElementImages: 0,
       setMentionedElementImages: (n) => set({ mentionedElementImages: n }),
+      // ─── 작업창 나누기 (26.10.2001~) — 규칙은 src/lib/split.ts ───
+      // 바뀐 것이 없으면 set 을 부르지 않는다. focusPane 은 칸 안을 누를 때마다 불리는데, 값이 같아도 set 하면
+      // 셀렉터 없이 스토어를 읽는 화면(사이드바 · 작업창 둘 · 설정 패널)이 전부 다시 그려진다.
+      split: null,
+      paneFocus: 0,
+      openInPane: (projectId, side) => {
+        const st = get();
+        if (!st.projects.some(p => p.id === projectId)) return;
+        const next = openAt(paneOf(st), projectId, side);
+        if (samePane(next, st)) return;
+        set((state) => ({ ...next, projectGroups: revealProject(state.projectGroups, state.projects, next.currentProjectId) }));
+      },
+      focusPane: (slot) => {
+        const st = get();
+        const next = focusSlot(paneOf(st), slot);
+        if (!samePane(next, st)) set(next);
+      },
+      swapPanes: () => {
+        const st = get();
+        if (st.split) set(swapSides(paneOf(st)));
+      },
+      closePane: (slot) => {
+        const st = get();
+        if (!st.split) return;
+        // 남는 칸이 닫히는 칸의 프로젝트를 이어받을 수 있다(0번을 닫을 때) — 그 전에 두 작성 칸의 글을 초안으로 바로
+        // 저장시킨다. 0.5초 디바운스를 기다리면 이어받는 칸이 옛 초안을 읽는다(ChatArea 'seedance:flush-drafts').
+        if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('seedance:flush-drafts'));
+        set(closeSlot(paneOf(get()), slot));
+      },
       // ─── Element library state + actions ───
       assetCollections: [],
       elementAssets: [],
@@ -2088,8 +2134,9 @@ export const useAppStore = create<AppState>()(
         else delete binding[projectId];
         return { projectCollectionId: binding };
       }),
+      // 나눠 보고 있으면 손대는 칸에 띄운다 — 다른 칸에 이미 떠 있으면 그 칸으로 옮겨 갈 뿐(split.ts pointAt).
       setCurrentProjectId: (id) => set((state) => ({
-        currentProjectId: id,
+        ...pointAt(paneOf(state), id),
         projectGroups: revealProject(state.projectGroups, state.projects, id),
       })),
       createProject: (groupId) => {
@@ -2116,7 +2163,7 @@ export const useAppStore = create<AppState>()(
           const projects = [newProject, ...state.projects];
           return {
             projects,
-            currentProjectId: newProject.id,
+            ...pointAt(paneOf(state), newProject.id),   // 나눠 보고 있으면 손대는 칸에 연다
             // 접힌 그룹(또는 접힌 상위 그룹) 안에 만들면 새 프로젝트가 화면에 안 보인다 — 펼친다.
             projectGroups: revealProject(state.projectGroups, projects, newProject.id),
           };
@@ -2243,10 +2290,9 @@ export const useAppStore = create<AppState>()(
           const projects = state.projects.filter(p => !doomed.has(p.id));
           // If the open project was inside, fall back to whatever is left rather than
           // leaving currentProjectId pointing at something that no longer exists.
-          let currentProjectId = state.currentProjectId;
-          if (currentProjectId && doomed.has(currentProjectId)) {
-            currentProjectId = projects.length ? projects[0].id : null;
-          }
+          // 나눠 보던 칸의 것이 지워졌으면 남은 칸 하나로 돌아간다(split.ts afterRemoval).
+          const pane = afterRemoval(paneOf(state), (pid) => !doomed.has(pid), projects.length ? projects[0].id : null);
+          const currentProjectId = pane.currentProjectId;
           const binding = { ...state.projectCollectionId };
           for (const pid of doomed) delete binding[pid];
           // If we had to jump to another project, make sure it is actually VISIBLE.
@@ -2256,7 +2302,7 @@ export const useAppStore = create<AppState>()(
           // Unfold the whole chain down to wherever we landed — an open subfolder inside
           // a folded parent is just as invisible as a folded one.
           projectGroups = revealProject(projectGroups, projects, currentProjectId);
-          return { projectGroups, projects, currentProjectId, projectCollectionId: binding,
+          return { projectGroups, projects, ...pane, projectCollectionId: binding,
             deletedProjectIds: [...(state.deletedProjectIds || []), ...doomed].slice(-500) };
         });
       },
@@ -2385,14 +2431,13 @@ export const useAppStore = create<AppState>()(
       deleteProject: (id) => {
         set((state) => {
           const newProjects = state.projects.filter((p) => p.id !== id);
-          let newCurrentId = state.currentProjectId;
-          if (state.currentProjectId === id) {
-            newCurrentId = newProjects.length > 0 ? newProjects[0].id : null;
-          }
+          // 지금 프로젝트를 지웠으면 남은 목록의 첫 프로젝트로. 나눠 보던 칸의 것이면 남은 칸 하나로(split.ts afterRemoval).
+          const pane = afterRemoval(paneOf(state), (pid) => pid !== id, newProjects.length > 0 ? newProjects[0].id : null);
+          const newCurrentId = pane.currentProjectId;
           const binding = { ...state.projectCollectionId };
           delete binding[id]; // drop the deleted project's collection binding
           return {
-            projects: newProjects, currentProjectId: newCurrentId, projectCollectionId: binding,
+            projects: newProjects, ...pane, projectCollectionId: binding,
             projectGroups: revealProject(state.projectGroups, newProjects, newCurrentId),
             deletedProjectIds: [...(state.deletedProjectIds || []), id].slice(-500),
           };
@@ -2729,7 +2774,11 @@ export const useAppStore = create<AppState>()(
       // read, which is exactly how the one-time migration gets its source.
       partialize: (state) => ({
         projects: state.projects,
-        currentProjectId: state.currentProjectId,
+        // 나눠 보고 있으면 0번 칸의 프로젝트를 적는다 — 칸 사이를 오가면 currentProjectId 가 바뀌는데, 그때마다
+        // 기록 전체(수십 MB)를 다시 쓰지 않게. 문자열이라 값이 같으면 setItem 의 '그대로면 안 씀' 이 걸러 낸다.
+        // 켜면 0번 칸에 손댄 채로 연다(onRehydrateStorage).
+        currentProjectId: state.split ? state.split.slots[0] : state.currentProjectId,
+        split: state.split,
         autoDownload: state.autoDownload,
         assetCollections: state.assetCollections,
         projectGroups: state.projectGroups,
@@ -2773,7 +2822,11 @@ export const useAppStore = create<AppState>()(
           // 저장된 프로젝트 목록은 key·id 가 생기기 전 모양일 수 있다 — 채워 둔다. 첫 목록 수신
           // 때 통째로 바뀌지만, 그 전(트래커가 느린 시동)에도 선택창과 권한 확인이 key 로 돌아야 한다.
           const billingProjects = (state.billingProjects || []).map(p => ({ ...p, id: p.id || '', key: p.key || billingKeyOf(p) }));
-          useAppStore.setState({ projects: patched, theme, billingProjects, _hasHydrated: true });
+          // 작업창 나누기(26.10.2001~) — 저장해 둔 두 칸이 지금도 있는 서로 다른 프로젝트면 그대로, 아니면 한 칸으로.
+          // 손대는 칸은 0번이다(paneFocus 는 저장하지 않는다 — partialize 주석).
+          const split = sanitizeSplit(state.split, (pid) => patched.some(p => p.id === pid));
+          const panes = split ? { split, paneFocus: 0 as PaneSlot, currentProjectId: split.slots[0] } : { split: null, paneFocus: 0 as PaneSlot };
+          useAppStore.setState({ projects: patched, theme, billingProjects, ...panes, _hasHydrated: true });
           if (persistTroubleMsg) useAppStore.setState({ persistTrouble: persistTroubleMsg });
 
           // Element library loads from its own key (and migrates out of the legacy
@@ -2820,6 +2873,8 @@ let navAt: 0 | 1 = 1;
 // 방금 뒤로/앞으로로 간 프로젝트. ChatArea 가 이걸 보고 맨 아래 대신 보던 자리로 스크롤한다.
 let navByHistory: { id: string; at: number } | null = null;
 let navLastProjectId: string | null = null;
+// 그 이동이 일어난 칸(작업창 나누기 26.10.2001~). 한 칸이면 0.
+let navSlot: PaneSlot = 0;
 
 export function navigateProjectHistory(dir: -1 | 1): boolean {
   if (!navPair) return false;
@@ -2828,9 +2883,16 @@ export function navigateProjectHistory(dir: -1 | 1): boolean {
   const target = navPair[dir === -1 ? 0 : 1];
   if (!st.projects.some(p => p.id === target)) return false;                     // 그새 지워졌다
   navAt = dir === -1 ? 0 : 1;
-  if (target === st.currentProjectId) return false;
-  navByHistory = { id: target, at: Date.now() };
-  st.setCurrentProjectId(target);
+  // 나눠 보는 중이면 그 이동이 일어난 칸에서 되돌린다(navSlot). 옆 버튼을 누르는 순간 포인터 밑의 칸이 손대는 칸이
+  // 되는데(Workspace), 그 칸이 아니라 '방금 프로젝트를 바꾼 칸' 이 돌아가야 한다. 그 칸에 아직 그 프로젝트가 떠
+  // 있을 때만 — 그새 칸을 닫았거나 바꿨으면 지금 손대는 칸에서(예전 규칙).
+  const from = navPair[dir === -1 ? 1 : 0];
+  if (st.split && st.split.slots[navSlot] === from && st.paneFocus !== navSlot) st.focusPane(navSlot);
+  const now = useAppStore.getState();
+  if (target === now.currentProjectId) return false;
+  // 나눠 본 다른 칸에 떠 있으면 그 칸으로 손만 옮긴다 — 어느 칸도 프로젝트를 바꾸지 않으니 '보던 자리' 표시가 필요 없다.
+  if (!visibleProjectIds(now).includes(target)) navByHistory = { id: target, at: Date.now() };
+  now.setCurrentProjectId(target);
   return true;
 }
 
@@ -2846,12 +2908,14 @@ export function consumeHistoryNav(projectId: string | null): boolean {
 // 예전 코드는 0.18초 뒤에 메시지로 굴려서 곧바로 바닥으로 끌려 내려갔다 — 찾기가 안 되는 것처럼 보였다.
 // 이제 갈 곳을 여기 맡겨 두고, ChatArea 가 그 프로젝트를 그리는 순간 맨 아래 대신 그 메시지로 간다
 // (consumeFindRequest). 지금 보고 있는 프로젝트면 이벤트로 바로 알린다.
+// 나눠 보는 중이면 그 프로젝트가 떠 있는 칸이 받는다(이벤트의 projectId) — 다른 칸에 떠 있으면 그 칸으로 손을 옮긴다.
 let findRequest: { projectId: string; messageId: string; at: number } | null = null;
 export function requestFindMessage(projectId: string, messageId: string): void {
   const st = useAppStore.getState();
   if (!st.projects.some(p => p.id === projectId)) return;
-  if (st.currentProjectId === projectId) {
-    window.dispatchEvent(new CustomEvent('seedance:find-message', { detail: { messageId } }));
+  if (visibleProjectIds(st).includes(projectId)) {
+    if (st.currentProjectId !== projectId) st.setCurrentProjectId(projectId);   // 다른 칸 → 그 칸으로(프로젝트 전환 없음)
+    window.dispatchEvent(new CustomEvent('seedance:find-message', { detail: { messageId, projectId } }));
     return;
   }
   findRequest = { projectId, messageId, at: Date.now() };
@@ -2863,7 +2927,7 @@ export function consumeFindRequest(projectId: string | null): string | null {
   return r && projectId && r.projectId === projectId && Date.now() - r.at < 5000 ? r.messageId : null;
 }
 
-useAppStore.subscribe((state) => {
+useAppStore.subscribe((state, prevState) => {
   const cur = state.currentProjectId;
   if (cur === navLastProjectId) return;
   const prev = navLastProjectId;
@@ -2871,8 +2935,26 @@ useAppStore.subscribe((state) => {
   if (navByHistory && navByHistory.id === cur) return;       // 뒤로/앞으로가 만든 전환 — 쌍은 그대로
   if (!state._hasHydrated || !prev || !cur) return;          // 켜질 때 되살린 선택
   if (!state.projects.some(p => p.id === prev) || !state.projects.some(p => p.id === cur)) return;
+  // 나눠 본 두 칸 사이를 오간 것(칸 안을 누름 · 다른 칸에 놓기 · 칸 닫기)은 이동이 아니다 — 바뀌기 전이나 뒤에
+  // 둘 다 화면에 있었다.
+  const both = (sp: SplitLayout | null) => !!sp && sp.slots.includes(prev) && sp.slots.includes(cur);
+  if (both(state.split) || both(prevState.split)) return;
   navPair = [prev, cur];
   navAt = 1;
+  navSlot = state.split ? state.paneFocus : 0;
+});
+
+// 작업창 나누기 안전망(26.10.2001~). 칸을 바꾸는 길은 split.ts 함수뿐이지만, 백업 되살리기처럼 상태를 통째로 넣는 길이나
+// 앞으로 생길 코드가 칸이 없는 프로젝트를 가리키게 하거나 '지금 프로젝트' 와 어긋나게 하면 바로 고친다(repairSplit).
+// 한 칸일 때는 첫 줄에서 끝난다.
+useAppStore.subscribe((state) => {
+  if (!state._hasHydrated || (!state.split && state.paneFocus === 0)) return;
+  const exists = (id: string) => state.projects.some(p => p.id === id);
+  const pane = paneOf(state);
+  if (splitValid(pane, exists)) return;
+  const fixed = repairSplit(pane, exists, state.projects[0]?.id ?? null);
+  console.warn('[Split] 칸이 어긋나 고쳤어요', { before: pane, after: fixed });
+  useAppStore.setState(fixed);
 });
 
 useAppStore.subscribe((state) => {

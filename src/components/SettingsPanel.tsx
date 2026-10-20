@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
-import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen } from 'lucide-react';
+import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
 import { ElementLibrary } from './ElementLibrary';
+import { sideOf } from '../lib/split';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   // Gemini Omni 1.1 only — no Seedance model lists it, so allowedResolutions() filters it
@@ -187,7 +188,7 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjectKey, billingProjects, setBillingProjectKey, trackerReachable } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjectKey, billingProjects, setBillingProjectKey, trackerReachable, split, paneFocus } = useAppStore();
   const needsBillingSelection = !billingProjectKey; // strict: no project → block generation
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
@@ -654,6 +655,14 @@ export function SettingsPanel() {
       <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 dark:bg-[#242426]/80 backdrop-blur-xl z-10">
         <Settings size={18} className="text-gray-500" />
         <h2 className="text-[21px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight">Settings</h2>
+        {/* 나눠 보는 중(26.10.2001~)이면 이 설정이 어느 칸 것인지 — 손대는 칸(위쪽 파란 띠)의 프로젝트다. */}
+        {split && (
+          <span className="ml-auto min-w-0 flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/15 rounded-md px-1.5 py-0.5"
+            title={`${sideOf(split, paneFocus) === 'left' ? '왼쪽' : '오른쪽'} 칸 · ${project.name}`}>
+            {sideOf(split, paneFocus) === 'left' ? <PanelLeft size={12} className="shrink-0" /> : <PanelRight size={12} className="shrink-0" />}
+            <span className="truncate">{project.name}</span>
+          </span>
+        )}
       </div>
 
       <div className="p-4 space-y-6">
