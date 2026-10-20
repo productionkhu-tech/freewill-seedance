@@ -1405,10 +1405,14 @@ async function startServer() {
   };
   type ScreenProject = { id: string; name: string; billing: string | null };
   // 작업의 대상 — 화면의 agentResolveProject(ChatArea)와 같은 규칙: id 먼저, project 칸이 id 면 그것, 아니면 이름 그대로.
-  // 같은 이름이 둘이거나 못 찾으면 null — 그런 작업은 내준다(화면이 후보 · 이유를 붙여 실패로 돌려준다).
+  // 같은 이름이 둘이거나 못 찾거나 id 와 이름이 서로 다르면 null — 그런 작업은 내준다(화면이 후보 · 이유를 붙여 실패로 돌려준다).
   const agentJobTarget = (j: AgentJob, list: ScreenProject[]): ScreenProject | null => {
-    if (j.spec.projectId) return list.find(x => x.id === j.spec.projectId) || null;
     const n = (j.spec.project || '').trim();
+    if (j.spec.projectId) {
+      const t = list.find(x => x.id === j.spec.projectId) || null;
+      if (t && n && n !== t.id && n !== t.name.trim()) return null;
+      return t;
+    }
     if (!n) return null;
     const byId = list.find(x => x.id === n);
     if (byId) return byId;
@@ -1418,7 +1422,7 @@ async function startServer() {
   const agentJobs = new Map<string, AgentJob>();
   let agentScreen: {
     at: number; project?: string; billing?: string | null; generating?: boolean; composer?: boolean;
-    allowedModels?: string[]; fourK?: boolean;
+    allowedModels?: string[]; fourK?: boolean; billingReady?: boolean;
   } = { at: 0 };
   let agentManual: { version: string; manual: unknown; text: string } | null = null;   // 화면이 올린 설명서
   const manualVersionNow = () => agentManual?.version ?? null;
@@ -1436,7 +1440,9 @@ async function startServer() {
         j.status = 'failed'; j.updatedAt = now;
         j.error = j.needsBilling && j.waitingFor
           ? `"${j.waitingFor.project}" 의 프로젝트 코드가 10분 동안 골라지지 않아 취소했습니다. 사람에게 앱에서 그 프로젝트의 "프로젝트 코드" 를 골라 달라고 한 뒤 다시 보내 주세요.`
-          : '앱이 10분 안에 이 요청을 받지 못해 취소했습니다(앱이 꺼져 있었거나 다른 요청을 보내느라 바빴습니다). 다시 보내 주세요.';
+          : agentScreen.billingReady === false
+            ? '앱이 프로젝트 코드 목록(시트)을 아직 받지 못해 10분 동안 보내지 못했습니다. 앱의 인터넷 · 시트 연결을 확인해 달라고 한 뒤 다시 보내 주세요.'
+            : '앱이 10분 안에 이 요청을 받지 못해 취소했습니다(앱이 꺼져 있었거나 다른 요청을 보내느라 바빴습니다). 다시 보내 주세요.';
         j.needsBilling = false;
         console.warn(`[Agent] job ${j.id} → failed (10분 대기)`);
         continue;
@@ -1522,7 +1528,8 @@ async function startServer() {
       id, createdAt: now, updatedAt: now, status: 'pending',
       spec: {
         prompt, settings, refs,
-        // 확인 카드에서 사용자가 본 프로젝트(사이드바) · 과금 프로젝트. 화면의 지금 값과 다르면 화면이 보내지 않는다.
+        // 보낼 프로젝트(projectId · 이름 — 둘 다 적었는데 다르면 화면이 보내지 않는다)와 확인 카드에서 본 코드 이름(billing —
+        // 그 프로젝트의 지금 코드와 다르면 보내지 않는다). 26.10.2002~ 열린 프로젝트와는 상관없다.
         ...(hasProject ? { project: b.project.trim() } : {}),
         ...(hasProjectId ? { projectId: b.projectId.trim().slice(0, 80) } : {}),
         ...(typeof b.billing === 'string' && b.billing.trim() ? { billing: b.billing.trim() } : {}),
@@ -1547,7 +1554,28 @@ async function startServer() {
       composer: b.composer !== false,
       allowedModels: Array.isArray(b.allowedModels) ? b.allowedModels.filter((x: unknown) => typeof x === 'string').slice(0, 50) : undefined,
       fourK: b.fourK === true,
+      billingReady: b.billingReady !== false,
     };
+    // 받다 끊긴 것 닫기(26.10.2002 검토) — 화면은 받은 요청 · 명령 id 를 끝 보고가 닿을 때까지 working 에 실어 보낸다. 이 화면이
+    // 가져간 taken 인데 30초가 지나도(claim 응답 제한 15초의 두 배) working 에 없으면, 화면이 그 응답을 못 받았거나 끝 보고를
+    // 잃은 것이다 — 다시 내놓지 않고(§7-24 두 번 과금) 실패로 닫고 '앱에서 확인' 을 안내한다. 전에는 화면이 계속 들르니
+    // '화면 응답 없음' 도 안 걸려 taken 에 영원히 굳었다. working 을 안 보내는 화면은 건너뛴다.
+    if (screen && Array.isArray(b.working)) {
+      const working = new Set(b.working.filter((x: unknown) => typeof x === 'string').slice(0, 500));
+      for (const j of agentJobs.values()) {
+        if (j.status !== 'taken' || j.takenBy !== screen || working.has(j.id) || now - j.updatedAt < 30000) continue;
+        j.status = 'failed'; j.updatedAt = now;
+        j.error = '앱 화면이 이 요청을 받다가 연락이 끊겼습니다(받지 못했거나 결과를 알리지 못함). 앱에서 그 프로젝트에 카드가 생겼는지 확인한 뒤, 없으면 다시 보내 주세요.';
+        console.warn(`[Agent] job ${j.id} → failed (받다 끊김)`);
+      }
+      for (const c of agentCmds.values()) {
+        if (c.status !== 'taken' || c.takenBy !== screen || working.has(c.id) || now - c.updatedAt < 30000) continue;
+        c.status = 'failed'; c.updatedAt = now;
+        c.error = '앱 화면이 이 명령을 받다가 연락이 끊겼습니다. 앱에서 결과를 확인한 뒤 필요하면 다시 보내 주세요.';
+        console.warn(`[Agent] 명령 ${c.command} ${c.id} → failed (받다 끊김)`);
+        settleCmd(c);
+      }
+    }
     pruneAgentJobs();
     pruneAgentCmds();
     // manualVersion: 화면은 자기 설명서와 다르면(서버가 다시 떴거나 처음) 올린다.
@@ -1566,20 +1594,21 @@ async function startServer() {
       ? b.projects.filter((x: any) => x && typeof x.id === 'string' && typeof x.name === 'string')
         .slice(0, 5000).map((x: any) => ({ id: x.id, name: x.name, billing: typeof x.billing === 'string' && x.billing ? x.billing : null }))
       : null;
-    let next: AgentJob | undefined;
-    if (!b.peek && screen) {
-      for (const j of [...agentJobs.values()].filter(j => j.status === 'pending').sort((x, y) => x.createdAt - y.createdAt)) {
-        const t = list ? agentJobTarget(j, list) : null;
+    // 기다림 표시는 화면이 처리 중(peek)이어도 매번 다시 본다 — 늦게 뜨지 않게(26.10.2002 검토).
+    const pending = [...agentJobs.values()].filter(j => j.status === 'pending').sort((x, y) => x.createdAt - y.createdAt);
+    if (list) {
+      for (const j of pending) {
+        const t = agentJobTarget(j, list);
         if (t && !t.billing) {
           if (!j.needsBilling) console.log(`[Agent] job ${j.id} — "${t.name}" 의 프로젝트 코드를 기다림`);
           j.needsBilling = true; j.waitingFor = { project: t.name, projectId: t.id };
-          continue;   // 뒤의 다른 프로젝트 작업은 막지 않는다
-        }
-        j.needsBilling = false; delete j.waitingFor;
-        next = j;
-        break;
+        } else { j.needsBilling = false; delete j.waitingFor; }
       }
     }
+    // 가져가기 — 화면이 바쁘지 않고 코드 목록을 받은 뒤에만(목록 전이면 다 '코드 없음' 으로 보인다). 코드를 기다리는 작업은
+    // 건너뛴다 — 뒤의 다른 프로젝트 작업은 막지 않는다.
+    let next: AgentJob | undefined;
+    if (!b.peek && screen && b.billingReady !== false) next = pending.find(j => !j.needsBilling);
     // 화면이 그 프로젝트에 알린다(설정 패널 '프로젝트 코드' 옆) — 프로젝트 id → 기다리는 수.
     const waitingBilling: Record<string, number> = {};
     for (const j of waitingJobs()) waitingBilling[j.waitingFor!.projectId] = (waitingBilling[j.waitingFor!.projectId] || 0) + 1;
@@ -1593,7 +1622,11 @@ async function startServer() {
     const j = agentJobs.get(req.params.id);
     if (!j) return res.status(404).json({ error: 'no such job' });
     const b = req.body || {};
-    if (b.status === 'sent' || b.status === 'done' || b.status === 'failed') { j.status = b.status; j.needsBilling = false; }
+    if (b.status === 'sent' || b.status === 'done' || b.status === 'failed') {
+      // 'done' 은 끝 — 늦게 닿은 'sent'(화면이 다시 보낸 보고)로 되돌리지 않는다. 'failed'(응답 없음 · 받다 끊김) 뒤의 'sent' · 'done' 은 사실이다.
+      if (!(j.status === 'done' && b.status !== 'done')) j.status = b.status;
+      j.needsBilling = false;
+    }
     // 늦게라도 화면이 '보냈다' 고 알려 오면 그게 사실이다 — 응답 없음으로 닫아 둔 문구를 지운다.
     if (typeof b.error === 'string') j.error = b.error.slice(0, 4000);
     else if (b.status === 'sent') delete j.error;

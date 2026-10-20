@@ -573,7 +573,16 @@ const rebindMentionPills = (html: string, named: { id: string; name: string }[])
 
 // 보낸 에이전트 작업 → 카드 상태를 올릴 것(26.10.2002~ 앱에 하나). 예전에는 칸(ChatArea)마다 들고 있어서, 보낸 칸을 닫으면
 // 그 작업이 'sent' 에서 멈췄다. 이제 손대는 칸이 누구 것이든 이어서 올린다(agentReportProgress).
-const agentActive = new Map<string, { projectId: string; ids: string[]; last: string }>();
+const agentActive = new Map<string, { projectId: string; ids: string[]; last: string; inFlight?: boolean }>();
+// 화면 id 와 '처리 중' 은 창에 하나(26.10.2002 검토). 칸마다 두면, 왼쪽 칸이 요청을 처리하는(업로드) 사이 사용자가 오른쪽 칸을
+// 누를 때 왼쪽 칸은 작업함에 들르지 않아(손대는 칸만 들른다) 서버가 60초 뒤 그 요청을 '화면 응답 없음' 실패로 닫았다 → 에이전트가
+// 다시 보내면 오른쪽 칸이 바로 보내고 왼쪽도 업로드를 마치고 보내 두 번 과금될 수 있었다. 이제 어느 칸이 손대는 칸이든 같은 id 로
+// 들르고, 처리 중이면 상태만 알린다(peek).
+const agentScreenId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+let agentBusy = false;
+// 받아서 아직 '끝 보고'(요청: sent/failed · 명령: done/failed)가 서버에 닿지 않은 id — claim 마다 알린다. 서버는 이 화면이 가져간
+// taken 인데 여기 없는 것을 '받다 끊긴 것' 으로 닫는다(claim 응답을 못 받았거나 보고를 잃음 — taken 에 영원히 굳지 않게).
+const agentWorking = new Set<string>();
 
 // 작업함 호출엔 시간 제한 — 서버가 답을 안 하면 agentBusy 가 안 풀려 에이전트 줄 전체가 소리 없이 멈췄다.
 // (BytePlus 생성 요청에는 두지 않는다 — 끊어도 작업은 만들어질 수 있어, 카드만 '실패' 가 된다.)
@@ -587,8 +596,21 @@ const withTimeout = <T,>(p: Promise<T>, ms: number, what: string): Promise<T> =>
   const t = window.setTimeout(() => reject(new Error(`${what} — ${Math.round(ms / 1000)}초 안에 끝나지 않았습니다`)), ms);
   p.then(v => { window.clearTimeout(t); resolve(v); }, e => { window.clearTimeout(t); reject(e); });
 });
-const agentReport = (id: string, body: Record<string, unknown>) =>
-  agentPost(`/api/agent/jobs/${encodeURIComponent(id)}/report`, body).then(() => undefined, () => undefined);
+// 끝 보고는 닿을 때까지 다시 보낸다(2초 → 30초 간격) — 잃으면 서버에서 그 요청 · 명령이 taken 에 굳는다. 닿을 때까지 agentWorking
+// 에 남긴다. 404 = 서버가 다시 떠서 그 요청이 없다 — 그만. 기다리지 않는다(부르는 쪽은 void) — 다음 요청을 막지 않게.
+const agentReportSure = (kind: 'jobs' | 'commands', id: string, body: Record<string, unknown>): Promise<void> => {
+  agentWorking.add(id);
+  return new Promise(resolve => {
+    let tries = 0;
+    const go = () => {
+      agentPost(`/api/agent/${kind}/${encodeURIComponent(id)}/report`, body)
+        .then(r => { if (!r.ok && r.status !== 404) throw new Error(String(r.status)); agentWorking.delete(id); resolve(); })
+        .catch(() => { tries++; window.setTimeout(go, Math.min(30000, 2000 * tries)); });
+    };
+    go();
+  });
+};
+const agentReport = (id: string, body: Record<string, unknown>) => agentReportSure('jobs', id, body);
 
 // 카드 상태 → 에이전트에게 보여 줄 모양. 카드를 지웠으면 missing.
 const agentCards = (projectId: string, ids: string[]) => {
@@ -605,15 +627,23 @@ const agentCards = (projectId: string, ids: string[]) => {
   });
 };
 // 보낸 요청의 카드 상태를 올린다(바뀐 때만). 전부 끝나면(성공 · 실패 · 지워짐) done. 손대는 칸이 2초마다.
+// 보고가 닿은 뒤에만 '올렸음' 으로 치고 지운다 — 예전엔 보내기 전에 지워서, 'done' 을 잃으면 에이전트 쪽이 'sent' 에 굳었다.
 const agentReportProgress = () => {
   for (const [jobId, a] of agentActive) {
+    if (a.inFlight) continue;
     const cards = agentCards(a.projectId, a.ids);
     const sig = JSON.stringify(cards);
     if (sig === a.last) continue;
-    a.last = sig;
     const finished = cards.every(c => c.status === 'succeeded' || c.status === 'failed' || c.status === 'missing');
-    if (finished) agentActive.delete(jobId);
-    void agentReport(jobId, { status: finished ? 'done' : 'sent', messages: cards });
+    a.inFlight = true;
+    agentPost(`/api/agent/jobs/${encodeURIComponent(jobId)}/report`, { status: finished ? 'done' : 'sent', messages: cards })
+      .then(r => {
+        if (r.status === 404) { agentActive.delete(jobId); return; }   // 서버가 다시 떠서 그 요청이 없다
+        if (!r.ok) return;                                              // 다음 틱에 다시
+        a.last = sig;
+        if (finished) agentActive.delete(jobId);
+      }, () => { /* 다음 틱에 다시 */ })
+      .finally(() => { a.inFlight = false; });
   }
 };
 // 에이전트가 가리킨 프로젝트 — id 먼저(projects.list 의 id), 없으면 사이드바 이름 그대로. 대상이 애매하면 고르지 않는다:
@@ -622,12 +652,14 @@ const agentReportProgress = () => {
 const agentResolveProject = (projectId: unknown, name: unknown, what = '보낼 프로젝트') => {
   const st = useAppStore.getState();
   const id = typeof projectId === 'string' ? projectId.trim() : '';
+  const n = typeof name === 'string' ? name.trim() : '';
   if (id) {
     const p = st.projects.find(x => x.id === id);
     if (!p) throw new Error(`프로젝트를 찾지 못했습니다(id ${id}) — 지워졌을 수 있습니다. projects.list 로 다시 확인해 주세요.`);
+    // 둘 다 적었는데 다르면 보내지 않는다(26.10.2002 검토) — 확인한 뒤 이름이 바뀌었거나 id 를 잘못 짝지은 것이다.
+    if (n && n !== id && n !== p.name.trim()) throw new Error(`projectId 의 프로젝트 이름은 "${p.name}" 입니다(요청: "${n}") — 이름이 바뀌었거나 id 가 다른 프로젝트 것입니다. projects.list 로 확인한 뒤 다시 보내 주세요.`);
     return p;
   }
-  const n = typeof name === 'string' ? name.trim() : '';
   if (!n) throw new Error(`${what}가 없습니다 — projectId(projects.list 의 id) 또는 project(사이드바 이름 그대로)를 적어 주세요.`);
   const byId = st.projects.find(x => x.id === n);   // project 칸에 id 를 적은 경우(예전 명령은 둘 다 받았다)
   if (byId) return byId;
@@ -2188,8 +2220,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // ── 에이전트 작업함 (26.10.302~) — 훅이라 아래 `if (!project) return null` 보다 위에 둔다 ──
   // 2초마다 server.ts 작업함을 들여다본다(폴링은 setInterval 하나 — HANDOFF §7 API 4). 실제 처리(agentTick)는
   // handleSend 아래에 있고, 렌더마다 새 함수로 바꿔 끼운다 — 그래야 지금 화면의 상태(isGenerating 등)를 본다.
-  const agentScreenId = useMemo(() => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, []);
-  const agentBusyRef = useRef(false);   // 작업 하나를 보내는 중(가져온 요청을 처리하는 중)
+  // 화면 id(agentScreenId) · 처리 중(agentBusy) · 받은 id(agentWorking)는 창에 하나(모듈) — 칸마다 두지 않는다(위 주석).
   const restoreBusyRef = useRef(false); // 받은 영상을 작성 칸에 불러오는 중(26.10.801~ runRestore — 둘이 섞이지 않게)
   const agentTickRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => {
@@ -2210,7 +2241,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     try {
       const r = await fetch('/api/agent/jobs/claim', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ screen: agentScreenId, peek: true, project: null, billing: null, composer: false, manual: agentManual().version }),
+        body: JSON.stringify({ screen: agentScreenId, peek: true, project: null, billing: null, composer: false, manual: agentManual().version, working: [...agentWorking] }),
       });
       if (r.ok) agentSyncManual((await r.json())?.manualVersion);
     } catch { /* 다음 틱에 */ }
@@ -2495,7 +2526,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 두 칸의 공통 틀(26.10.801 검토): 하나가 끝날 때까지 다음 것을 받지 않고(두 초기화가 섞이지 않게), 시작한 채팅을 고정하고
   // (기다리는 사이 다른 채팅으로 옮기면 거기에 섞이지 않게 — 초기화 전이면 멈추고, 뒤면 원래 채팅에 넣어 둔다), 도중에 실패하면
   // 불러오기 전으로 되돌린다(초기화만 되고 끝나면 쓰던 글을 잃는다).
-  // (restoreBusyRef 는 위 agentBusyRef 옆에 있다 — 훅은 'if (!project) return' 보다 앞이어야 한다.)
+  // (restoreBusyRef 는 위 에이전트 작업함 훅 옆에 있다 — 훅은 'if (!project) return' 보다 앞이어야 한다.)
   // 26.10.2002~ 에이전트는 작성 칸을 빌리지 않는다 — 에이전트가 보내는 중이어도 불러오기를 막지 않는다.
   const runRestore = async (how: 'paste' | 'restore', t: RestoreTarget, pick: LocalMatch | null, snapshot?: ComposerSnapshot) => {
     if (restoreBusyRef.current) { warn('앞의 영상을 불러오는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
@@ -3282,7 +3313,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   //   · 진행은 카드(스토어 메시지)에서 읽어 올린다. /api/byteplus/tasks/:id 를 따로 부르지 않는다(server.ts 주석).
   const agentFail = (job: any, error: string, projectName?: string) => {
     showToast(`${projectName ? `[${projectName}] ` : ''}에이전트 요청을 보내지 않았어요 — ${error.split('\n')[0]}`, false);
-    return agentReport(job.id, { status: 'failed', error, ...(projectName ? { project: projectName } : {}) });
+    void agentReport(job.id, { status: 'failed', error, ...(projectName ? { project: projectName } : {}) });
   };
 
   // 경로의 파일을 화면으로 가져온다. 서버가 디스크에서 읽어 미디어 캐시에 넣고(cache-from-path — 재사용이 쓰는 그 길),
@@ -3379,14 +3410,13 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (!ids?.length) return fail(warnings.join('\n') || '앱이 보내지 않았습니다.');
     agentActive.set(job.id, { projectId: target.id, ids, last: '' });
     showToast(`[${target.name}] 에이전트 요청을 보냈어요 — 카드 ${ids.length}개${job.name ? ` (${job.name})` : ''}`, true);
-    await agentReport(job.id, { status: 'sent', project: target.name, projectId: target.id, messages: agentCards(target.id, ids), ...(warnings.length ? { warnings } : {}) });
+    void agentReport(job.id, { status: 'sent', project: target.name, projectId: target.id, messages: agentCards(target.id, ids), ...(warnings.length ? { warnings } : {}) });
   };
 
   /* ─── 에이전트 명령 (26.10.305~) ─── */
   // 설명서의 AGENT_COMMANDS(src/lib/agent-inbox.ts)와 짝 — 이름이 같아야 한다. 앱 버튼이 부르는 것과 같은 스토어 함수 ·
   // 화면 함수로 실행한다. 지우기와 과금 프로젝트 고르기는 없다(사용자 결정 2026-10-03 — 사람이 앱에서).
-  const agentCmdReport = (id: string, body: Record<string, unknown>) =>
-    agentPost(`/api/agent/commands/${encodeURIComponent(id)}/report`, body, 30000).then(() => undefined, () => undefined);
+  const agentCmdReport = (id: string, body: Record<string, unknown>) => { void agentReportSure('commands', id, body); };
 
   const agentFindCollection = (ref: unknown) => {
     const st = useAppStore.getState();
@@ -3672,14 +3702,14 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const agentRunCommand = async (cmd: { id: string; command: string; args?: any }) => {
     const fn = agentCommands[cmd.command];
     if (!fn) {
-      await agentCmdReport(cmd.id, { status: 'failed', error: `모르는 명령입니다: ${cmd.command}\n(있는 명령: ${AGENT_COMMANDS.map(c => c.name).join(', ')})` });
+      agentCmdReport(cmd.id, { status: 'failed', error: `모르는 명령입니다: ${cmd.command}\n(있는 명령: ${AGENT_COMMANDS.map(c => c.name).join(', ')})` });
       return;
     }
     try {
       const result = await fn(cmd.args && typeof cmd.args === 'object' ? cmd.args : {});
-      await agentCmdReport(cmd.id, { status: 'done', result: result ?? null });
+      agentCmdReport(cmd.id, { status: 'done', result: result ?? null });
     } catch (e: any) {
-      await agentCmdReport(cmd.id, { status: 'failed', error: e?.message || String(e) });
+      agentCmdReport(cmd.id, { status: 'failed', error: e?.message || String(e) });
     }
   };
 
@@ -3692,10 +3722,12 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     //    다른 요청을 보내는 중(busy)이면 상태만 알린다(peek).
     const st = useAppStore.getState();
     const proj = st.projects.find(p => p.id === st.currentProjectId);
-    const busy = agentBusyRef.current;
+    const busy = agentBusy;
+    // 코드 목록(시트)을 아직 못 받았으면 대상 판단을 하지 않는다 — 다 '코드 없음' 으로 보여 잘못 기다리게 했다(26.10.2002 검토).
+    const billingReady = st.billingProjects.length > 0;
     const peek = busy;
     const takeCommands = !busy;
-    if (!busy) agentBusyRef.current = true;   // 응답을 기다리는 사이 다음 틱이 또 가져가지 않게
+    if (!busy) agentBusy = true;   // 응답을 기다리는 사이 다음 틱(어느 칸이든)이 또 가져가지 않게
     let job: any = null;
     let commands: any[] = [];
     try {
@@ -3714,13 +3746,19 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           allowedModels: MODELS.filter(m => isModelAllowed(m.id, billingOf(st, st.currentProjectId))).map(m => m.id),
           fourK: isFourKAllowed(billingOf(st, st.currentProjectId)),
           // 26.10.2002~ 프로젝트마다 코드가 있는지 — 서버가 '대상 프로젝트에 코드가 없는 작업' 을 내주지 않고 기다리게 한다.
-          ...(peek ? {} : { projects: st.projects.map(p => ({ id: p.id, name: p.name, billing: projectBilling(st, p.id)?.project ?? null })) }),
+          // 처리 중(peek)에도 보낸다 — 기다림 표시가 늦지 않게. 코드 목록이 아직이면 보내지 않고 billingReady:false.
+          billingReady,
+          ...(billingReady ? { projects: st.projects.map(p => ({ id: p.id, name: p.name, billing: projectBilling(st, p.id)?.project ?? null })) } : {}),
+          working: [...agentWorking],
         }),
       });
       if (res.ok) {
         const data = await res.json();
         job = data?.job || null;
         commands = Array.isArray(data?.commands) ? data.commands : [];
+        // 받은 순간 '처리 중' 으로 — 다음 claim 부터 서버가 이 id 를 받은 것으로 안다(끝 보고가 닿으면 빠진다).
+        if (job?.id) agentWorking.add(job.id);
+        for (const c of commands) if (c?.id) agentWorking.add(c.id);
         agentSyncManual(data?.manualVersion);
         agentNoteWaiting(data?.waitingBilling);
       }
@@ -3732,9 +3770,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       for (const c of commands) await agentRunCommand(c);
       if (job) {
         try { await agentProcess(job); }
-        catch (e: any) { await agentReport(job.id, { status: 'failed', error: e?.message || String(e) }); }
+        catch (e: any) { void agentReport(job.id, { status: 'failed', error: e?.message || String(e) }); }
       }
-    } finally { agentBusyRef.current = false; }
+    } finally { agentBusy = false; }
   };
   agentTickRef.current = agentTick;
 
