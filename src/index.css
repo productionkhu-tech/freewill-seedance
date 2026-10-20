@@ -225,8 +225,11 @@ body {
   from { opacity: 0; transform: translateY(20px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+/* backwards — 끝난 뒤에는 transform 을 남기지 않는다(26.10.2001~). both 로 두면 끝난 카드마다 translateY(0) 이 계속 걸려
+   카드 수만큼 그리기 단위가 갈라졌다: 665장 프로젝트에서 스크롤 한 번마다 Layerize 가 프레임당 수십 ms(스크롤 20번 2.9초 →
+   0.14초, 실측 2026-10-20). 보이는 끝 모습은 같다. */
 .animate-fade-in-up {
-  animation: fadeInUp 0.35s ease-out both;
+  animation: fadeInUp 0.35s ease-out backwards;
 }
 .animate-fade-in {
   animation: fadeIn 0.25s ease-out both;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
@@ -213,6 +213,23 @@ export function SettingsPanel() {
   }, []);
 
   const project = projects.find((p) => p.id === currentProjectId);
+
+  // 프로젝트마다 보던 자리(26.10.2001~). 작업창을 나눠 칸을 오가면 설정 패널이 그 칸의 프로젝트로 바뀌는데, 스크롤은
+  // 픽셀 그대로 남아 다른 프로젝트의 엉뚱한 칸을 보여 줬다. 돌아오면 그 프로젝트에서 보던 자리로, 처음이면 맨 위로.
+  // 그리기 전에(layout effect) 옮긴다 — 한 프레임이라도 다른 자리가 보이면 출렁임이 그대로다. scroll-behavior 가
+  // 전역 smooth 라 instant 로. (훅이라 아래 'if (!project) return' 보다 위에 둔다.)
+  const panelRef = useRef<HTMLDivElement>(null);
+  const panelScrollMemo = useRef(new Map<string, number>());
+  const panelProjectRef = useRef<string | null>(null);
+  const rememberPanelScroll = () => {
+    const el = panelRef.current;
+    if (el && panelProjectRef.current) panelScrollMemo.current.set(panelProjectRef.current, el.scrollTop);
+  };
+  useLayoutEffect(() => {
+    panelProjectRef.current = currentProjectId;
+    const el = panelRef.current;
+    if (el && currentProjectId) el.scrollTo({ top: panelScrollMemo.current.get(currentProjectId) ?? 0, behavior: 'instant' as ScrollBehavior });
+  }, [currentProjectId]);
 
   if (!project) return null;
   const { settings, assets } = project;
@@ -649,7 +666,7 @@ export function SettingsPanel() {
   };
 
   return (
-    <div className="w-80 bg-[#f5f5f7] dark:bg-[#242426] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0"
+    <div ref={panelRef} onScroll={rememberPanelScroll} className="w-80 bg-[#f5f5f7] dark:bg-[#242426] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => { e.preventDefault(); setDragOverAssetId(null); }}>
       <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 dark:bg-[#242426]/80 backdrop-blur-xl z-10">
@@ -665,7 +682,10 @@ export function SettingsPanel() {
         )}
       </div>
 
-      <div className="p-4 space-y-6">
+      {/* 프로젝트마다 새로 그린다(key, 26.10.2001~). 작업창을 나눠 칸을 오가면 프로젝트가 바뀔 때마다 모드별 칸이 접혔다
+          펴지는 애니메이션(0.15초 + 0.15초)을 타서 패널 높이가 출렁였다 — 새로 그리면 그 자리에서 바로 뜬다(위아래
+          AnimatePresence 의 initial={false}). 같은 프로젝트에서 모드를 바꿀 때의 애니메이션은 그대로다. */}
+      <div key={project.id} className="p-4 space-y-6">
         {/* 프로젝트 (시트 연동) — Generation Settings 위. 생성하려면 반드시 선택(strict:
             없으면 생성 불가). 언제든 변경 가능. 큐 전송/로컬 프로젝트 전환엔 안 바뀌고,
             진행→종료되면 자동 해제 후 재선택 요구. */}
@@ -922,7 +942,7 @@ export function SettingsPanel() {
               </label>
               {settings.return_last_frame && <p className="text-[11px] text-amber-600 mt-1 ml-6">라스트프레임 사용 시 비활성</p>}
             </div>
-            <AnimatePresence>
+            <AnimatePresence initial={false}>
             {RETURN_LAST_FRAME_MODES.includes(settings.mode) && (
               <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.15 }} className="overflow-hidden">
                 <label className="flex items-center gap-2 cursor-pointer">
@@ -998,7 +1018,7 @@ export function SettingsPanel() {
             {assets.length > 0 && <p className="text-[10px] text-gray-400 text-center pt-0.5">{framesFixed ? '↻ 또는 파일 드롭으로 교체 (멘션 유지)' : '⠿ 잡아서 끌면 순서 변경 · ↻ 또는 파일 드롭으로 교체 (멘션 유지)'}</p>}
           </div>
 
-          <AnimatePresence mode="wait">
+          <AnimatePresence mode="wait" initial={false}>
             <motion.div key={isOmni ? `omni-${omniTask}` : settings.mode} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.15 }} className="space-y-2 pt-2">
               {/* ── Gemini Omni asset UI (mirrors the Seedance per-mode pattern, Omni values) ── */}
               {isOmni && (
@@ -1183,7 +1203,7 @@ export function SettingsPanel() {
             </motion.div>
           </AnimatePresence>
 
-          <AnimatePresence>
+          <AnimatePresence initial={false}>
           {!isOmni && settings.mode !== 'text_to_video' && (
             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.15 }} className="overflow-hidden">
             <div className="space-y-3 pt-2 border-t border-gray-100 mt-4">

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo } from 'react';
 import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, type ChatMessage } from '../store';
@@ -1312,6 +1312,247 @@ function CollapsiblePrompt({ promptText, promptHtml, namedAssets }: { promptText
   );
 }
 
+/* ─── 채팅 카드 한 장 (26.10.2001~ 작업창 함수에서 떼어 냄) ─── */
+// memo — 작업창이 다시 그려져도(칸 전환 · 다른 프로젝트의 폴링 · 입력 · 다운로드 진행) 바뀐 카드만 다시 그린다. 예전엔
+// 카드가 작업창 함수 안에 그대로 있어 무엇이 바뀌든 카드 전부를 다시 만들었다 — 665장 프로젝트에서 칸을 누를 때마다
+// 0.3~0.7초 멈춤(실측 2026-10-20, 작업창 나누기 데모). 화면 함수는 ref(actions)로 받는다 — 작업창이 그릴 때마다 새
+// 함수가 되어도 카드 props 는 그대로라 memo 가 산다. 카드가 보는 데이터는 props 로만: 이 카드의 메시지 · 짝(초안/본편) ·
+// 어셋 미리보기 지도 · 재생성 잠금. 작업창 안의 값을 직접 보게 고치면 memo 가 낡은 값을 그린다.
+export type CardActions = {
+  scrollToMessage: (id: string) => void;
+  handleReuse: (m: any) => unknown;
+  handleRegenerate: (m: any) => unknown;
+  toggleStar: (id: string, next: boolean) => void;
+  handleVideoDownload: (id: string, url: string, taskId: string) => unknown;
+  revealDownloaded: (p?: string) => void;
+  makeFinalFromDraft: (taskId: string, m: any) => unknown;
+};
+const MessageCard = memo(function MessageCard({ msg, projectId, divider, dividerCount, draftOther, finalOther, elementImageUrlById, isGenerating, actions }: {
+  msg: any; projectId: string; divider: boolean; dividerCount: number; draftOther?: any; finalOther?: any;
+  elementImageUrlById: Map<string, { preview: string; original: string }>; isGenerating: boolean; actions: { current: CardActions };
+}) {
+  const isDraft = !!msg.usedSettings?.draft;
+  return (
+    <>
+    {divider && (
+      <div className="flex items-center gap-3 select-none pointer-events-none">
+        <div className="flex-1 h-px bg-indigo-300/70 dark:bg-indigo-400/40" />
+        <span className="text-[11px] font-semibold text-indigo-500 whitespace-nowrap">
+          여기부터 새로 생성됨{dividerCount > 0 ? ` · ${dividerCount}개` : ''}
+        </span>
+        <div className="flex-1 h-px bg-indigo-300/70 dark:bg-indigo-400/40" />
+      </div>
+    )}
+    {/* 화면 밖 카드는 레이아웃 · 그리기를 건너뛴다(content-visibility, 26.10.2001~ — 전체 갤러리 · 어셋 라이브러리와 같은
+        방법). 실측 2026-10-20(665장, 운영 빌드): 스크롤 20번에 50ms 넘는 멈춤 52번(최대 181ms) → 2~5번(최대 76ms). 크기는
+        한 번 그려진 뒤엔 그 값을 기억하고(auto), 처음 보는 카드만 700px 로 어림한다 — 메시지로 가기 · 보던 자리 되돌리기는
+        앵커(메시지 id)로 붙들어서 어림이 실제 높이로 바뀌어도 자리를 지킨다. ★ 이 상자는 그리기를 가두므로(contain:paint)
+        안에 fixed 로 뜨는 것을 두지 마라 — 미리보기(HoverZoom)처럼 body 로 내보낼 것. */}
+    <div id={`msg-${msg.id}`} className="flex justify-center animate-fade-in-up"
+      style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 700px', overflowClipMargin: '16px' } as any}>
+      <div className="w-full max-w-3xl bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md transition-shadow duration-300">
+        {/* Card Header */}
+        <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-gray-50/80 to-white dark:to-[#1c1c1e]">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0 flex flex-col gap-3">
+              {/* Draft ↔ 본편 짝. 본편은 맨 아래에 붙으므로, 어느 Draft 에서 나왔는지(또는 이
+                  Draft 로 무엇을 만들었는지)를 카드 맨 위에서 썸네일로 보여 준다. */}
+              {draftOther && (
+                <PairLink toDraft other={draftOther} onGo={() => actions.current.scrollToMessage(draftOther.id)} />
+              )}
+              {isDraft && msg.taskId && finalOther && (
+                <PairLink toDraft={false} other={finalOther} onGo={() => actions.current.scrollToMessage(finalOther.id)} />
+              )}
+              {(msg.usedAssets?.length > 0 || (msg.usedElementImages as any)?.length > 0) && (
+                <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                  {(msg.usedAssets || []).map((asset: any, i: number) => (
+                    <div key={asset.id || i}
+                      title={String(asset.type).startsWith('image') ? `${asset.file_name || asset.name || '이미지'} · 우클릭: 이미지 복사` : undefined}
+                      onContextMenu={(e) => {
+                        if (!String(asset.type).startsWith('image')) return; // 영상/오디오는 기본 동작 유지
+                        e.preventDefault();
+                        // 원본(미디어캐시) → 디스크 원본 재캐시 → (없으면) 썸네일
+                        copyImageToClipboard([
+                          { src: asset.cacheId && `/api/cache/${asset.cacheId}`, original: true },
+                          { fromPath: asset.originalPath, expect: asset.cacheId, original: true },
+                          { src: asset.url }, { src: asset.thumbnailUrl },
+                        ], asset.file_name || asset.name || '이미지');
+                      }}
+                      className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0">
+                      {asset.type.startsWith('video') ? (
+                        asset.thumbnailUrl
+                          ? <HoverZoom className="block w-full h-full" src={asset.thumbnailUrl} videoSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                          : asset.cacheId
+                            ? <HoverZoom className="block w-full h-full" src="" videoSrc={`/api/cache/${asset.cacheId}`}><div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400 cursor-zoom-in"><Video size={14} /></div></HoverZoom>
+                            : <div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400"><Video size={14} /></div>
+                      ) : asset.type.startsWith('audio') ? (
+                        <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-400"><Music size={14} /></div>
+                      ) : (
+                        <HoverZoom className="block w-full h-full" src={asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                      )}
+                      <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">{asset.role?.replace('_', ' ')}</div>
+                    </div>
+                  ))}
+                  {((msg.usedElementImages as any) || []).map((ei: any) => {
+                    const meta = CATEGORY_META[ei.category as AssetCategory] || { border: 'var(--cat-fallback-border)' };
+                    const full = elementImageUrlById.get(`${ei.elementId}__${ei.imageId}`);
+                    return (
+                      <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
+                        onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
+                          { src: full?.original, original: true }, { src: ei.libId && `/api/library/${ei.libId}`, original: true },
+                          { src: ei.cacheId && `/api/cache/${ei.cacheId}`, original: true },
+                          { src: ei.url },
+                        ], ei.name || '이미지'); }}
+                        className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
+                        <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                        <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                {msg.promptText
+                  ? <CollapsiblePrompt promptText={msg.promptText} promptHtml={msg.promptHtml} namedAssets={getAssetNames((msg.usedAssets as any) || [])} />
+                  : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
+                {msg.usedSettings && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {settingsTagList(msg.usedSettings, msg.videoUrl, msg.draftOf).map((tag, i) => (
+                      <span key={i} className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${tagTone(tag, 'bg-gray-100 text-gray-500')}`}>{tag}</span>
+                    ))}
+                  </div>
+                )}
+                {msg.taskId && (
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(msg.taskId!); }}
+                    className="mt-2 text-[10px] font-mono text-indigo-500/70 bg-indigo-50/50 hover:bg-indigo-100/60 rounded-md px-2 py-0.5 w-fit transition-colors cursor-pointer text-left break-all"
+                    title="클릭하여 복사"
+                  >
+                    Task: {msg.taskId}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-0.5 shrink-0">
+              <button onClick={() => { void actions.current.handleReuse(msg); }} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors" title="프롬프트 재사용"><RefreshCw size={15} /></button>
+              {(msg.status === 'succeeded' || msg.status === 'failed') && (
+                <button onClick={() => { void actions.current.handleRegenerate(msg); }} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={msg.draftOf && msg.status === 'failed' ? '본편 다시 시도 (같은 Draft에서)' : '재생성 (같은 설정·래퍼런스로 다시 생성)'}><Sparkles size={15} /></button>
+              )}
+              <button onClick={() => useAppStore.getState().deleteMessage(projectId, msg.id)} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="삭제"><Trash2 size={15} /></button>
+            </div>
+          </div>
+        </div>
+        {/* Card Body */}
+        <div className="p-4">
+          {(msg.status === 'running' || msg.status === 'queued') ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2 text-sm text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg">
+                <div className="flex items-center gap-2">
+                  <Loader2 size={16} className="animate-spin" />
+                  {msg.status === 'queued' ? '대기열에서 대기 중...' : '영상 생성 중...'}
+                </div>
+                {msg.taskId && (
+                  <button
+                    onClick={() => useAppStore.getState().cancelTask(projectId, msg.id, msg.taskId!)}
+                    className="text-[12px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-1 rounded-md transition-colors"
+                  >
+                    취소
+                  </button>
+                )}
+              </div>
+              <div className="w-full aspect-video bg-gradient-to-br from-gray-100 to-gray-50 animate-pulse rounded-xl flex flex-col items-center justify-center border border-gray-200/50">
+                <Loader2 size={28} className="animate-spin text-indigo-400 mb-2" />
+                <LiveTimer startTime={msg.startTime} endTime={msg.endTime} />
+              </div>
+            </div>
+          ) : msg.status === 'failed' ? (
+            <div className="flex items-start gap-2.5 text-sm text-red-600 bg-red-50 px-4 py-3 rounded-xl border border-red-100">
+              <AlertCircle size={16} className="shrink-0 mt-0.5" />
+              <div>
+                <p className="font-medium">생성 실패</p>
+                <p className="text-red-500 mt-0.5 text-[13px]">{translateError(msg.error || '')}</p>
+                {msg.error && msg.error !== translateError(msg.error) && <p className="text-red-400 mt-1 text-[11px] font-mono">{msg.error}</p>}
+              </div>
+            </div>
+          ) : msg.status === 'succeeded' && (msg.videoUrl || msg.imageUrl) ? (
+            <div className="space-y-3">
+              {msg.videoUrl && (
+                <div className="relative">
+                  <VideoPlayer sources={playbackChain(msg)} failPoster={posterSrcFor(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                  <ClipStamp ms={msg.timestamp} />
+                </div>
+              )}
+              {msg.imageUrl && (
+                <div className="rounded-xl overflow-hidden border border-gray-200/80 bg-black relative">
+                  <img src={msg.imageUrl} alt="Last Frame" className="w-full max-h-[400px] object-contain" />
+                  {!msg.videoUrl && <ClipStamp ms={msg.timestamp} />}
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {(msg.videoUrl || msg.imageUrl) && (
+                    <button onClick={() => actions.current.toggleStar(msg.id, !msg.starred)}
+                      title={msg.starred ? '채택 해제' : '컷 채택'}
+                      className={`flex items-center justify-center w-9 h-9 rounded-lg border transition-all shrink-0 ${msg.starred
+                        ? 'text-amber-500 bg-amber-50 border-amber-200 hover:bg-amber-100'
+                        : 'text-gray-400 hover:text-amber-500 bg-gray-50 hover:bg-amber-50 border-gray-200 hover:border-amber-200'}`}>
+                      <Star size={15} className={msg.starred ? 'fill-amber-400' : ''} />
+                    </button>
+                  )}
+                  {msg.videoUrl && (
+                    <button onClick={() => { void actions.current.handleVideoDownload(msg.id, msg.videoUrl!, msg.taskId || 'unknown'); }}
+                      className={`flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all whitespace-nowrap shrink-0 ${msg.downloadedAt
+                        ? 'text-emerald-600 hover:text-emerald-700 bg-emerald-50/70 hover:bg-emerald-50 border-emerald-200'
+                        : 'text-gray-500 hover:text-indigo-600 bg-gray-50 hover:bg-indigo-50 border-gray-200 hover:border-indigo-200'}`}>
+                      {msg.downloadedAt ? <RefreshCw size={14} /> : <Download size={14} />} {msg.downloadedAt ? '다시 다운로드' : '영상 다운로드'}
+                    </button>
+                  )}
+                  {msg.downloadedPath && (
+                    <button onClick={() => actions.current.revealDownloaded(msg.downloadedPath)} title={msg.downloadedPath}
+                      className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
+                      <FolderOpen size={14} /> 폴더에서 보기
+                    </button>
+                  )}
+                  {msg.imageUrl && (
+                    <button onClick={() => downloadViaProxy(msg.imageUrl!, buildDownloadFilename(msg.taskId || 'unknown', '.png'))}
+                      className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
+                      <Download size={14} /> 이미지
+                    </button>
+                  )}
+                  {/* Draft → 본편 만들기 버튼. 이미 만든 본편으로 가는 길(과 본편에서 Draft 로
+                      돌아가는 길)은 카드 맨 위의 짝 줄(PairLink)이 맡는다. */}
+                  {isDraft && msg.taskId && (() => {
+                    // 본편이 이미 있으면(만드는 중 포함) 여기엔 아무것도 없다 — 카드 맨 위의
+                    // 짝 줄(PairLink)이 그 본편을 썸네일로 보여 주고 데려간다.
+                    if (finalOther) return null;
+                    const exp = draftExpiresAt(msg);
+                    if (Date.now() > exp) return (
+                      <span title="Draft는 생성 후 7일까지만 본편으로 만들 수 있습니다" className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
+                    );
+                    return (
+                      <button onClick={() => { void actions.current.makeFinalFromDraft(msg.taskId!, msg); }}
+                        title={`구도·길이·비율은 이 Draft 그대로 두고 1080p 로 다시 그립니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
+                        className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-indigo-500 transition-all whitespace-nowrap shrink-0 text-white bg-indigo-500 hover:bg-indigo-600 active:scale-95">
+                        <Sparkles size={14} /> 1080p 본편 만들기
+                        <span className="text-[11px] font-normal text-white/75">{draftLeftLabel(exp)}</span>
+                      </button>
+                    );
+                  })()}
+                </div>
+                {/* Just the duration. The start/finish timestamps used to sit here
+                    too, but the clip already carries its stamp in the top-left
+                    corner — repeating it two lines below is noise, not detail. */}
+                <div className="text-[11px] text-gray-400 whitespace-nowrap shrink-0">소요 시간: <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+    </>
+  );
+});
+
 /* ─── Main Component ─── */
 // 작업창 한 칸(26.10.2001~ 나누기 — Workspace 가 칸마다 하나씩 띄운다). 자기 칸의 프로젝트(projectId)만 그린다.
 //   slot    0번 칸은 늘 있다 — 받은 영상 다운로드 표시는 0번 칸 몫이다(두 칸이 같이 받으면 두 번 뜬다).
@@ -1329,6 +1570,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const activeRef = useRef(active);
   activeRef.current = active;
   const rootRef = useRef<HTMLDivElement>(null);
+  // 카드(MessageCard)가 부르는 화면 함수 — 렌더마다 바꿔 끼운다(아래 Render 바로 위). 카드에는 이 ref 하나만 넘어간다.
+  const cardActions = useRef<CardActions>(null as unknown as CardActions);
   const project = projects.find((p) => p.id === currentProjectId);
   // Block sends (reactive mirror for the button's disabled state) whenever no
   // project is picked — strict: no project ⇒ no generate. handleSend re-checks via
@@ -4484,6 +4727,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   };
 
   /* ─── Render ─── */
+  cardActions.current = { scrollToMessage, handleReuse, handleRegenerate, toggleStar, handleVideoDownload, revealDownloaded, makeFinalFromDraft };
   const downloadEntries = Object.entries(downloads);
   const activeCount = downloadEntries.filter(([, i]) => i.state !== 'completed' && i.state !== 'interrupted' && i.state !== 'cancelled').length;
   const dismissDownload = (filename: string) => setDownloads(d => { const n = { ...d }; delete n[filename]; return n; });
@@ -4904,217 +5148,13 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
               </div>
             ) : (
               displayMessages.map((msg, idx) => (
-                <Fragment key={msg.id}>
-                {idx === newDividerIdx && (
-                  <div className="flex items-center gap-3 select-none pointer-events-none">
-                    <div className="flex-1 h-px bg-indigo-300/70 dark:bg-indigo-400/40" />
-                    <span className="text-[11px] font-semibold text-indigo-500 whitespace-nowrap">
-                      여기부터 새로 생성됨{newDividerCount > 0 ? ` · ${newDividerCount}개` : ''}
-                    </span>
-                    <div className="flex-1 h-px bg-indigo-300/70 dark:bg-indigo-400/40" />
-                  </div>
-                )}
-                <div id={`msg-${msg.id}`} className="flex justify-center animate-fade-in-up" >
-                  <div className="w-full max-w-3xl bg-white dark:bg-[#1c1c1e] rounded-2xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md transition-shadow duration-300">
-                    {/* Card Header */}
-                    <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-gray-50/80 to-white dark:to-[#1c1c1e]">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0 flex flex-col gap-3">
-                          {/* Draft ↔ 본편 짝. 본편은 맨 아래에 붙으므로, 어느 Draft 에서 나왔는지(또는 이
-                              Draft 로 무엇을 만들었는지)를 카드 맨 위에서 썸네일로 보여 준다. */}
-                          {msg.draftOf && draftByTaskId.has(msg.draftOf) && (
-                            <PairLink toDraft other={draftByTaskId.get(msg.draftOf)} onGo={() => scrollToMessage(draftByTaskId.get(msg.draftOf!)!.id)} />
-                          )}
-                          {isDraftClip(msg) && msg.taskId && finalOfDraft.has(msg.taskId) && (
-                            <PairLink toDraft={false} other={finalOfDraft.get(msg.taskId)} onGo={() => scrollToMessage(finalOfDraft.get(msg.taskId!)!.id)} />
-                          )}
-                          {(msg.usedAssets?.length > 0 || (msg.usedElementImages as any)?.length > 0) && (
-                            <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-                              {(msg.usedAssets || []).map((asset: any, i: number) => (
-                                <div key={asset.id || i}
-                                  title={String(asset.type).startsWith('image') ? `${asset.file_name || asset.name || '이미지'} · 우클릭: 이미지 복사` : undefined}
-                                  onContextMenu={(e) => {
-                                    if (!String(asset.type).startsWith('image')) return; // 영상/오디오는 기본 동작 유지
-                                    e.preventDefault();
-                                    // 원본(미디어캐시) → 디스크 원본 재캐시 → (없으면) 썸네일
-                                    copyImageToClipboard([
-                                      { src: asset.cacheId && `/api/cache/${asset.cacheId}`, original: true },
-                                      { fromPath: asset.originalPath, expect: asset.cacheId, original: true },
-                                      { src: asset.url }, { src: asset.thumbnailUrl },
-                                    ], asset.file_name || asset.name || '이미지');
-                                  }}
-                                  className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0">
-                                  {asset.type.startsWith('video') ? (
-                                    asset.thumbnailUrl
-                                      ? <HoverZoom className="block w-full h-full" src={asset.thumbnailUrl} videoSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.thumbnailUrl} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
-                                      : asset.cacheId
-                                        ? <HoverZoom className="block w-full h-full" src="" videoSrc={`/api/cache/${asset.cacheId}`}><div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400 cursor-zoom-in"><Video size={14} /></div></HoverZoom>
-                                        : <div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400"><Video size={14} /></div>
-                                  ) : asset.type.startsWith('audio') ? (
-                                    <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-400"><Music size={14} /></div>
-                                  ) : (
-                                    <HoverZoom className="block w-full h-full" src={asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
-                                  )}
-                                  <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">{asset.role?.replace('_', ' ')}</div>
-                                </div>
-                              ))}
-                              {((msg.usedElementImages as any) || []).map((ei: any) => {
-                                const meta = CATEGORY_META[ei.category as AssetCategory] || { border: 'var(--cat-fallback-border)' };
-                                const full = elementImageUrlById.get(`${ei.elementId}__${ei.imageId}`);
-                                return (
-                                  <div key={ei.id} title={`${ei.name} · 우클릭: 이미지 복사`}
-                                    onContextMenu={(e) => { e.preventDefault(); copyImageToClipboard([
-                                      { src: full?.original, original: true }, { src: ei.libId && `/api/library/${ei.libId}`, original: true },
-                                      { src: ei.cacheId && `/api/cache/${ei.cacheId}`, original: true },
-                                      { src: ei.url },
-                                    ], ei.name || '이미지'); }}
-                                    className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
-                                    <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
-                                    <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                          <div className="flex-1 min-w-0">
-                            {msg.promptText
-                              ? <CollapsiblePrompt promptText={msg.promptText} promptHtml={msg.promptHtml} namedAssets={getAssetNames((msg.usedAssets as any) || [])} />
-                              : <div className="text-[14px] text-gray-400 italic">프롬프트 없음</div>}
-                            {msg.usedSettings && (
-                              <div className="mt-2 flex flex-wrap gap-1.5">
-                                {settingsTagList(msg.usedSettings, msg.videoUrl, msg.draftOf).map((tag, i) => (
-                                  <span key={i} className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${tagTone(tag, 'bg-gray-100 text-gray-500')}`}>{tag}</span>
-                                ))}
-                              </div>
-                            )}
-                            {msg.taskId && (
-                              <button
-                                onClick={() => { navigator.clipboard.writeText(msg.taskId!); }}
-                                className="mt-2 text-[10px] font-mono text-indigo-500/70 bg-indigo-50/50 hover:bg-indigo-100/60 rounded-md px-2 py-0.5 w-fit transition-colors cursor-pointer text-left break-all"
-                                title="클릭하여 복사"
-                              >
-                                Task: {msg.taskId}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-0.5 shrink-0">
-                          <button onClick={() => handleReuse(msg)} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors" title="프롬프트 재사용"><RefreshCw size={15} /></button>
-                          {(msg.status === 'succeeded' || msg.status === 'failed') && (
-                            <button onClick={() => handleRegenerate(msg)} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={msg.draftOf && msg.status === 'failed' ? '본편 다시 시도 (같은 Draft에서)' : '재생성 (같은 설정·래퍼런스로 다시 생성)'}><Sparkles size={15} /></button>
-                          )}
-                          <button onClick={() => useAppStore.getState().deleteMessage(project.id, msg.id)} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="삭제"><Trash2 size={15} /></button>
-                        </div>
-                      </div>
-                    </div>
-                    {/* Card Body */}
-                    <div className="p-4">
-                      {(msg.status === 'running' || msg.status === 'queued') ? (
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between gap-2 text-sm text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg">
-                            <div className="flex items-center gap-2">
-                              <Loader2 size={16} className="animate-spin" />
-                              {msg.status === 'queued' ? '대기열에서 대기 중...' : '영상 생성 중...'}
-                            </div>
-                            {msg.taskId && (
-                              <button
-                                onClick={() => useAppStore.getState().cancelTask(project.id, msg.id, msg.taskId!)}
-                                className="text-[12px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-1 rounded-md transition-colors"
-                              >
-                                취소
-                              </button>
-                            )}
-                          </div>
-                          <div className="w-full aspect-video bg-gradient-to-br from-gray-100 to-gray-50 animate-pulse rounded-xl flex flex-col items-center justify-center border border-gray-200/50">
-                            <Loader2 size={28} className="animate-spin text-indigo-400 mb-2" />
-                            <LiveTimer startTime={msg.startTime} endTime={msg.endTime} />
-                          </div>
-                        </div>
-                      ) : msg.status === 'failed' ? (
-                        <div className="flex items-start gap-2.5 text-sm text-red-600 bg-red-50 px-4 py-3 rounded-xl border border-red-100">
-                          <AlertCircle size={16} className="shrink-0 mt-0.5" />
-                          <div>
-                            <p className="font-medium">생성 실패</p>
-                            <p className="text-red-500 mt-0.5 text-[13px]">{translateError(msg.error || '')}</p>
-                            {msg.error && msg.error !== translateError(msg.error) && <p className="text-red-400 mt-1 text-[11px] font-mono">{msg.error}</p>}
-                          </div>
-                        </div>
-                      ) : msg.status === 'succeeded' && (msg.videoUrl || msg.imageUrl) ? (
-                        <div className="space-y-3">
-                          {msg.videoUrl && (
-                            <div className="relative">
-                              <VideoPlayer sources={playbackChain(msg)} failPoster={posterSrcFor(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
-                              <ClipStamp ms={msg.timestamp} />
-                            </div>
-                          )}
-                          {msg.imageUrl && (
-                            <div className="rounded-xl overflow-hidden border border-gray-200/80 bg-black relative">
-                              <img src={msg.imageUrl} alt="Last Frame" className="w-full max-h-[400px] object-contain" />
-                              {!msg.videoUrl && <ClipStamp ms={msg.timestamp} />}
-                            </div>
-                          )}
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              {(msg.videoUrl || msg.imageUrl) && (
-                                <button onClick={() => toggleStar(msg.id, !msg.starred)}
-                                  title={msg.starred ? '채택 해제' : '컷 채택'}
-                                  className={`flex items-center justify-center w-9 h-9 rounded-lg border transition-all shrink-0 ${msg.starred
-                                    ? 'text-amber-500 bg-amber-50 border-amber-200 hover:bg-amber-100'
-                                    : 'text-gray-400 hover:text-amber-500 bg-gray-50 hover:bg-amber-50 border-gray-200 hover:border-amber-200'}`}>
-                                  <Star size={15} className={msg.starred ? 'fill-amber-400' : ''} />
-                                </button>
-                              )}
-                              {msg.videoUrl && (
-                                <button onClick={() => handleVideoDownload(msg.id, msg.videoUrl!, msg.taskId || 'unknown')}
-                                  className={`flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all whitespace-nowrap shrink-0 ${msg.downloadedAt
-                                    ? 'text-emerald-600 hover:text-emerald-700 bg-emerald-50/70 hover:bg-emerald-50 border-emerald-200'
-                                    : 'text-gray-500 hover:text-indigo-600 bg-gray-50 hover:bg-indigo-50 border-gray-200 hover:border-indigo-200'}`}>
-                                  {msg.downloadedAt ? <RefreshCw size={14} /> : <Download size={14} />} {msg.downloadedAt ? '다시 다운로드' : '영상 다운로드'}
-                                </button>
-                              )}
-                              {msg.downloadedPath && (
-                                <button onClick={() => revealDownloaded(msg.downloadedPath)} title={msg.downloadedPath}
-                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
-                                  <FolderOpen size={14} /> 폴더에서 보기
-                                </button>
-                              )}
-                              {msg.imageUrl && (
-                                <button onClick={() => downloadViaProxy(msg.imageUrl!, buildDownloadFilename(msg.taskId || 'unknown', '.png'))}
-                                  className="flex items-center gap-1.5 text-[13px] font-medium text-gray-500 hover:text-indigo-600 px-3 py-1.5 bg-gray-50 hover:bg-indigo-50 rounded-lg border border-gray-200 hover:border-indigo-200 transition-all whitespace-nowrap shrink-0">
-                                  <Download size={14} /> 이미지
-                                </button>
-                              )}
-                              {/* Draft → 본편 만들기 버튼. 이미 만든 본편으로 가는 길(과 본편에서 Draft 로
-                                  돌아가는 길)은 카드 맨 위의 짝 줄(PairLink)이 맡는다. */}
-                              {isDraftClip(msg) && msg.taskId && (() => {
-                                // 본편이 이미 있으면(만드는 중 포함) 여기엔 아무것도 없다 — 카드 맨 위의
-                                // 짝 줄(PairLink)이 그 본편을 썸네일로 보여 주고 데려간다.
-                                if (finalOfDraft.has(msg.taskId)) return null;
-                                const exp = draftExpiresAt(msg);
-                                if (Date.now() > exp) return (
-                                  <span title="Draft는 생성 후 7일까지만 본편으로 만들 수 있습니다" className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
-                                );
-                                return (
-                                  <button onClick={() => makeFinalFromDraft(msg.taskId!, msg)}
-                                    title={`구도·길이·비율은 이 Draft 그대로 두고 1080p 로 다시 그립니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
-                                    className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-indigo-500 transition-all whitespace-nowrap shrink-0 text-white bg-indigo-500 hover:bg-indigo-600 active:scale-95">
-                                    <Sparkles size={14} /> 1080p 본편 만들기
-                                    <span className="text-[11px] font-normal text-white/75">{draftLeftLabel(exp)}</span>
-                                  </button>
-                                );
-                              })()}
-                            </div>
-                            {/* Just the duration. The start/finish timestamps used to sit here
-                                too, but the clip already carries its stamp in the top-left
-                                corner — repeating it two lines below is noise, not detail. */}
-                            <div className="text-[11px] text-gray-400 whitespace-nowrap shrink-0">소요 시간: <LiveTimer startTime={msg.startTime} endTime={msg.endTime} /></div>
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-                </Fragment>
+                <MessageCard key={msg.id} msg={msg} projectId={project.id}
+                  divider={idx === newDividerIdx} dividerCount={idx === newDividerIdx ? newDividerCount : 0}
+                  draftOther={msg.draftOf ? draftByTaskId.get(msg.draftOf) : undefined}
+                  finalOther={isDraftClip(msg) && msg.taskId ? finalOfDraft.get(msg.taskId) : undefined}
+                  elementImageUrlById={elementImageUrlById}
+                  isGenerating={isGenerating && (msg.status === 'succeeded' || msg.status === 'failed')}
+                  actions={cardActions} />
               ))
             )}
             <div ref={messagesEndRef} />
