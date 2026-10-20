@@ -164,7 +164,7 @@ function signedTrackerUrl(base: string): string {
 // 매핑은 보고 뒤에도 지우지 않는다(14일 TTL 이 치운다) — 같은 작업을 다시 묻는 일이 있어도 같은 프로젝트를 본다.
 // sweep: 26.10.2001 판부터 만든 작업 — 서버 확인(sweepTasks)은 이것만 챙긴다. 이전 판에서 지운 카드의 옛 작업을 올리는 순간
 //   몰아서 보고하면 이미 지난 주의 시트가 바뀐다.
-type TaskProject = { project: string; projectId: string; reported?: boolean; done?: boolean; sweep?: boolean };
+type TaskProject = { project: string; projectId: string; reported?: boolean; done?: boolean; sweep?: boolean; reportTries?: number };
 const taskToProject = new Map<string, TaskProject>();
 // Same directory CACHE_DIR resolves to further down (userData/media-cache in the packaged
 // app), resolved independently because that constant is declared inside startServer().
@@ -179,14 +179,15 @@ function loadTaskProjects() {
   try {
     // 옛 모양({ project, at })도 읽는다 — 업데이트 순간 진행 중이던 작업의 보고가 프로젝트를
     // 잃지 않게. 그때는 projectId 가 '' 이고, 트래커는 이름으로 찾는다.
-    const raw = JSON.parse(fs.readFileSync(TASK_PROJECT_FILE, 'utf8')) as Record<string, { project?: string; projectId?: string; at: number; reported?: boolean; done?: boolean; sweep?: boolean }>;
+    const raw = JSON.parse(fs.readFileSync(TASK_PROJECT_FILE, 'utf8')) as Record<string, { project?: string; projectId?: string; at: number; reported?: boolean; done?: boolean; sweep?: boolean; reportTries?: number }>;
     const now = Date.now();
     let kept = 0;
     for (const [id, v] of Object.entries(raw || {})) {
       // 보고한 표시는 프로젝트가 비어 있어도 남긴다 — 다시 보고하지 않는 것이 그 줄의 일이다.
       if ((!v?.project && !v?.projectId && !v?.reported) || now - (v.at || 0) > TASK_PROJECT_TTL_MS) continue;
       taskToProject.set(id, { project: String(v.project || ''), projectId: typeof v.projectId === 'string' ? v.projectId : '',
-        ...(v.reported ? { reported: true } : {}), ...(v.done ? { done: true } : {}), ...(v.sweep ? { sweep: true } : {}) });
+        ...(v.reported ? { reported: true } : {}), ...(v.done ? { done: true } : {}), ...(v.sweep ? { sweep: true } : {}),
+        ...(Number(v.reportTries) > 0 ? { reportTries: Number(v.reportTries) } : {}) });
       taskProjectAt.set(id, v.at);
       if (v.reported) reportedTasks.add(id);
       kept++;
@@ -200,9 +201,10 @@ function loadTaskProjects() {
 // a task created seconds before the app quits is precisely the one that needs the write.
 function saveTaskProjects() {
   try {
-    const out: Record<string, { project: string; projectId: string; at: number; reported?: boolean; done?: boolean; sweep?: boolean }> = {};
+    const out: Record<string, { project: string; projectId: string; at: number; reported?: boolean; done?: boolean; sweep?: boolean; reportTries?: number }> = {};
     for (const [id, t] of taskToProject) out[id] = { project: t.project, projectId: t.projectId, at: taskProjectAt.get(id) || Date.now(),
-      ...(t.reported ? { reported: true } : {}), ...(t.done ? { done: true } : {}), ...(t.sweep ? { sweep: true } : {}) };
+      ...(t.reported ? { reported: true } : {}), ...(t.done ? { done: true } : {}), ...(t.sweep ? { sweep: true } : {}),
+      ...(t.reportTries ? { reportTries: t.reportTries } : {}) };
     if (!fs.existsSync(TASK_PROJECT_DIR)) fs.mkdirSync(TASK_PROJECT_DIR, { recursive: true });
     fs.writeFileSync(TASK_PROJECT_FILE, JSON.stringify(out));
   } catch (e: any) {
@@ -1394,14 +1396,15 @@ async function startServer() {
   //   만들어졌을 수 있다 — 다시 내놓으면 같은 영상이 두 번 과금된다. 대신 그 화면이 1분 넘게 안 들르면
   //   실패로 닫고 "앱에서 생성됐는지 확인" 하라고 알린다.
   // 26.10.2002~ 화면이 작성 칸을 빌리지 않고 spec.projectId(없으면 spec.project 이름)의 프로젝트로 바로 보낸다 — 열린
-  //   프로젝트가 바뀌지 않는다. 과금은 그 프로젝트의 코드다. 코드가 없는 프로젝트의 작업은 내주지 않고 기다린다(needsBilling,
-  //   사람이 고를 때까지 · 10분). 화면이 claim 마다 프로젝트별 코드 유무(projects)를 알려 준다.
+  //   프로젝트가 바뀌지 않는다. 과금은 그 프로젝트로 보낼 때의 코드(26.10.2004~ 앱 전체에 하나 — 공동 코드)다. 코드가 없으면
+  //   작업을 내주지 않고 기다린다(needsBilling, 사람이 고를 때까지 · 10분). 화면이 claim 마다 프로젝트별 코드(projects)를 알려 준다
+  //   — 지금은 모두 같은 값이지만 판단 모양은 프로젝트마다로 둔다(정책은 화면의 projectBilling 한 곳).
   type AgentJob = {
     id: string; createdAt: number; updatedAt: number;
     status: 'pending' | 'taken' | 'sent' | 'done' | 'failed';
     spec: { prompt: string; project?: string; projectId?: string; billing?: string; name?: string; settings: Record<string, unknown>; refs: { path: string; role?: string }[] };
     takenBy?: string; error?: string; projectName?: string; projectId?: string; messages?: unknown[]; warnings?: string[];
-    needsBilling?: boolean; waitingFor?: { project: string; projectId: string };   // 그 프로젝트의 코드를 기다리는 중
+    needsBilling?: boolean; waitingFor?: { project: string; projectId: string };   // 프로젝트 코드를 기다리는 중(대상 프로젝트)
   };
   type ScreenProject = { id: string; name: string; billing: string | null };
   // 작업의 대상 — 화면의 agentResolveProject(ChatArea)와 같은 규칙: id 먼저, project 칸이 id 면 그것, 아니면 이름 그대로.
@@ -1439,7 +1442,7 @@ async function startServer() {
       if (j.status === 'pending' && now - j.createdAt > 10 * 60000) {
         j.status = 'failed'; j.updatedAt = now;
         j.error = j.needsBilling && j.waitingFor
-          ? `"${j.waitingFor.project}" 의 프로젝트 코드가 10분 동안 골라지지 않아 취소했습니다. 사람에게 앱에서 그 프로젝트의 "프로젝트 코드" 를 골라 달라고 한 뒤 다시 보내 주세요.`
+          ? '시댄스의 프로젝트 코드가 10분 동안 골라지지 않아 취소했습니다. 사람에게 앱 설정 패널 맨 위 "프로젝트 코드" 를 골라 달라고 한 뒤 다시 보내 주세요.'
           : agentScreen.billingReady === false
             ? '앱이 프로젝트 코드 목록(시트)을 아직 받지 못해 10분 동안 보내지 못했습니다. 앱의 인터넷 · 시트 연결을 확인해 달라고 한 뒤 다시 보내 주세요.'
             : '앱이 10분 안에 이 요청을 받지 못해 취소했습니다(앱이 꺼져 있었거나 다른 요청을 보내느라 바빴습니다). 다시 보내 주세요.';
@@ -1474,7 +1477,7 @@ async function startServer() {
       generating: !!agentScreen.generating,
       composer: agentScreen.composer !== false,           // false = 갤러리 화면(작성 칸이 없어 받지 못함)
       pending: openAgentJobs().length,
-      // 26.10.2002~ 프로젝트 코드를 기다리는 작업 — 사람에게 그 프로젝트의 코드를 골라 달라고 할 것.
+      // 26.10.2002~ 프로젝트 코드를 기다리는 작업 — 사람에게 시댄스의 프로젝트 코드를 골라 달라고 할 것.
       needsBilling: waitingJobs().length > 0,
       waitingBilling: waitingJobs().map(j => ({ job: j.id, name: j.spec.name ?? null, project: j.waitingFor!.project, projectId: j.waitingFor!.projectId })),
       features: (agentManual?.manual as any)?.features ?? [],
@@ -1600,7 +1603,7 @@ async function startServer() {
       for (const j of pending) {
         const t = agentJobTarget(j, list);
         if (t && !t.billing) {
-          if (!j.needsBilling) console.log(`[Agent] job ${j.id} — "${t.name}" 의 프로젝트 코드를 기다림`);
+          if (!j.needsBilling) console.log(`[Agent] job ${j.id} — 프로젝트 코드를 기다림("${t.name}" 로 보낼 요청)`);
           j.needsBilling = true; j.waitingFor = { project: t.name, projectId: t.id };
         } else { j.needsBilling = false; delete j.waitingFor; }
       }
@@ -1646,7 +1649,7 @@ async function startServer() {
     res.json({
       id: j.id, name: j.spec.name, status: j.status, error: j.error,
       project: j.projectName ?? j.waitingFor?.project, projectId: j.projectId ?? j.waitingFor?.projectId ?? j.spec.projectId,
-      // 26.10.2002~ 그 프로젝트의 코드를 기다리는 중(pending 일 때만) — 사람에게 그 프로젝트의 코드를 골라 달라고 할 것.
+      // 26.10.2002~ 프로젝트 코드를 기다리는 중(pending 일 때만) — 사람에게 시댄스의 프로젝트 코드를 골라 달라고 할 것.
       needsBilling: j.status === 'pending' && !!j.needsBilling,
       ...(j.warnings?.length ? { warnings: j.warnings } : {}),
       messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt, manualVersion: manualVersionNow(),
@@ -2038,6 +2041,16 @@ async function startServer() {
   const ROSTER_TTL_MS = 30000;   // the client polls every 60s, so this adds no visible lag
   const rememberRoster = (rows: any[]) => { rosterRows = rows; rosterAt = Date.now(); };
 
+  // 만들 때마다 쓰는 확인용 — 가진 목록이 있으면 바로 쓰고(오래됐으면 뒤에서 새로), 없을 때만 기다린다. 보내기가 30초마다
+  // 시트 응답(1~2초, 콜드면 그 이상)을 기다리지 않게. 종료 반영이 최대 30초 늦을 수 있다 — 화면의 60초 확인보다 빠르다.
+  async function getRosterFast(): Promise<any[] | null> {
+    if (rosterRows) {
+      if (Date.now() - rosterAt >= ROSTER_TTL_MS) void getRoster();
+      return rosterRows;
+    }
+    return getRoster();
+  }
+
   async function getRoster(): Promise<any[] | null> {
     if (rosterRows && Date.now() - rosterAt < ROSTER_TTL_MS) return rosterRows;
     const ac = new AbortController();
@@ -2338,6 +2351,25 @@ async function startServer() {
       return res.status(400).json({ error: { message: '프로젝트 코드(과금)가 없어 보내지 않았습니다. 설정 패널 맨 위 "프로젝트 코드" 를 골라 주세요.' } });
     }
 
+    // 그 코드가 지금 시트에서 '진행' 인지 · 4K 면 4K 권한이 있는지(26.10.2004~). 화면도 막지만(보낼 때 · 요청 직전) 화면의 목록은
+    // 저장본이라, 앱이 꺼진 사이 종료된 코드는 켠 직후 첫 목록 확인 전까지 보낼 수 있었다. 서버가 가진 시트 목록으로 한 번 더.
+    // 목록을 아직 못 받았으면(트래커가 죽었거나 콜드) 예전처럼 보낸다 — 시트가 늦다고 일을 멈추지 않는다(권한 모델은 아래가 막음).
+    {
+      const roster = await getRosterFast();
+      if (roster) {
+        const row = (billingProjectId && roster.find((p: any) => String(p?.id || p?.project_id || '').trim() === billingProjectId))
+          || roster.find((p: any) => String(p?.project) === String(billingProject));
+        if (!row || String(row.status) !== '진행') {
+          console.warn(`[Billing] 종료 · 목록에 없는 코드로 생성 요청 — 거절 (${billingProject || '-'} id=${billingProjectId || '-'} status=${row?.status ?? '없음'})`);
+          return res.status(403).json({ error: { message: `프로젝트 코드 "${row?.project || billingProject || ''}" 가 종료됐거나 시트 목록에 없어 보내지 않았습니다. 설정 패널 맨 위 "프로젝트 코드" 를 다시 골라 주세요.` } });
+        }
+        if (String(byteplusBody.resolution) === '4k' && row.allow4k !== true) {
+          console.warn(`[Billing] 4K 권한 없는 코드로 4K 요청 — 거절 (${row.project})`);
+          return res.status(403).json({ error: { message: `"${row.project}" 는 4K 권한이 없어 보내지 않았습니다. 해상도를 낮춰 다시 보내 주세요.` } });
+        }
+      }
+    }
+
     // Gated models (2.5) must be granted to the SELECTED billing project. Checked here,
     // against the tracker, so no amount of switching app projects / models / stored state
     // gets a request through.
@@ -2423,7 +2455,7 @@ async function startServer() {
   // 성공이면 시트 보고(한 번만 — reportedTasks · 디스크의 reported) · NCP 보관 예약, 끝났으면 R2 정리.
   // 보고하는 프로젝트는 '보낼 때' 디스크에 적어 둔 것(taskToProject)이다 — 화면에서 칸을 바꾸든 자리를 바꾸든 그 프로젝트의
   // 코드를 바꾸든, 이미 보낸 작업의 보고는 바뀌지 않는다.
-  function markTask(taskId: string, flags: { reported?: boolean; done?: boolean }) {
+  function markTask(taskId: string, flags: { reported?: boolean; done?: boolean; reportTries?: number }) {
     const cur = taskToProject.get(taskId) || { project: '', projectId: '' };
     taskToProject.set(taskId, { ...cur, ...flags });
     if (!taskProjectAt.has(taskId)) taskProjectAt.set(taskId, Date.now());
@@ -2437,8 +2469,24 @@ async function startServer() {
     if (data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(taskId)) {
       reportedTasks.add(taskId);
       markTask(taskId, { reported: true });   // 디스크에 — 다시 켜도 두 번 보고하지 않게
+      // 26.10.2004~ 결과를 본다(예전엔 .catch(() => {}) 로 버려, GAS 가 콜드로 404 를 주거나 잠금 대기에 밀리면 그 줄이 시트에
+      // 영영 안 남았다). 다시 보내는 것은 '확실히 안 적힌' 경우만 — GAS doPost 는 task_id 로 겹침을 거르지 않고 appendRow 와
+      // Project_Status 토큰 더하기를 하므로, 적혔는지 모르는데 다시 보내면 시트가 부푼다(사용자 절대 원칙: 부풀림 없음).
+      //   · 확실히 안 적힘 → 다시: HTTP 오류(스크립트가 안 돌았다) · { ok:false }(적기 전에 실패 — 잠금 · 시트 오류) ·
+      //     연결 자체가 안 됨(ECONNREFUSED · ENOTFOUND 등 — 요청이 나가지 않았다). 보고 표시를 풀어 서버 확인(sweep)이 다시 보낸다.
+      //   · 적혔는지 모름(응답 전에 끊김 · 시간 초과) → 다시 보내지 않고 로그만. 시트 쪽에서 task_id 로 찾아 메울 수 있다.
+      const tries = (taskToProject.get(taskId)?.reportTries || 0) + 1;
+      const retryLater = (why: string) => {
+        console.warn(`[Tracker] 보고 실패(${tries}번째) ${taskId} — ${why}${tries < 30 ? ' · 서버 확인이 다시 보냄' : ' · 더 보내지 않음'}`);
+        if (tries >= 30) return;   // 45분쯤 — 그래도 안 되면 사람이 본다(로그)
+        reportedTasks.delete(taskId);
+        markTask(taskId, { reported: false, reportTries: tries });
+      };
+      const ac = new AbortController();
+      const reportTimer = setTimeout(() => ac.abort(), 60000);
       fetch(trackerUrl(), {
         method: 'POST',
+        signal: ac.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...(trackerAuth() || {}),   // ts + proof
@@ -2461,7 +2509,18 @@ async function startServer() {
           // 서버 확인(sweep)이 늦게 찾은 작업은 끝난 시각으로 — 지금 시각으로 적으면 다른 날 · 다른 주로 들어간다.
           timestamp: via === 'sweep' && Number(data.updated_at) > 0 ? Number(data.updated_at) * 1000 : Date.now(),
         }),
-      }).catch(() => {});
+      }).then(async r => {
+        const text = await r.text().catch(() => '');
+        let body: any = null; try { body = JSON.parse(text); } catch { /* GAS 오류 쪽은 HTML 이다 */ }
+        if (r.ok && body?.ok === true) return;
+        if (!r.ok) return retryLater(`HTTP ${r.status}`);
+        if (body?.ok === false) return retryLater(`ok:false ${String(body.error || '').slice(0, 120)}`);
+        console.warn(`[Tracker] 보고 응답을 읽지 못함 ${taskId} (HTTP ${r.status}) — 적혔는지 몰라 다시 보내지 않음`);
+      }, (err: any) => {
+        const code = err?.cause?.code || err?.code || '';
+        if (['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'].includes(code)) return retryLater(`연결 안 됨(${code})`);
+        console.warn(`[Tracker] 보고 응답 전에 끊김 ${taskId} (${err?.name === 'AbortError' ? '60초 초과' : code || err?.message}) — 적혔는지 몰라 다시 보내지 않음`);
+      }).finally(() => clearTimeout(reportTimer));
     }
 
     // 성공 → NCP 보관 예약. 폴더 이름이 '보낼 때의 프로젝트' 라 taskToProject 에서 읽는다(26.10.2001~ 매핑은 지우지 않는다).

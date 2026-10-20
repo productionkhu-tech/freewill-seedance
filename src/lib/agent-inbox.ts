@@ -21,7 +21,8 @@ export const AGENT_MODES: GenerationMode[] = GENERATION_MODES.map(m => m.id);
 
 // 이 앱이 하는 일(커넥터가 보고 길을 고른다 — 옛 앱이면 예전 길). 설명서 · projects.list · /api/agent/status 에 나간다.
 //   send-any-project (26.10.2002~): 요청의 projectId(또는 정확한 이름)로 보낸다 — 열린 프로젝트 · 작성 칸이 그대로다.
-//     과금은 그 프로젝트의 코드. 코드가 없으면 앱이 가져가지 않고 기다린다(작업 needsBilling). projects.list 에 프로젝트마다 billing.
+//     과금은 앱의 프로젝트 코드(앱 전체에 하나 — 26.10.2004~). 코드가 없으면 앱이 가져가지 않고 기다린다(작업 needsBilling).
+//     projects.list 의 프로젝트마다 billing 은 그 프로젝트로 보낼 때의 코드(지금은 모두 같은 공동 코드).
 export const AGENT_FEATURES = ['send-any-project'];
 
 // 에이전트가 준 설정을 프로젝트 설정 위에 얹는다. 패널에서 고를 수 있는 값만 받고, 아니면 이유를 돌려준다.
@@ -59,7 +60,13 @@ export function agentSettings(cur: GenerationSettings, req: Record<string, unkno
     if (!ok.includes(r)) return { error: `이 모델에 없는 해상도입니다: ${r}\n(${ok.join(', ')})` };
     next.resolution = r;
   }
-  if (has('ratio')) next.ratio = String(req.ratio);
+  if (has('ratio')) {
+    // Omni 는 정해진 비율만 — 아니면 보낼 때 16:9 로 바뀌어 나가는데 카드에는 준 값이 남았다(26.10.2004 감사). 시댄스 비율은
+    // 일부러 안 거른다(위 주석 — BytePlus 가 과금 없이 거절).
+    const r = String(req.ratio);
+    if (omni && !OMNI_RATIO_IDS.includes(r)) return { error: `Omni 비율은 ${OMNI_RATIO_IDS.join(' / ')} 만 됩니다: ${r}` };
+    next.ratio = r;
+  }
   if (has('duration')) {
     const d = Number(req.duration);
     const [lo, hi] = modelDurationRange(next.model);
@@ -116,10 +123,10 @@ const SETTING_DOCS: Record<string, string> = {
 // ★ 지우기(카드·엘리먼트·컬렉션·프로젝트)와 과금 프로젝트 고르기는 일부러 없다(사용자 결정 2026-10-03 — 되돌리기
 //   어렵거나 돈이 가는 곳을 정하는 일은 사람이 앱에서). costs = 과금되는 명령(확인 카드를 받은 뒤에만).
 export const AGENT_COMMANDS: { name: string; args: string; does: string; costs?: boolean; composer?: boolean }[] = [
-  { name: 'projects.list', args: '{}', does: '프로젝트(사이드바) 목록 — id · 이름 · 그룹 · 카드 수 · 연결된 컬렉션 · 프로젝트 코드(billing: { name, id } — 없으면 null) · 그 코드로 쓸 수 있는 모델(allowedModels) · 4K(fourK) · 화면에 떠 있나(shown) · 지금 손대는 것(current)' },
+  { name: 'projects.list', args: '{}', does: '프로젝트(사이드바) 목록 — id · 이름 · 그룹 · 카드 수 · 연결된 컬렉션 · 그 프로젝트로 보낼 때의 프로젝트 코드(billing: { name, id } — 없으면 null. 앱 전체에 하나라 모두 같다) · 그 코드로 쓸 수 있는 모델(allowedModels) · 4K(fourK) · 화면에 떠 있나(shown) · 지금 손대는 것(current)' },
   { name: 'project.open', args: '{ "projectId"?: "id", "project"?: "이름" }', does: '그 프로젝트를 연다(사이드바 클릭과 같음) — 보내는 데는 필요 없다. 사람에게 보여 주고 싶을 때만' },
-  { name: 'project.create', args: '{ "name": "이름", "group"?: "그룹 이름", "open"?: false }', does: '새 프로젝트를 만든다. open:false 면 열지 않는다(화면 그대로 — 에이전트는 이걸 쓴다). 같은 이름이 있으면 앱 규칙대로 (1) 이 붙는다. 새 프로젝트는 프로젝트 코드가 비어 있다 — 사람이 골라야 보낼 수 있다' },
-  { name: 'billing.list', args: '{ "projectId"?: "id", "project"?: "이름" }', does: '과금 프로젝트(프로젝트 코드) 목록과 그 프로젝트(안 주면 앱의 지금 프로젝트)에 골라 둔 코드 — 코드별 영상 수 · 토큰 · 2.5/4K 권한(크레딧 대시보드의 숫자). 고르는 건 사람이 앱에서' },
+  { name: 'project.create', args: '{ "name": "이름", "group"?: "그룹 이름", "open"?: false }', does: '새 프로젝트를 만든다. open:false 면 열지 않는다(화면 그대로 — 에이전트는 이걸 쓴다). 같은 이름이 있으면 앱 규칙대로 (1) 이 붙는다' },
+  { name: 'billing.list', args: '{ "projectId"?: "id", "project"?: "이름" }', does: '과금 프로젝트(프로젝트 코드) 목록과 앱에 골라 둔 코드(앱 전체에 하나) — 코드별 영상 수 · 토큰 · 2.5/4K 권한(크레딧 대시보드의 숫자). 고르는 건 사람이 앱에서' },
   { name: 'collections.list', args: '{}', does: '어셋 라이브러리 — 컬렉션과 엘리먼트(이름 · 분류 · 설명 · 이미지 수), 연결된 프로젝트' },
   { name: 'collection.create', args: '{ "name": "이름" }', does: '컬렉션을 만든다. 같은 이름이 있으면 그걸 돌려준다(existed)' },
   { name: 'collection.bind', args: '{ "collection": "이름", "projectId" 또는 "project": "이름" }', does: '프로젝트에 컬렉션을 연결한다 — 프롬프트의 @{이름} 은 연결된 컬렉션에서 찾는다. 프로젝트는 꼭 적는다' },
@@ -130,7 +137,7 @@ export const AGENT_COMMANDS: { name: string; args: string; does: string; costs?:
   { name: 'card.star', args: '{ "id": "카드 id", "on": true }', does: '채택(★)을 켜거나 끈다' },
   { name: 'card.download', args: '{ "id": "카드 id" }', does: '영상을 다운로드 폴더에 저장한다(카드의 다운로드 버튼과 같음) — 저장한 경로를 돌려준다' },
   { name: 'card.final', args: '{ "id": "초안 카드 id" }', does: '초안(480p) 카드로 1080p 본편을 만든다(같은 시드 · 구도) — 과금된다', costs: true },
-  { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 다시 만든다 — 그 카드의 프로젝트로(열지 않아도 됨) · 그 프로젝트의 코드로 과금된다', costs: true },
+  { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 한 편 다시 만든다(묶음 개수는 따르지 않는다) — 그 카드의 프로젝트로(열지 않아도 됨) · 앱의 프로젝트 코드로 과금된다', costs: true },
   { name: 'card.cancel', args: '{ "id": "카드 id" }', does: '대기 중(queued) 작업을 취소한다 — 이미 돌기 시작했으면 앱이 거절한다(그때는 과금된다)' },
 ];
 
@@ -142,8 +149,8 @@ const RULES = [
   '비율·길이·해상도·개수·오디오는 프롬프트에 쓰지 말고 설정으로 넘긴다.',
   '프롬프트 본문에 소수 길이 지시(예: "4.5초로")를 쓰지 않는다 — BytePlus 가 내부 오류로 실패한다.',
   '오디오 생성과 마지막 프레임 받기는 같이 못 켠다 — 마지막 프레임을 켜면 오디오는 꺼져서 나간다.',
-  '과금 프로젝트(앱에서는 "프로젝트 코드", 비용이 가는 곳)는 앱의 프로젝트마다 따로 정해져 있고 사람이 앱에서 고른다 — 에이전트는 고르지 않는다. 그 프로젝트에 코드가 없으면 앱은 요청을 가져가지 않고 기다린다(최대 10분, 작업 상태의 needsBilling) — 사람에게 시댄스에서 그 프로젝트의 "프로젝트 코드" 를 골라 달라고 할 것. 요청에 billing(코드 이름)을 적으면 그 프로젝트의 코드와 같을 때만 보낸다(다르면 실패 — 사람에게 확인).',
-  '권한이 필요한 모델과 4K 는 그 프로젝트 코드에 권한이 있어야 한다 — projects.list 의 프로젝트마다 allowedModels · fourK.',
+  '과금 프로젝트(앱에서는 "프로젝트 코드", 비용이 가는 곳)는 앱 전체에 하나고 사람이 앱 설정 패널 맨 위에서 고른다 — 에이전트는 고르지 않는다. 어느 프로젝트로 보내든 그 코드로 과금된다. 코드가 없으면 앱은 요청을 가져가지 않고 기다린다(최대 10분, 작업 상태의 needsBilling) — 사람에게 시댄스의 "프로젝트 코드" 를 골라 달라고 할 것. 요청에 billing(코드 이름)을 적으면 지금 코드와 같을 때만 보낸다(다르면 실패 — 사람에게 확인).',
+  '권한이 필요한 모델과 4K 는 그 프로젝트 코드에 권한이 있어야 한다 — projects.list 의 allowedModels · fourK.',
   '비율은 앱이 미리 거르지 않는다 — 틀리면 BytePlus 가 과금 없이 거절한다.',
   '레퍼런스를 하나라도 못 붙이거나 앱이 경고로 멈추면 보내지 않고, 그 이유가 그대로 돌아온다.',
 ];

@@ -178,7 +178,7 @@ function CustomSelect({ value, options, onChange, placeholder }: { value: string
 
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjects, setProjectBilling, trackerReachable, split, paneFocus, agentWaitingBilling } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjects, billingProjectKey, setBillingProjectKey, trackerReachable, split, paneFocus, agentWaitingBilling } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
@@ -202,6 +202,8 @@ export function SettingsPanel() {
   }, []);
 
   const project = projects.find((p) => p.id === currentProjectId);
+  // 레퍼런스 주소 입력 칸은 그 프로젝트 것 — 칸을 바꾸면 비운다(26.10.2004 감사: A 에서 친 주소가 B 패널에 남았다).
+  useEffect(() => { setAssetIdInput(''); }, [currentProjectId]);
 
   // 프로젝트마다 보던 자리(26.10.2001~). 작업창을 나눠 칸을 오가면 설정 패널이 그 칸의 프로젝트로 바뀌는데, 스크롤은
   // 픽셀 그대로 남아 다른 프로젝트의 엉뚱한 칸을 보여 줬다. 돌아오면 그 프로젝트에서 보던 자리로, 처음이면 맨 위로.
@@ -222,14 +224,12 @@ export function SettingsPanel() {
 
   if (!project) return null;
   const { settings, assets } = project;
-  // 이 프로젝트의 프로젝트 코드(과금) — 프로젝트마다 따로 · 저장(26.10.2001~, Project.billingKey). 아래 권한 · 4K ·
-  // 모델 목록은 전부 이 값으로 묻는다(예전 앱 전체 하나짜리와 이름이 같아서 아래 코드는 그대로 둔다).
-  const billingProjectKey = project.billingKey || '';
+  // 프로젝트 코드(과금) — 앱 전체에 하나(공동 코드, 26.10.2004~ · 저장). 아래 권한 · 4K · 모델 목록은 전부 이 값으로 묻는다.
   const needsBillingSelection = !billingProjectKey; // strict: no code → block generation
   // 골라 둔 코드가 지금 목록에 없다(종료 직후 60초 확인 전 · 목록이 아직 옛것). 보낼 때도 막힌다(handleSend).
   const billingMissing = !!billingProjectKey && billingProjects.length > 0 && !findBillingProject(billingProjects, billingProjectKey);
-  // 이 프로젝트로 보내려는 에이전트 요청이 코드를 기다리는 수(26.10.2002~ — 서버가 코드가 생길 때까지 붙잡아 둔다, 10분).
-  const agentWaiting = agentWaitingBilling[project.id] || 0;
+  // 코드를 기다리는 에이전트 요청 수(26.10.2002~ — 서버가 코드가 생길 때까지 붙잡아 둔다, 10분). 코드가 하나라 다 더한다.
+  const agentWaiting = Object.values(agentWaitingBilling).reduce((a, b) => a + b, 0);
   const isOmni = modelProvider(settings.model) === 'gemini'; // Gemini Omni → different settings surface
   // The task as this model actually understands it. Never read settings.omniTask raw in
   // the render path — a project can hold a task belonging to the other Omni model.
@@ -684,8 +684,8 @@ export function SettingsPanel() {
           AnimatePresence 의 initial={false}). 같은 프로젝트에서 모드를 바꿀 때의 애니메이션은 그대로다. */}
       <div key={project.id} className="p-4 space-y-6">
         {/* 프로젝트 코드(과금 · 시트 연동) — Generation Settings 위. 생성하려면 반드시 골라야 한다(strict: 없으면 생성 불가).
-            26.10.2001~ 왼쪽 프로젝트마다 따로 고르고 저장한다(Project.billingKey). 이름도 '프로젝트' 에서 '프로젝트 코드' 로
-            바꿨다 — 왼쪽 목록의 프로젝트와 헷갈리지 않게(사용자 2026-10-20). 시트에서 종료되면 자동 해제 후 다시 고르기. */}
+            앱 전체에 하나(공동 코드, 26.10.2004~ — 작업창을 나눠도 하나, 저장). 2001~2003 은 프로젝트마다였다. 이름은 '프로젝트' 에서
+            '프로젝트 코드' 로 바꿨다 — 왼쪽 목록의 프로젝트와 헷갈리지 않게(사용자 2026-10-20). 시트에서 종료되면 자동 해제 후 다시 고르기. */}
         <div className={`bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection || billingMissing || agentWaiting ? 'ring-2 ring-amber-400' : ''}`}>
           <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">프로젝트 코드</label>
           {/* ★ Empty list is not one state, it is three. Conflating them told users to go
@@ -704,14 +704,15 @@ export function SettingsPanel() {
             <>
               <CustomSelect
                 value={billingProjectKey}
-                onChange={(key) => setProjectBilling(project.id, key)}
+                onChange={(key) => setBillingProjectKey(key)}
                 // 값은 key(id 또는 'name:이름'), 화면에는 이름만 — id 는 보이지 않게.
                 options={billingProjects.map(p => ({ id: p.key || billingKeyOf(p), name: p.project }))}
                 placeholder="프로젝트 코드 선택…"
               />
-              {needsBillingSelection && <p className="text-[11px] text-amber-600">생성하려면 이 프로젝트의 코드를 고르세요.</p>}
+              {needsBillingSelection && <p className="text-[11px] text-amber-600">생성하려면 프로젝트 코드를 고르세요.</p>}
+              {split && <p className="text-[11px] text-black/45 dark:text-white/45">두 칸 모두 이 코드로 생성해요.</p>}
               {billingMissing && <p className="text-[11px] text-amber-600">골라 둔 코드가 지금 목록에 없어요(종료됐거나 아직 확인 중) — 다시 골라 주세요.</p>}
-              {agentWaiting > 0 && <p className="text-[11px] text-amber-600">에이전트 요청 {agentWaiting}개가 이 프로젝트의 코드를 기다려요 — 고르면 바로 보내요(10분 지나면 취소).</p>}
+              {agentWaiting > 0 && <p className="text-[11px] text-amber-600">에이전트 요청 {agentWaiting}개가 프로젝트 코드를 기다려요 — 고르면 바로 보내요(10분 지나면 취소).</p>}
             </>
           )}
         </div>
@@ -811,7 +812,7 @@ export function SettingsPanel() {
             <p className="text-[11px] text-amber-600 leading-snug -mt-1">
               {!billingProjectKey
                 ? `프로젝트 코드를 고르면 ${modelLabel} 사용 가능 여부가 확인됩니다.`
-                : `이 프로젝트는 ${modelLabel} 권한이 없습니다`}
+                : `이 프로젝트 코드는 ${modelLabel} 권한이 없습니다`}
             </p>
           )}
 
@@ -856,7 +857,7 @@ export function SettingsPanel() {
             <p className="text-[11px] text-amber-600 leading-snug -mt-2">
               {fourKBlockedReason === 'no-project'
                 ? '프로젝트 코드를 고르면 4K가 복원됩니다.'
-                : '이 프로젝트는 4K 권한이 없습니다 · 전송 시 1080p'}
+                : '이 프로젝트 코드는 4K 권한이 없습니다 · 전송 시 1080p'}
             </p>
           )}
           {fourKHidden && (

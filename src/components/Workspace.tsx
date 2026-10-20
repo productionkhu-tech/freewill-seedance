@@ -108,7 +108,10 @@ export function Workspace() {
     return (
       <div key={`pane-${slot}`} style={paneStyle(slot)} className="relative flex min-w-0 h-full"
         data-pane-slot={slot} data-pane-active={active ? '1' : '0'}
-        onPointerDownCapture={() => focus(slot)} onFocusCapture={() => focus(slot)}>
+        // 파일을 놓아도 그 칸에 손댄다(26.10.2004) — 탐색기에서 끌어다 놓기는 pointerdown 이 없어서, 레퍼런스 · 불러온 설정은
+        // 놓은 칸의 프로젝트에 들어가는데 설정 패널은 다른 칸을 보여 줘 붙은 것을 못 본 채 보낼 수 있었다. 지나가기만 할 때
+        // (dragenter)는 바꾸지 않는다 — 패널이 따라 출렁이지 않게.
+        onPointerDownCapture={() => focus(slot)} onFocusCapture={() => focus(slot)} onDropCapture={() => focus(slot)}>
         {/* 지금 손대는 칸 — 위쪽 가는 띠. 설정 패널이 이 칸의 프로젝트를 보여 준다. */}
         {split && active && <div className="absolute top-0 inset-x-0 h-[3px] bg-indigo-500 z-30 pointer-events-none" />}
         {projectId && <ChatArea projectId={projectId} slot={slot} split={!!split} active={active} />}

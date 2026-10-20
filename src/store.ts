@@ -10,6 +10,7 @@ import { pointAt, openAt, focusSlot, swapSides, closeSlot, afterRemoval, sanitiz
 
 // Debounced IndexedDB storage — prevents lag from writing large base64 data on every state change
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingDraftOnly = false;   // 기다리는 저장이 작성 중 글만 바뀐 것인가(늦게 써도 되는가)
 const DEBOUNCE_MS = 1500;
 // Latest snapshot waiting for the debounce timer. Kept so critical updates
 // (e.g. downloadedAt) and window-hide/quit can flush to disk immediately —
@@ -19,6 +20,87 @@ const DEBOUNCE_MS = 1500;
 // used to run synchronously on EVERY set() — each settings commit froze frames.
 // Serialization now happens only at flush time, at most once per debounce window.
 let pendingWrite: { name: string; value: StorageValue<unknown> } | null = null;
+
+// ─── 저장 직렬화 — 바뀐 카드만(26.10.2004) ────────────────────────────────────────────────────────────────
+// 기록 전체(카드마다 썸네일 · 설정, 실측 33MB)를 저장할 때마다 JSON.stringify 하면 641장 프로젝트에서 한 번에 ≈230ms(그다음 IDB
+// put ≈170ms)였다 — 작성 중 글이 프로젝트 안에 있어 타자를 멈출 때마다(0.5초) 그만큼 화면이 멈췄다(2026-10-21 실측, 나누기와 무관).
+// 메시지는 불변 갱신이라(바꾸면 새 객체 — 제자리 수정 0건, §7 '저장 칸 제자리 수정 금지') 안 바뀐 메시지는 같은 객체다. 그
+// 객체의 JSON 문자열을 기억해 두고 바뀐 것만 다시 만든다. ★ 결과는 JSON.stringify(value) 와 바이트까지 같아야 한다 — 칸 순서
+// (Object.keys = JSON.stringify 순서) · undefined/함수 칸 빼기 · 배열의 undefined → null 을 그대로 따른다. 개발 모드에서는 매번
+// JSON.stringify 와 견줘 다르면 크게 알린다(누가 메시지를 제자리에서 고치면 여기서 잡힌다).
+const msgJson = new WeakMap<object, string>();
+const jsonOf = (v: unknown): string | undefined => JSON.stringify(v);
+const cachedMsgJson = (m: unknown): string => {
+  if (!m || typeof m !== 'object') return jsonOf(m) ?? 'null';
+  let out = msgJson.get(m as object);
+  if (out === undefined) { out = jsonOf(m) ?? 'null'; msgJson.set(m as object, out); }
+  return out;
+};
+// 조각을 한 배열에 모아 마지막에 한 번만 잇는다 — 단계마다 문자열을 이어 붙이면 수십 MB 를 여러 번 복사한다(운영 빌드 실측:
+// 그렇게 짰을 때 조립만 ≈140ms).
+// 시험이 JSON.stringify 와 견줄 수 있게 내보낸다(persist-test.mjs).
+export function persistJson(value: StorageValue<unknown>): string {
+  const st = (value as any)?.state;
+  if (!st || typeof st !== 'object' || !Array.isArray(st.projects) || typeof (value as any).toJSON === 'function' || typeof st.toJSON === 'function') return JSON.stringify(value);
+  const parts: string[] = [];
+  const emitJson = (v: unknown): boolean => { const s = jsonOf(v); if (s === undefined) return false; parts.push(s); return true; };
+  // 객체 — 칸 순서는 Object.keys(= JSON.stringify 순서), 값이 undefined · 함수인 칸은 이름째 뺀다.
+  const emitObject = (o: Record<string, unknown>, emitField: (k: string, v: unknown) => boolean) => {
+    parts.push('{');
+    let first = true;
+    for (const k of Object.keys(o)) {
+      const mark = parts.length;
+      parts.push(first ? '' : ',', JSON.stringify(k), ':');
+      if (emitField(k, o[k])) first = false; else parts.length = mark;
+    }
+    parts.push('}');
+  };
+  const emitArray = (arr: unknown[], emitItem: (x: unknown) => void) => {
+    parts.push('[');
+    for (let i = 0; i < arr.length; i++) { if (i) parts.push(','); emitItem(arr[i]); }
+    parts.push(']');
+  };
+  const emitProject = (p: any) => {
+    if (!p || typeof p !== 'object' || !Array.isArray(p.messages) || typeof p.toJSON === 'function') { parts.push(jsonOf(p) ?? 'null'); return; }
+    emitObject(p, (k, v) => { if (k !== 'messages') return emitJson(v); emitArray(v as unknown[], m => parts.push(cachedMsgJson(m))); return true; });
+  };
+  emitObject(value as any, (k, v) => {
+    if (k !== 'state') return emitJson(v);
+    emitObject(st, (k2, v2) => { if (k2 !== 'projects') return emitJson(v2); emitArray(v2 as unknown[], emitProject); return true; });
+    return true;
+  });
+  const out = parts.join('');
+  if ((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV) {
+    const full = JSON.stringify(value);
+    if (full !== out) {
+      console.error('[Persist] 빠른 직렬화가 JSON.stringify 와 다름 — 메시지를 제자리에서 고친 곳이 있다. 이번엔 전체로 저장.');
+      return full;
+    }
+  }
+  return out;
+}
+
+// 작성 중 글(draftPrompt)만 바뀐 저장인가 — 그러면 늦게(DRAFT_DEBOUNCE_MS) 써서 타자 중에 저장이 끼지 않게. 창을 숨기거나 끌 때는
+// 바로 쓴다(flushPersist). 바뀐 프로젝트에서 draftPrompt 말고 다른 칸이 하나라도 바뀌었으면(카드 · 설정 · 레퍼런스) 평소처럼.
+const DRAFT_DEBOUNCE_MS = 8000;
+function onlyDraftsChanged(prev: any, next: any): boolean {
+  if (!prev || !next || typeof prev !== 'object' || typeof next !== 'object') return false;
+  const keys = Object.keys(next);
+  if (keys.length !== Object.keys(prev).length) return false;
+  for (const k of keys) if (k !== 'projects' && !Object.is(prev[k], next[k])) return false;
+  const a: any[] = prev.projects, b: any[] = next.projects;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  let changed = 0;
+  for (let i = 0; i < b.length; i++) {
+    if (a[i] === b[i]) continue;
+    if (!a[i] || !b[i] || a[i].id !== b[i].id) return false;
+    const pk = Object.keys(b[i]);
+    for (const k of pk) if (k !== 'draftPrompt' && !Object.is(a[i][k], b[i][k])) return false;
+    for (const k of Object.keys(a[i])) if (k !== 'draftPrompt' && !(k in b[i])) return false;
+    changed++;
+  }
+  return changed > 0;
+}
 // 마지막으로 저장하러 넘긴 상태와 그때의 어셋 목록 — 같은 것을 다시 쓰지 않게(setItem 주석).
 let lastPersistedState: unknown = null;
 let lastElementsSeen: unknown = undefined;
@@ -625,13 +707,16 @@ const idbPersistStorage: PersistStorage<unknown> = {
     if (stateSame && els === lastElementsSeen) return;
     lastElementsSeen = els;
     if (stateSame) { pendingBackup = value; backupClock.changed(); return; }   // 어셋 목록만 바뀜 — 백업만
+    // 작성 중 글만 바뀌었고, 앞서 기다리던 저장도 그런 것이었으면(또는 없었으면) 늦게 쓴다.
+    const draftOnly = onlyDraftsChanged(lastPersistedState, st) && (!pendingWrite || pendingDraftOnly);
+    pendingDraftOnly = draftOnly;
     lastPersistedState = st;
     // `value.state` is zustand's immutable snapshot — safe to hold by reference
     // until the timer fires (updates replace objects, never mutate them).
     pendingWrite = { name, value };
     if (writeTimer) clearTimeout(writeTimer);
     writeTimer = setTimeout(() => {
-      const w = pendingWrite; pendingWrite = null;
+      const w = pendingWrite; pendingWrite = null; pendingDraftOnly = false;
       if (!w) return;
       // ★ try/catch, and it is not decoration. This is the SAME shape that killed the
       // backup for a week: JSON.stringify throws RangeError SYNCHRONOUSLY once the string
@@ -646,7 +731,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
       // So: never let it be silent. Tell the user, because the only real fix at that point
       // is theirs — archive or delete old projects.
       try {
-        set(w.name, JSON.stringify(w.value));
+        set(w.name, persistJson(w.value));
       } catch (err: any) {
         console.error('[Persist] state serialize failed — NOT SAVED:', err?.message || err);
         window.dispatchEvent(new CustomEvent('seedance:toast', {
@@ -656,7 +741,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
           },
         }));
       }
-    }, DEBOUNCE_MS);
+    }, draftOnly ? DRAFT_DEBOUNCE_MS : DEBOUNCE_MS);
 
     // 외부 백업 파일로 미러링.
     //
@@ -687,7 +772,8 @@ export function flushPersist(): Promise<void> {
   if (!pendingWrite) return Promise.resolve();
   const w = pendingWrite;
   pendingWrite = null;
-  return set(w.name, JSON.stringify(w.value));
+  pendingDraftOnly = false;
+  return set(w.name, persistJson(w.value));
 }
 
 // Safety net: flush whenever the window hides (minimize/tray) or unloads
@@ -1029,11 +1115,8 @@ export interface Project {
                        // that finished after this is unseen. Stores the CLIP's time (not
                        // Date.now()) so the comparison is idempotent — re-marking while
                        // nothing new finished is a no-op and never writes.
-  // 프로젝트 코드(과금 프로젝트, 시트 연동)의 key — 이 프로젝트에서 만든 것은 이 코드로 시트에 찍힌다(26.10.2001~).
-  // 예전엔 앱 전체에 하나(세션 전용)였다. 작업창을 두 칸으로 나누자 "프로젝트(과금)는 당연히 왼쪽 프로젝트마다 달라야"
-  // 했다(사용자 2026-10-20). 저장한다(껐다 켜도 그대로), 새 프로젝트는 비어 있다(골라야 생성 가능 — 다른 건의 코드로
-  // 잘못 찍히지 않게). 시트에서 그 코드가 종료되면 App.tsx 60초 확인이 비운다(reconcileBillingSelection).
-  // ★ 이름이 아니라 key(BillingProject.key)다 — 이름은 POS 에서 바뀐다.
+  // 26.10.2001~2003 판이 프로젝트마다 적던 프로젝트 코드 — 26.10.2004~ 읽지 않는다(코드는 앱 전체에 하나 — AppState
+  // billingProjectKey). 켤 때 한 번 공동 코드로 옮기고 지운다(onRehydrateStorage).
   billingKey?: string;
 }
 
@@ -1059,16 +1142,21 @@ interface AppState {
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
   setAutoDownload: (v: boolean) => void;
-  // 프로젝트 코드(과금 프로젝트) 고르기 — 프로젝트마다(Project.billingKey, 26.10.2001~). 예전의 앱 전체 하나짜리
-  // billingProjectKey(세션 전용)는 없앴다 — 남겨 두면 어느 쪽을 읽는지 갈린다. 이름 · 권한은 projectBilling() 로.
-  setProjectBilling: (projectId: string, key: string) => void;
-  // 여러 프로젝트를 한 번에(60초 확인에서 종료된 코드를 비울 때 — set 한 번).
-  setProjectBillingMany: (updates: [string, string][]) => void;
+  // 프로젝트 코드(과금 프로젝트, 시트 연동) — 앱 전체에 하나(공동 코드, 26.10.2004~). 작업창을 나눠도 하나, 에이전트도 이
+  // 코드로 보낸다. 26.10.2001~2003 은 프로젝트마다 따로였다 — 나눠 볼 때 칸마다 고르게 하려다 "에이전트가 화면에 없는
+  // 프로젝트로 보낼 때는?" 에서 막혀, 사용자가 "코드는 그냥 통일하자. 원래 하던 것처럼 공동 코드" (2026-10-20).
+  // 저장한다(껐다 켜도 그대로). 시트에서 종료되면 App.tsx 60초 확인이 비운다 — 다시 골라야 보낸다(사용자 결정, 지금처럼).
+  // ★ 이름이 아니라 key(BillingProject.key)다 — 이름은 POS 에서 바뀐다. 읽는 쪽은 projectBilling() · billingOf() 로.
+  billingProjectKey: string;
+  setBillingProjectKey: (key: string) => void;
+  // Transient: 켤 때 한 번 알릴 말(공동 코드로 옮기면서 코드를 비웠을 때) — App.tsx 가 안내 띠로 띄우고 비운다.
+  billingNote: string | null;
+  setBillingNote: (v: string | null) => void;
   // allow4k mirrors the tracker sheet's Project_Status F column ("4K 허용"), refreshed
   // by the same 60s poll that carries status. Kept on this list rather than in its own
   // store field so a permission flip costs zero extra writes/renders.
-  // ★ The LIST is persisted. (The selection used to be session-only and app-global; since 26.10.2001
-  //   it is per project and persisted — Project.billingKey. What made persisting it dangerous was a
+  // ★ The LIST is persisted. (The selection is too: app-global and session-only until 26.10.2001, per project
+  //   2001~2003, app-global again and persisted since 26.10.2004 — billingProjectKey. What made persisting it dangerous was a
   //   hydration clamp against POLICY wiping a stored '4k'; that clamp is structural now(modelResolutions),
   //   so a stored key changes nothing at boot. Keep it structural.)
   // This list changes maybe once a week, but it used to be thrown away on every restart,
@@ -1090,10 +1178,15 @@ interface AppState {
   // shared "panel + element" image budget in the Reference Assets hint.
   mentionedElementImages: number;
   setMentionedElementImages: (n: number) => void;
-  // Transient: 프로젝트 id → 그 프로젝트의 코드가 없어 서버 작업함에서 기다리는 에이전트 작업 수(26.10.2002~).
+  // Transient: 대상 프로젝트 id → 프로젝트 코드가 없어 서버 작업함에서 기다리는 에이전트 작업 수(26.10.2002~).
   // ChatArea 의 작업함 확인(2초)이 서버 답을 그대로 적고, 설정 패널이 '프로젝트 코드' 옆에 알린다.
   agentWaitingBilling: Record<string, number>;
   setAgentWaitingBilling: (m: Record<string, number>) => void;
+  // Transient: 프로젝트 id → 지금 보내는(업로드 중인) 수 — '보내는 중' 잠금은 칸이 아니라 프로젝트에 붙는다(26.10.2004 감사).
+  // 보내는 사이 칸을 닫거나 그 칸에 다른 프로젝트를 열어도, 그 프로젝트를 다시 열면 잠겨 있어 두 번 보내지 않는다.
+  sendingProjects: Record<string, number>;
+  beginSending: (projectId: string) => void;
+  endSending: (projectId: string) => void;
   // 작업창 나누기(26.10.2001~, src/lib/split.ts). split 은 저장한다(껐다 켜도 그대로). paneFocus(지금 손대는 칸)는
   // 저장하지 않는다 — 칸 사이를 오갈 때마다 기록 전체(수십 MB)를 다시 쓰지 않게(partialize 주석). 켜면 0번 칸이다.
   // ★ 나눴을 때 currentProjectId 는 늘 손대는 칸의 프로젝트다(split.ts 불변식 ②). 바꾸는 길은 아래 함수들과
@@ -1968,18 +2061,19 @@ export function findBillingProject(list: BillingProject[], key: string | undefin
   }
   return undefined;
 }
-// 그 프로젝트의 프로젝트 코드(과금) — 지금 목록에서 key 로 찾는다(26.10.2001~ 프로젝트마다). 없거나 종료면 undefined.
+// 그 프로젝트로 보낼 때의 프로젝트 코드(과금) — 지금 목록에서 key 로 찾는다. 없거나 종료면 undefined.
+// ★ 정책은 여기 한 곳: 26.10.2004~ 코드는 앱 전체에 하나(공동 코드)라 projectId 는 쓰지 않는다. 부르는 곳은 '그 프로젝트의
+//   코드' 를 묻는 모양 그대로 둔다(보내기 · 옴니 · 에이전트 · 권한 · 초안 → 본편) — 정책이 다시 바뀌면 이 두 함수만 고친다.
+//   (26.10.2001~2003 은 프로젝트마다였다.)
 export function projectBilling(state: {
-  projects: Project[]; billingProjects: BillingProject[];
-}, projectId: string | null | undefined): BillingProject | undefined {
-  const key = projectId ? state.projects.find(p => p.id === projectId)?.billingKey : undefined;
-  return findBillingProject(state.billingProjects, key);
+  billingProjectKey: string; billingProjects: BillingProject[];
+}, _projectId?: string | null): BillingProject | undefined {
+  return findBillingProject(state.billingProjects, state.billingProjectKey);
 }
-// 권한 함수(isModelAllowed · isFourKAllowed)에 넘길 모양 — 그 프로젝트의 코드로 묻는다.
-export function billingOf(state: { projects: Project[]; billingProjects: BillingProject[] }, projectId: string | null | undefined):
+// 권한 함수(isModelAllowed · isFourKAllowed)에 넘길 모양 — 그 프로젝트로 보낼 때의 코드(공동 코드)로 묻는다.
+export function billingOf(state: { billingProjectKey: string; billingProjects: BillingProject[] }, _projectId?: string | null):
   { billingProjectKey: string; billingProjects: BillingProject[] } {
-  const key = projectId ? state.projects.find(p => p.id === projectId)?.billingKey : undefined;
-  return { billingProjectKey: key || '', billingProjects: state.billingProjects };
+  return { billingProjectKey: state.billingProjectKey || '', billingProjects: state.billingProjects };
 }
 // 목록이 새로 들어왔을 때 선택을 어떻게 할지. 순수 함수라 App.tsx 의 60초 폴링과 시험이 같은
 // 답을 낸다.
@@ -2001,8 +2095,8 @@ export function reconcileBillingSelection(
   // id 는 화면에 보이지 않는다 — 이름을 모르면 이름 없이 말한다.
   const name = before?.project || (selKey.startsWith('name:') ? selKey.slice(5) : '');
   return { key: '', note: name
-    ? `프로젝트 코드 "${name}"가 종료되어 해제되었습니다. 그 프로젝트에서 새 코드를 골라 주세요.`
-    : '프로젝트 코드가 종료되어 해제되었습니다. 그 프로젝트에서 새 코드를 골라 주세요.' };
+    ? `프로젝트 코드 "${name}"가 종료되어 해제되었습니다. 설정 패널 맨 위 "프로젝트 코드" 에서 다시 골라 주세요.`
+    : '프로젝트 코드가 종료되어 해제되었습니다. 설정 패널 맨 위 "프로젝트 코드" 에서 다시 골라 주세요.' };
 }
 
 // Draft 의 과금 프로젝트를 지금 목록에서 찾는다: key → id → 이름(26.9.2306 이전 Draft) 순.
@@ -2040,7 +2134,7 @@ export function isFourKAllowed(state: {
 // This is the UI's copy of the answer. server.ts asks the tracker the same question again
 // before it forwards anything, because both inputs here are editable at rest: the roster
 // is persisted in IndexedDB and settings.model is stored per project.
-// billingProjectKey 에는 그 프로젝트의 코드(billingOf)나 다른 키(Draft 의 프로젝트)를 넣어 묻는다.
+// billingProjectKey 에는 공동 코드(billingOf)나 다른 키(Draft 의 프로젝트)를 넣어 묻는다.
 export function isModelAllowed(model: string, state: {
   billingProjectKey: string;
   billingProjects: BillingProject[];
@@ -2068,38 +2162,27 @@ export const useAppStore = create<AppState>()(
       autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
       billingProjects: [],
+      billingProjectKey: '',
+      billingNote: null,
+      setBillingNote: (v) => set({ billingNote: v }),
       trackerReachable: null,
       agentWaitingBilling: {},
+      sendingProjects: {},
+      beginSending: (pid) => set((st) => ({ sendingProjects: { ...st.sendingProjects, [pid]: (st.sendingProjects[pid] || 0) + 1 } })),
+      endSending: (pid) => set((st) => {
+        const n = (st.sendingProjects[pid] || 0) - 1;
+        const next = { ...st.sendingProjects };
+        if (n > 0) next[pid] = n; else delete next[pid];
+        return { sendingProjects: next };
+      }),
       setAgentWaitingBilling: (m) => {
         const cur = get().agentWaitingBilling;
         const ka = Object.keys(cur), kb = Object.keys(m);
         if (ka.length === kb.length && kb.every(k => cur[k] === m[k])) return;   // 같으면 안 바꾼다(2초마다 부른다)
         set({ agentWaitingBilling: m });
       },
-      // 프로젝트 코드 고르기(26.10.2001~) — 프로젝트에 적는다. 빈 문자열이면 비운다(필드째 지워 저장본에 '' 를 남기지 않음).
-      setProjectBilling: (projectId, key) => {
-        const p = get().projects.find(x => x.id === projectId);
-        if (!p || (p.billingKey || '') === key) return;
-        set((state) => ({
-          projects: state.projects.map(x => {
-            if (x.id !== projectId) return x;
-            const { billingKey: _old, ...rest } = x;
-            return key ? { ...rest, billingKey: key } : rest;
-          }),
-        }));
-      },
-      setProjectBillingMany: (updates) => {
-        const want = new Map(updates.filter(([pid, key]) => (get().projects.find(x => x.id === pid)?.billingKey || '') !== key));
-        if (!want.size) return;
-        set((state) => ({
-          projects: state.projects.map(x => {
-            if (!want.has(x.id)) return x;
-            const key = want.get(x.id)!;
-            const { billingKey: _old, ...rest } = x;
-            return key ? { ...rest, billingKey: key } : rest;
-          }),
-        }));
-      },
+      // 프로젝트 코드(공동 코드) 고르기 — 같으면 set 하지 않는다(저장 · 백업을 다시 예약하지 않게).
+      setBillingProjectKey: (key) => { if (get().billingProjectKey !== key) set({ billingProjectKey: key }); },
       setBillingProjects: (list) => set({ billingProjects: list }),
       // 값이 같으면 set 을 부르지도 않는다. persist 는 set 이 불릴 때마다(값이 그대로여도) 기록 전체를 다시
       // 저장하고 백업을 다시 예약한다 — 1분마다 도는 트래커 확인이 이것으로 1분마다 33MB 를 다시 썼고, 백업이
@@ -2836,9 +2919,10 @@ export const useAppStore = create<AppState>()(
         projectGroups: state.projectGroups,
         projectCollectionId: state.projectCollectionId,
         // Last known-good tracker list. Tiny (17 rows) next to `projects`, and it is what
-        // lets a launch survive a cold/slow/dead Apps Script. 프로젝트마다 고른 코드는 프로젝트 안에
-        // (Project.billingKey, 26.10.2001~) — projects 와 같이 저장된다.
+        // lets a launch survive a cold/slow/dead Apps Script.
         billingProjects: state.billingProjects,
+        // 프로젝트 코드(공동 코드, 26.10.2004~) — 껐다 켜도 그대로(사용자 2026-10-20 "기억한다").
+        billingProjectKey: state.billingProjectKey,
         recoveryScanned: state.recoveryScanned,
         deletedProjectIds: state.deletedProjectIds,
         theme: state.theme,
@@ -2878,7 +2962,21 @@ export const useAppStore = create<AppState>()(
           // 손대는 칸은 0번이다(paneFocus 는 저장하지 않는다 — partialize 주석).
           const split = sanitizeSplit(state.split, (pid) => patched.some(p => p.id === pid));
           const panes = split ? { split, paneFocus: 0 as PaneSlot, currentProjectId: split.slots[0] } : { split: null, paneFocus: 0 as PaneSlot };
-          useAppStore.setState({ projects: patched, theme, billingProjects, ...panes, _hasHydrated: true });
+          // 26.10.2001~2003 의 프로젝트마다 코드 → 공동 코드(26.10.2004~, 한 번만). 프로젝트들에 적힌 코드가 모두 같으면 그 코드를
+          // 공동 코드로, **서로 다르면 고르지 않고 비운 뒤 알린다**(감사: 0번 칸 것으로 정하면 다른 건의 다음 생성이 알림 없이 그
+          // 코드로 과금된다 — 사람이 한 번 고르게 한다). 그다음 프로젝트마다 적힌 것은 지운다(다시 옮기지 않게 · 읽는 곳도 없다).
+          let billingProjectKey = state.billingProjectKey || '';
+          let projectsOut = patched;
+          let billingNote: string | null = null;
+          if (patched.some(p => p.billingKey)) {
+            if (!billingProjectKey) {
+              const distinct = [...new Set(patched.map(p => p.billingKey).filter(Boolean) as string[])];
+              if (distinct.length === 1) billingProjectKey = distinct[0];
+              else billingNote = `프로젝트 코드가 이제 앱 전체에 하나예요. 프로젝트마다 다른 코드(${distinct.length}개)를 쓰고 있어서 비워 두었어요 — 설정 패널 맨 위 "프로젝트 코드" 에서 지금 쓸 코드를 골라 주세요.`;
+            }
+            projectsOut = patched.map(p => { if (!p.billingKey) return p; const { billingKey: _old, ...rest } = p; return rest; });
+          }
+          useAppStore.setState({ projects: projectsOut, theme, billingProjects, billingProjectKey, billingNote, ...panes, _hasHydrated: true });
           if (persistTroubleMsg) useAppStore.setState({ persistTrouble: persistTroubleMsg });
 
           // Element library loads from its own key (and migrates out of the legacy

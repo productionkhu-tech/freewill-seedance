@@ -21,6 +21,12 @@ export default function App() {
   useEffect(() => {
     if (_hasHydrated && projects.length === 0) createProject();
   }, [_hasHydrated, projects.length, createProject]);
+  // 켤 때 한 번 알릴 말(공동 코드로 옮기며 코드를 비웠을 때, 26.10.2004) — 종료 안내와 같은 띠로.
+  useEffect(() => {
+    if (!_hasHydrated) return;
+    const note = useAppStore.getState().billingNote;
+    if (note) { setProjectEndedNote(note); useAppStore.getState().setBillingNote(null); }
+  }, [_hasHydrated]);
 
   // The sidebar badges projects that finished something you haven't looked at. The open
   // project is by definition looked at, so clear it — both when you switch in, and again
@@ -196,21 +202,15 @@ export default function App() {
         if (changed) useAppStore.getState().setBillingProjects(active);
         // 선택은 이름이 아니라 key 로 유지한다. 이름만 바뀐 프로젝트는 선택된 채로 남고(알림만),
         // 목록에서 정말 사라졌을 때(종료)만 풀린다. 규칙은 store.ts / reconcileBillingSelection.
-        // 26.10.2001~ 코드는 프로젝트마다(Project.billingKey) — 프로젝트마다 같은 규칙을 돌리고 한 번에 쓴다.
+        // 코드는 앱 전체에 하나(공동 코드, 26.10.2004~ — 2001~2003 은 프로젝트마다). 종료되면 비우고 알린다 — 다시 골라야
+        // 보낸다(사용자 결정 2026-10-20 "지우고 다시 고르게"). 보내는 중이었으면 요청 직전 확인이 막는다(recheckBeforePost).
         // ★ 받은 목록이 비었으면 아무것도 풀지 않는다. 코드가 저장되므로(예전엔 세션 전용) 트래커가 잠깐 빈 목록을
-        //   주면 모든 프로젝트의 코드가 한꺼번에 풀려 다시 골라야 했다. 진짜로 다 종료됐으면 보낼 때 서버가 막는다.
+        //   주면 코드가 풀려 다시 골라야 했다. 진짜로 다 종료됐으면 보낼 때 서버가 막는다.
         if (active.length > 0) {
-          const updates: [string, string][] = [];
-          const notes = new Map<string, string[]>();   // 안내 문구 → 그 코드를 쓰던 프로젝트들
-          for (const p of useAppStore.getState().projects) {
-            if (!p.billingKey) continue;
-            const { key, note } = reconcileBillingSelection(prev, active, p.billingKey);
-            if (key !== p.billingKey) updates.push([p.id, key]);
-            if (note) notes.set(note, [...(notes.get(note) || []), p.name]);
-          }
-          if (updates.length) useAppStore.getState().setProjectBillingMany(updates);
-          if (notes.size) setProjectEndedNote([...notes].map(([n, names]) =>
-            `${n}${names.length ? ` (${names.slice(0, 3).join(', ')}${names.length > 3 ? ` 외 ${names.length - 3}개` : ''})` : ''}`).join('\n'));
+          const selKey = useAppStore.getState().billingProjectKey;
+          const { key, note } = reconcileBillingSelection(prev, active, selKey);
+          if (key !== selKey) useAppStore.getState().setBillingProjectKey(key);
+          if (note) setProjectEndedNote(note);
         }
       } catch {
         // network / abort / parse fail → keep current selection + list, retry sooner

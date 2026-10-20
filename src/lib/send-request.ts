@@ -27,7 +27,7 @@ export type SendInput = {
   settings: GenerationSettings;
   assets: Asset[];
   writeBack4k?: boolean;            // 화면의 보내기만 — 4K 권한이 풀려 낮춰 보낼 때 프로젝트 설정에도 되쓴다
-  expectBillingKey?: string;        // 에이전트 — 가져갈 때 본 그 프로젝트의 코드(key). 다르면 보내지 않는다
+  expectBillingKey?: string;        // 에이전트 — 가져갈 때 본 프로젝트 코드(key). 다르면 보내지 않는다
 };
 export type SendIO = {
   warn: (msg: string) => void;
@@ -35,14 +35,21 @@ export type SendIO = {
   sent?: () => void;                // 카드를 붙인 뒤(화면은 맨 아래로 내린다)
 };
 
-// 요청을 띄우기 직전 확인 — 빈 문자열이면 보내도 된다.
-function recheckBeforePost(projectId: string, billingKey: string): string {
+// 요청을 띄우기 직전 확인 — 빈 문자열이면 보내도 된다. 업로드(기다림) 사이에 바뀔 수 있는 것을 다시 본다:
+// 프로젝트가 아직 있나 · 코드가 그대로인가 · 그 코드에 이 모델 · 4K 권한이 아직 있나(60초 확인이 권한을 바꿀 수 있다 —
+// 26.10.2004 감사: 4K 권한은 업로드 전에 한 번만 읽어서, 그 사이 풀리면 4K 로 과금될 수 있었다).
+function recheckBeforePost(projectId: string, billingKey: string, model: string, resolution?: string): string {
   const st = useAppStore.getState();
   if (!st.projects.some(p => p.id === projectId)) return '보내는 사이 프로젝트가 지워져 보내지 않았습니다.';
   const now = projectBilling(st, projectId);
   if (!now || now.key !== billingKey) {
-    return `보내는 사이 이 프로젝트의 프로젝트 코드가 바뀌어 보내지 않았습니다(지금 ${now ? `"${now.project}"` : '고르지 않음'}).\n코드를 확인한 뒤 다시 보내 주세요.`;
+    return `보내는 사이 프로젝트 코드가 바뀌어 보내지 않았습니다(지금 ${now ? `"${now.project}"` : '고르지 않음 — 종료됐을 수 있어요'}).\n코드를 확인한 뒤 다시 보내 주세요.`;
   }
+  const bo = billingOf(st, projectId);
+  if (!isModelAllowed(model, bo)) {
+    return `보내는 사이 프로젝트 코드 "${now.project}" 의 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 풀려 보내지 않았습니다.`;
+  }
+  if (resolution === '4k' && !isFourKAllowed(bo)) return `보내는 사이 4K 권한이 풀려 보내지 않았습니다.\n해상도를 낮춰 다시 보내 주세요.`;
   return '';
 }
 
@@ -374,19 +381,18 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   // A project MUST be selected to generate — no exceptions, even if the list is
   // empty / offline (no project → no send). Every send path (Enter / 전송 버튼 /
   // 재생성) funnels through here. Read FRESH from the store (never a stale closure)
-  // → a just-picked code is always honored. 26.10.2001~ 코드는 이 프로젝트의 것(Project.billingKey) —
-  // 작업창을 나눠도 칸마다 자기 프로젝트의 코드로 찍힌다.
+  // → a just-picked code is always honored. 코드는 앱 전체에 하나(공동 코드, 26.10.2004~) — projectBilling 이 정책을 안다.
   // 선택은 key 로 들고 있다 — 이름·id 는 지금 목록에서 찾는다(이름이 바뀌었으면 새 이름).
   const bill = projectBilling(useAppStore.getState(), project.id);
   if (!bill) {
-    warn(project.billingKey
-      ? '이 프로젝트의 프로젝트 코드를 목록에서 찾을 수 없습니다(종료됐을 수 있어요).\n코드를 다시 골라 주세요.'
-      : '이 프로젝트의 프로젝트 코드를 먼저 골라 주세요.\n(설정 패널 맨 위 "프로젝트 코드")');
+    warn(useAppStore.getState().billingProjectKey
+      ? '골라 둔 프로젝트 코드를 목록에서 찾을 수 없습니다(종료됐을 수 있어요).\n코드를 다시 골라 주세요.'
+      : '프로젝트 코드를 먼저 골라 주세요.\n(설정 패널 맨 위 "프로젝트 코드")');
     return;
   }
   // 에이전트: 가져갈 때 본 코드와 지금 코드가 같아야 한다 — 그 사이 사람이 바꿨으면 보내지 않는다(과금은 사람이 정한다).
   if (input.expectBillingKey !== undefined && bill.key !== input.expectBillingKey) {
-    warn(`이 프로젝트의 프로젝트 코드가 바뀌어(지금 "${bill.project}") 보내지 않았습니다.\n확인한 뒤 다시 보내 주세요.`);
+    warn(`프로젝트 코드가 바뀌어(지금 "${bill.project}") 보내지 않았습니다.\n확인한 뒤 다시 보내 주세요.`);
     return;
   }
   // ★ Model grant (tracker sheet column G → allow25). Blocks rather than downgrading:
@@ -648,10 +654,10 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
     el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, libId: img.libId, url: img.thumbnailUrl || img.url }))
   );
 
-  // 보내기 직전 — 위의 기다림(업로드) 사이에 프로젝트가 지워졌거나 그 프로젝트의 코드가 바뀌었으면 보내지 않는다.
+  // 보내기 직전 — 위의 기다림(업로드) 사이에 프로젝트가 지워졌거나 프로젝트 코드가 바뀌었으면(종료로 비워졌으면) 보내지 않는다.
   // 여기부터 요청을 띄울 때까지는 await 가 없다 — 확인한 코드 그대로 카드 · 요청에 찍힌다.
   {
-    const why = recheckBeforePost(project.id, bill.key);
+    const why = recheckBeforePost(project.id, bill.key, currentSettings.model, currentSettings.resolution);
     if (why) { warn(why); io.busy?.(false); return; }
   }
   for (let i = 0; i < outputCount; i++) {
@@ -992,7 +998,7 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
 
   // 보내기 직전 — 그 사이 프로젝트가 지워졌거나 코드가 바뀌었으면 보내지 않는다(sendRequest 와 같은 확인).
   {
-    const why = recheckBeforePost(projectId, bill.key);
+    const why = recheckBeforePost(projectId, bill.key, s.model, payload?.response_format?.resolution);
     if (why) { warn(why); io.busy?.(false); return; }
   }
   const settingsSnapshot = { ...s };

@@ -574,6 +574,16 @@ const rebindMentionPills = (html: string, named: { id: string; name: string }[])
 // 보낸 에이전트 작업 → 카드 상태를 올릴 것(26.10.2002~ 앱에 하나). 예전에는 칸(ChatArea)마다 들고 있어서, 보낸 칸을 닫으면
 // 그 작업이 'sent' 에서 멈췄다. 이제 손대는 칸이 누구 것이든 이어서 올린다(agentReportProgress).
 const agentActive = new Map<string, { projectId: string; ids: string[]; last: string; inFlight?: boolean }>();
+// '보내는 중' 잠금(26.10.2004 감사) — 칸이 아니라 프로젝트에 붙는다(store sendingProjects). 한 번 보내기에 한 번만 올리고
+// 내린다(token): sendRequest 가 busy(true/false) 를 부르고, 부르는 쪽은 끝난 뒤 1.5초에 한 번 더 release 한다 — 어느 길에서
+// 내리는 것을 빠뜨려도 잠금이 남지 않게(Omni 는 0.8초 뒤에 내려 돌기가 보이게 한다).
+const sendLock = (pid: string) => {
+  let held = false;
+  const release = () => { if (held) { held = false; useAppStore.getState().endSending(pid); } };
+  return { busy: (on: boolean) => { if (on && !held) { held = true; useAppStore.getState().beginSending(pid); } else if (!on) release(); }, release };
+};
+const sendingNow = (pid: string) => (useAppStore.getState().sendingProjects[pid] || 0) > 0;
+
 // 화면 id 와 '처리 중' 은 창에 하나(26.10.2002 검토). 칸마다 두면, 왼쪽 칸이 요청을 처리하는(업로드) 사이 사용자가 오른쪽 칸을
 // 누를 때 왼쪽 칸은 작업함에 들르지 않아(손대는 칸만 들른다) 서버가 60초 뒤 그 요청을 '화면 응답 없음' 실패로 닫았다 → 에이전트가
 // 다시 보내면 오른쪽 칸이 바로 보내고 왼쪽도 업로드를 마치고 보내 두 번 과금될 수 있었다. 이제 어느 칸이 손대는 칸이든 같은 id 로
@@ -1454,7 +1464,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
             <div className="flex items-center gap-0.5 shrink-0">
               <button onClick={() => { void actions.current.handleReuse(msg); }} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors" title="프롬프트 재사용"><RefreshCw size={15} /></button>
               {(msg.status === 'succeeded' || msg.status === 'failed') && (
-                <button onClick={() => { void actions.current.handleRegenerate(msg); }} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={msg.draftOf && msg.status === 'failed' ? '본편 다시 시도 (같은 Draft에서)' : '재생성 (같은 설정·래퍼런스로 다시 생성)'}><Sparkles size={15} /></button>
+                <button onClick={() => { void actions.current.handleRegenerate(msg); }} disabled={isGenerating} className="p-1.5 text-gray-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title={msg.draftOf && msg.status === 'failed' ? '본편 다시 시도 (같은 Draft에서)' : '재생성 (같은 설정·래퍼런스로 한 편 다시 생성)'}><Sparkles size={15} /></button>
               )}
               <button onClick={() => useAppStore.getState().deleteMessage(projectId, msg.id)} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="삭제"><Trash2 size={15} /></button>
             </div>
@@ -1581,7 +1591,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
 export function ChatArea({ projectId, slot = 0, split = false, active = true }: {
   projectId: string; slot?: 0 | 1; split?: boolean; active?: boolean;
 }) {
-  const { projects, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages } = useAppStore();
+  const { projects, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages, billingProjectKey } = useAppStore();
   const currentProjectId: string | null = projectId;
   const paneProjectRef = useRef<string | null>(projectId);
   paneProjectRef.current = projectId;
@@ -1591,8 +1601,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 카드(MessageCard)가 부르는 화면 함수 — 렌더마다 바꿔 끼운다(아래 Render 바로 위). 카드에는 이 ref 하나만 넘어간다.
   const cardActions = useRef<CardActions>(null as unknown as CardActions);
   const project = projects.find((p) => p.id === currentProjectId);
-  // 이 칸 프로젝트의 프로젝트 코드(과금) — 프로젝트마다 따로 · 저장(26.10.2001~, Project.billingKey).
-  const billingProjectKey = project?.billingKey || '';
+  // 프로젝트 코드(과금) — 앱 전체에 하나(공동 코드, 26.10.2004~). 두 칸이 같은 코드다.
   // Block sends (reactive mirror for the button's disabled state) whenever no
   // project is picked — strict: no project ⇒ no generate. handleSend re-checks via
   // getState() so Enter & 재생성 are gated too; this is just the visual disable.
@@ -1611,7 +1620,11 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // FIRST/LAST prompt (best-effort). A warning is shown next to the slot.
   const omniEndFrameOn = isOmni && omniTask === 'image_to_video';
   const [hasText, setHasText] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
+  // '보내는 중' — 이 칸의 프로젝트가 보내는 중인가(어느 칸에서 보냈든 · 칸을 닫았다 열어도). 26.10.2004~ 프로젝트에 붙는다.
+  const isGenerating = useAppStore(s => (s.sendingProjects[projectId] || 0) > 0);
+  // 이 칸이 아직 떠 있나 — 내려간 칸의 토스트는 안 보인다(경고를 손대는 칸으로 넘긴다, warnFor).
+  const aliveRef = useRef(true);
+  useEffect(() => () => { aliveRef.current = false; }, []);
   const [isDragging, setIsDragging] = useState(false);
   const [dragVideo, setDragVideo] = useState(false);                       // 끄는 것에 영상이 있다 → 막이 셋으로
   const [dropZone, setDropZone] = useState<'prompt' | 'restore' | 'attach' | null>(null);
@@ -1652,11 +1665,44 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 화면 토스트는 평소처럼 뜬다 — 사용자도 왜 안 나갔는지 본다.
   const agentWarnRef = useRef<string[] | null>(null);
   const warn = (msg: string) => { agentWarnRef.current?.push(msg); showToast(msg, false); };
+  // 그 프로젝트 일의 경고 — 이 칸이 아직 그 프로젝트를 보여 주면 이 칸에, 아니면(칸을 닫았거나 다른 프로젝트를 열었으면)
+  // 손대는 칸에 '[프로젝트]' 를 붙여 띄운다. 예전엔 내려간 칸의 토스트로 가서 사라져, 보내다 멈춘 것을 아무도 못 봤다(26.10.2004 감사).
+  const warnFor = (pid: string) => (msg: string) => {
+    if (aliveRef.current && paneProjectRef.current === pid) { warn(msg); return; }
+    agentWarnRef.current?.push(msg);
+    const name = useAppStore.getState().projects.find(p => p.id === pid)?.name;
+    window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { msg: name ? `[${name}] ${msg}` : msg, ok: false } }));
+  };
+  // 그 프로젝트의 작성 칸 글을 바꾼다 — 이 칸에 떠 있으면 바로, 아니면 그 프로젝트를 띄운 칸이 받는다(seedance:draft-replaced).
+  // 예전엔 작성 중 글만 고쳐서, 그 사이 다른 칸이 그 프로젝트를 띄웠으면 그 칸 화면엔 옛 글이 남아 다음 타자가 덮었다.
+  const putPromptHtml = (pid: string, html: string) => {
+    if (aliveRef.current && paneProjectRef.current === pid && contentEditableRef.current) {
+      contentEditableRef.current.innerHTML = html;
+      setHasText(!!contentEditableRef.current.innerText.trim());
+      syncMentionCount();
+    } else {
+      window.dispatchEvent(new CustomEvent('seedance:draft-replaced', { detail: { projectId: pid, html } }));
+    }
+    useAppStore.getState().updateDraftPrompt(pid, html);
+  };
+  useEffect(() => {
+    const onReplaced = (e: Event) => {
+      const d = (e as CustomEvent).detail || {};
+      const ed = contentEditableRef.current;
+      if (!ed || d.projectId !== paneProjectRef.current || typeof d.html !== 'string') return;
+      ed.innerHTML = d.html;
+      setHasText(!!ed.innerText.trim());
+      syncMentionCount();
+    };
+    window.addEventListener('seedance:draft-replaced', onReplaced);
+    return () => window.removeEventListener('seedance:draft-replaced', onReplaced);
+  }, []);   // eslint-disable-line react-hooks/exhaustive-deps
   // 받은 영상에서 되살리기(26.10.801~). 작성 칸 쪽 두 칸 — '프롬프트만' · '그때 설정 그대로' — 에 놓으면 바로 채우고, 무엇을
   // 되살렸고 무엇이 빠졌는지 작성 칸 위에 남긴다(restoreReport — 닫기를 눌러야 닫힌다). 설정이 없는 옛 영상은 창(restoreTarget).
   const [restoreTarget, setRestoreTarget] = useState<RestoreTarget | null>(null);
   const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
-  useEffect(() => { setRestoreReport(null); }, [currentProjectId]);   // 다른 채팅의 작성 칸 이야기다
+  // 다른 채팅의 작성 칸 이야기다 — 받은 영상 후보 창도 닫는다(26.10.2004 감사: 열린 채 이 칸의 프로젝트가 바뀌면 고르는 순간 새 프로젝트를 덮었다).
+  useEffect(() => { setRestoreReport(null); setRestoreTarget(null); }, [currentProjectId]);
   const composerBoxRef = useRef<HTMLDivElement>(null);
   // first/last 모드에서 붙여넣기가 두 슬롯을 번갈아 교체하도록 다음 대상 추적.
   // 슬롯 id를 함께 저장해서, 슬롯이 다른 경로(피커·삭제 후 재추가·프로젝트
@@ -1691,10 +1737,14 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // Mirror the mentioned-element image count into the store (only when it changes)
   // so SettingsPanel's "이미지 N/9" reflects elements used in the prompt, not just
   // panel assets — i.e. the shared budget shows up there too.
+  // ★ 값은 앱에 하나라 손대는 칸만 쓴다(26.10.2004 감사 — 두 칸이 서로 덮어 설정 패널의 '이미지 N/M' · 추가 잠금이 다른 칸
+  //   기준이 됐다). 손대는 칸이 되면 다시 센다(아래 effect).
   const syncMentionCount = () => {
+    if (!activeRef.current) return;
     const n = mentionedElementStats().count;
     if (useAppStore.getState().mentionedElementImages !== n) setMentionedElementImages(n);
   };
+  useEffect(() => { if (active) syncMentionCount(); }, [active]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Listen to download events from Electron main process
   // 0번 칸만 듣는다(나누기 26.10.2001~) — 두 칸이 같이 들으면 진행 표시가 두 번 뜬다. 0번 칸은 나누고 닫아도 내려가지
@@ -2479,7 +2529,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const m = resolveModelId(raw);
     return MODELS.some(x => x.id === m) ? { model: m } : { model: fallback, unknown: raw };
   };
-  // 그 프로젝트의 프로젝트 코드로 그 모델을 쓸 수 있는가(코드는 사람이 고른다 — 안 골랐으면 보낼 때 묻는다).
+  // 지금 프로젝트 코드(공동 코드)로 그 모델을 쓸 수 있는가(코드는 사람이 고른다 — 안 골랐으면 보낼 때 묻는다).
   const checkModelAllowed = (pid: string, sink: ReportSink) => {
     const st = useAppStore.getState();
     const model = st.projects.find(p => p.id === pid)?.settings.model;
@@ -2570,12 +2620,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     st.updateProjectSettings(pid, restore as Partial<GenerationSettings>);
     st.replaceAllAssets(pid, snap.assets.map(({ id: _id, ...rest }: any) => rest));
     const html = rebindMentionPills(snap.promptHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
-    if (paneProjectRef.current === pid && contentEditableRef.current) {
-      contentEditableRef.current.innerHTML = html;
-      setHasText(!!contentEditableRef.current.innerText.trim());
-      syncMentionCount();
-    }
-    useAppStore.getState().updateDraftPrompt(pid, html);
+    putPromptHtml(pid, html);
     if (!quiet) showToast('불러오기 전으로 되돌렸어요', true);
   };
   // 이름으로 어셋 찾기 — 그때 컬렉션 · 지금 이 채팅 컬렉션의 것을 먼저(같은 이름이 여러 컬렉션에 있을 수 있다).
@@ -3258,21 +3303,18 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     return out;
   };
 
-  // 카드의 설정을 이 칸의 작성 칸 · 설정 · 레퍼런스에 넣는다(재사용 · 재생성 · 받은 영상 불러오기).
+  // 되살린 값을 그 프로젝트의 작성 칸 · 설정 · 레퍼런스에 넣는다.
+  const applyReuse = (pid: string, r: Reused) => {
+    if (r.settings) useAppStore.getState().updateProjectSettings(pid, r.settings);
+    if (r.assets) useAppStore.getState().replaceAllAssets(pid, r.assets);   // 알약이 묶인 그 id 그대로
+    if (r.html !== undefined) putPromptHtml(pid, r.html);
+  };
+  // 카드의 설정을 이 칸의 작성 칸 · 설정 · 레퍼런스에 넣는다(재사용 · 받은 영상 불러오기).
   // Returns false if any reference asset could not be restored (already alerted).
   const handleReuse = async (msg: any, opts?: { fromFile?: boolean; report?: ReportSink; collectionId?: string }): Promise<boolean> => {
     const pid = project.id;
-    const r = await prepareReuse(msg, pid, { ...opts, warn });
-    if (r.settings) useAppStore.getState().updateProjectSettings(pid, r.settings);
-    if (r.assets) useAppStore.getState().replaceAllAssets(pid, r.assets);   // 알약이 묶인 그 id 그대로
-    if (r.html !== undefined) {
-      if (paneProjectRef.current === pid && contentEditableRef.current) {
-        contentEditableRef.current.innerHTML = r.html;
-        setHasText(!!contentEditableRef.current.innerText.trim());
-        syncMentionCount();
-      }
-      useAppStore.getState().updateDraftPrompt(pid, r.html);
-    }
+    const r = await prepareReuse(msg, pid, { ...opts, warn: warnFor(pid) });
+    applyReuse(pid, r);
     if (showGallery) exitGallery();
     setPreviewItem(null);
     return r.assetsOk;
@@ -3286,15 +3328,20 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // be stale and we'd send the OLD setup. getState() guarantees the just-restored
   // setup is what gets sent. For a normal send this is identical to the closure.
   // 만든 카드 id 를 돌려준다. 멈춘 경우는 undefined.
+  // '보내는 중' 은 스토어에서 바로 묻는다(렌더 값이 아니라) — 같은 틱의 두 번째 Enter · 다른 칸에서 같은 프로젝트를 보내는 것도 막는다.
   const handleSend = async (): Promise<string[] | undefined> => {
     const editor = contentEditableRef.current;
-    if (!editor || isGenerating) return;
+    if (!editor) return;
     const project = useAppStore.getState().projects.find(p => p.id === currentProjectId);
-    if (!project) return;
-    return await sendRequest(
-      { projectId: project.id, promptHtml: editor.innerHTML, settings: project.settings, assets: project.assets, writeBack4k: true },
-      { warn, busy: setIsGenerating, sent: () => setTimeout(() => scrollToBottom(), 150) },
-    );
+    if (!project || sendingNow(project.id)) return;
+    const pid = project.id;
+    const lock = sendLock(pid);
+    try {
+      return await sendRequest(
+        { projectId: pid, promptHtml: editor.innerHTML, settings: project.settings, assets: project.assets, writeBack4k: true },
+        { warn: warnFor(pid), busy: lock.busy, sent: () => { if (paneProjectRef.current === pid) setTimeout(() => scrollToBottom(), 150); } },
+      );
+    } finally { window.setTimeout(lock.release, 1500); }
   };
 
   /* ─── 에이전트 작업함: 받아서 보내기 (26.10.302~ · 26.10.2002~ 화면을 바꾸지 않고 지정한 프로젝트로) ─── */
@@ -3306,9 +3353,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 입력 중 · 생성 중 · 갤러리 화면이어도 받는다. 카드는 그 프로젝트에 생기고(사이드바 스피너 · 완료 배지), 토스트로 알린다.
   // 지키는 것:
   //   · 대상이 애매하면 보내지 않는다 — 같은 이름이 둘이면 후보를, 못 찾으면 이유를 돌려준다(agentResolveProject).
-  //   · 과금은 그 프로젝트의 코드다. 코드가 없으면 서버가 작업을 내주지 않고 기다리게 한다(사람이 고를 때까지, 10분).
-  //     요청에 적힌 코드(billing)와 다르면 보내지 않는다 — 과금은 사람이 정한다. 가져갈 때 본 코드를 sendRequest 가 요청을
-  //     띄우기 직전에 다시 비교한다(그 사이 사람이 바꾸거나 60초 확인이 비우면 보내지 않음).
+  //   · 과금은 앱의 프로젝트 코드(공동 코드, 26.10.2004~)다. 코드가 없으면 서버가 작업을 내주지 않고 기다리게 한다(사람이 고를
+  //     때까지, 10분). 요청에 적힌 코드(billing)와 다르면 보내지 않는다 — 과금은 사람이 정한다. 가져갈 때 본 코드를 sendRequest 가
+  //     요청을 띄우기 직전에 다시 비교한다(그 사이 사람이 바꾸거나 60초 확인이 비우면 보내지 않음).
   //   · 레퍼런스를 하나라도 못 붙이면 보내지 않는다 — 빠진 채로 나가면 다른 영상이 되고 값은 똑같이 낸다.
   //   · 진행은 카드(스토어 메시지)에서 읽어 올린다. /api/byteplus/tasks/:id 를 따로 부르지 않는다(server.ts 주석).
   const agentFail = (job: any, error: string, projectName?: string) => {
@@ -3341,7 +3388,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     };
   };
 
-  // 서버 작업함에서 그 프로젝트의 코드를 기다리는 작업 수 — 설정 패널이 그 프로젝트에 알리고, 늘어나면 토스트로 한 번.
+  // 서버 작업함에서 프로젝트 코드를 기다리는 작업 수(대상 프로젝트별) — 설정 패널이 알리고, 늘어나면 토스트로 한 번.
   const agentNoteWaiting = (w: unknown) => {
     if (w === undefined) return;   // 명령만 준 답(서버가 명령을 먼저 준다)에는 없다 — 지난 값을 그대로 둔다
     const m: Record<string, number> = {};
@@ -3352,7 +3399,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (!grew.length) return;
     const st = useAppStore.getState();
     const names = grew.map(k => st.projects.find(p => p.id === k)?.name || '(알 수 없는 프로젝트)');
-    showToast(`[${names.join(', ')}] 에이전트 요청이 프로젝트 코드를 기다려요 — 그 프로젝트의 설정 패널 맨 위 "프로젝트 코드" 를 골라 주세요`, false);
+    showToast(`[${names.join(', ')}] 에이전트 요청이 프로젝트 코드를 기다려요 — 설정 패널 맨 위 "프로젝트 코드" 를 골라 주세요`, false);
   };
 
   const agentProcess = async (job: any) => {
@@ -3360,11 +3407,11 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     try { target = agentResolveProject(job.projectId, job.project); }
     catch (e: any) { return agentFail(job, e?.message || String(e)); }
     const fail = (error: string) => agentFail(job, error, target.name);
-    // 과금 — 그 프로젝트의 코드. 없는 프로젝트의 작업은 서버가 내주지 않는다(claim) — 여기 온 건 그 사이 코드가 비워진 경우다.
+    // 과금 — 앱의 프로젝트 코드(공동 코드). 코드가 없으면 서버가 작업을 내주지 않는다(claim) — 여기 온 건 그 사이 코드가 비워진 경우다.
     const bill = projectBilling(useAppStore.getState(), target.id);
-    if (!bill) return fail(`"${target.name}" 의 프로젝트 코드가 골라져 있지 않습니다 — 사람에게 앱에서 그 프로젝트의 "프로젝트 코드" 를 골라 달라고 한 뒤 다시 보내 주세요.`);
+    if (!bill) return fail('시댄스의 프로젝트 코드가 골라져 있지 않습니다 — 사람에게 앱 설정 패널 맨 위 "프로젝트 코드" 를 골라 달라고 한 뒤 다시 보내 주세요.');
     if (job.billing && job.billing !== bill.project.trim()) {
-      return fail(`"${target.name}" 의 프로젝트 코드는 "${bill.project}" 입니다(요청: "${job.billing}"). 과금은 사람이 정합니다 — 이 코드로 보낼지, 앱에서 코드를 바꿀지 사람에게 확인한 뒤 다시 보내 주세요.`);
+      return fail(`시댄스의 프로젝트 코드는 "${bill.project}" 입니다(요청: "${job.billing}"). 과금은 사람이 정합니다 — 이 코드로 보낼지, 앱에서 코드를 바꿀지 사람에게 확인한 뒤 다시 보내 주세요.`);
     }
     const plan = agentSettings(target.settings, job.settings && typeof job.settings === 'object' ? job.settings : {});
     if (!plan.next) return fail(plan.error || '설정을 읽지 못했습니다');
@@ -3472,7 +3519,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         current: st.projects.find(p => p.id === st.currentProjectId)?.name ?? null,
         features: AGENT_FEATURES,
         projects: st.projects.map(p => {
-          // 26.10.2002~ 프로젝트 코드(과금)는 프로젝트마다 — 확인 카드가 프로젝트를 열지 않고 코드 · 권한을 보여 줄 수 있게.
+          // 그 프로젝트로 보낼 때의 코드 · 권한(26.10.2004~ 공동 코드라 모두 같다 — 커넥터가 프로젝트마다 읽는 모양은 그대로 둔다).
           const b = projectBilling(st, p.id);
           const bo = billingOf(st, p.id);
           return {
@@ -3511,7 +3558,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     },
     'billing.list': async (a) => {
       const st = useAppStore.getState();
-      // 그 프로젝트의 코드 — project · projectId 를 주면 그 프로젝트, 안 주면 앱의 지금 프로젝트(손대는 칸).
+      // 프로젝트 코드(공동 코드) — project · projectId 를 주면 그 이름을 같이 돌려준다(코드는 프로젝트와 상관없이 같다).
       const of = a.project || a.projectId ? agentResolveProject(a.projectId, a.project) : st.projects.find(p => p.id === st.currentProjectId);
       const sel = projectBilling(st, of?.id ?? null);
       // 크레딧 대시보드의 숫자(영상 수 · 토큰)는 트래커가 준다 — 앱 서버가 이미 받아 오는 목록을 그대로 읽는다.
@@ -3529,7 +3576,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           return { name: b.project, status: b.status, videos: u.videoCount ?? null, tokens: u.tokens ?? null,
             allow25: !!b.allow25, allow4k: !!b.allow4k, selected: !!sel && sel.key === b.key };
         }),
-        note: '프로젝트 코드(과금)는 프로젝트마다 다르고, 고르는 건 사람이 앱 설정 패널 맨 위 "프로젝트 코드" 에서 한다',
+        note: '프로젝트 코드(과금)는 앱 전체에 하나고, 고르는 건 사람이 앱 설정 패널 맨 위 "프로젝트 코드" 에서 한다',
       };
     },
     'collections.list': async () => {
@@ -3675,7 +3722,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       if (!now) throw new Error('프로젝트가 사라졌습니다');
       const warnings = [...notes];
       const ids = await sendRequest(
-        { projectId: p.id, promptHtml: r.html, settings: { ...now.settings, ...r.settings }, assets: r.assets ?? now.assets },
+        { projectId: p.id, promptHtml: r.html, settings: { ...now.settings, ...r.settings, output_count: 1 }, assets: r.assets ?? now.assets },   // 늘 한 편(화면 재생성과 같다)
         { warn: x => { warnings.push(x); } },
       );
       if (!ids?.length) throw new Error(warnings.join('\n') || '다시 만들지 않았습니다');
@@ -3810,7 +3857,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     // ★ 이름이 아니라 key 로 찾는다. Draft 를 만든 뒤 프로젝트 이름이 바뀌어도(POS) 같은 프로젝트를
     //   찾고, 보낼 때는 '지금 이름' 을 쓴다. 이름으로 찾던 때는 이름이 바뀌는 순간 "권한 없음" 으로
     //   영구히 막혔다. key 가 없는 Draft(26.9.2306 이전)는 이름으로 찾는다. Draft 에 프로젝트 기록이
-    //   아예 없으면 그 초안이 있는 프로젝트의 코드를 쓴다(26.10.2001~ 코드는 프로젝트마다).
+    //   아예 없으면 앱의 프로젝트 코드(공동 코드)를 쓴다.
     const vs = base.videoStorage || {};
     const origin = billingProjectOfDraft(st.billingProjects, vs);
     const hasOrigin = origin.hasOrigin;
@@ -3819,7 +3866,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       // '권한 없음' 이 아니라 실제 이유를 말한다 — 목록(진행 중인 프로젝트)에 없는 것이다.
       warn(hasOrigin
         ? `이 Draft 의 프로젝트(${vs.project || '알 수 없음'})가 종료되었거나 목록에 없어 본편을 만들 수 없습니다.`
-        : '이 프로젝트의 프로젝트 코드를 먼저 골라 주세요.\n(설정 패널 맨 위 "프로젝트 코드")');
+        : '프로젝트 코드를 먼저 골라 주세요.\n(설정 패널 맨 위 "프로젝트 코드")');
       return;
     }
     if (!isModelAllowed(model, { billingProjectKey: bill.key, billingProjects: st.billingProjects })) {
@@ -3874,20 +3921,41 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // reference it couldn't restore — the user sees "파일을 다시 첨부" instead of a
   // broken request. regenLockRef stops a double-click from firing two runs in the
   // window before handleSend flips isGenerating.
+  // ★ 26.10.2004 감사: 예전엔 handleReuse 뒤에 handleSend 로 '작성 칸' 을 다시 읽어 보냈다. 되살리는(캐시 확인 · 원본 다시 읽기)
+  //   몇 초 사이에 이 칸의 프로젝트가 바뀌면(사이드바 · 뒤로가기 · 칸 닫기 · 에이전트 project.open) 작성 칸에는 다른 프로젝트의 글이
+  //   있어, 그 글이 원래 프로젝트의 설정 · 레퍼런스로 과금됐다. 이제 되살린 값(prepareReuse)을 작성 칸에 넣어 보여 주되, 보낼
+  //   때는 그 값 그대로 sendRequest 에 넘긴다(에이전트 card.regenerate 와 같은 길) — 작성 칸을 다시 읽지 않는다. 되살리는 동안부터
+  //   그 프로젝트를 잠근다(다시 누르거나 보내지 않게).
   const regenLockRef = useRef(false);
   const handleRegenerate = async (msg: any) => {
-    if (isGenerating || regenLockRef.current) return;
+    const pid = project.id;
+    if (sendingNow(pid) || regenLockRef.current) return;
     // 초안에서 만든 본편이 실패했으면 다시 시도도 같은 초안에서 한다. handleSend 로 보내면
     // 초안과 상관없는 새 1080p 영상이 나와서, 골라 둔 구도를 잃는다.
     // (성공한 본편의 재생성은 다른 카드와 같다 — 같은 설정으로 새 1080p 한 편.)
     if (msg.draftOf && msg.status === 'failed') { await makeFinalFromDraft(msg.draftOf, msg); return; }
     regenLockRef.current = true;
+    const lock = sendLock(pid);
+    lock.busy(true);
     try {
-      const ok = await handleReuse(msg);
-      if (!ok) return;
-      await handleSend();
+      const r = await prepareReuse(msg, pid, { warn: warnFor(pid) });
+      // 재생성은 늘 한 편(사용자 결정 2026-10-21) — 그 카드 묶음의 개수(×1~3)는 되살리지 않는다(예전엔 ×3 묶음의 한 장을 다시 만들면
+      // 3편이 과금됐다). 작성 칸의 개수는 사용자가 고른 그대로 둔다.
+      if (r.settings) { const { output_count: _n, ...rest } = r.settings; r.settings = rest; }
+      applyReuse(pid, r);
+      if (paneProjectRef.current === pid) { if (showGallery) exitGallery(); setPreviewItem(null); }
+      if (!r.assetsOk) return;
+      const now = useAppStore.getState().projects.find(p => p.id === pid);
+      if (!now) return;
+      // 카드에 프롬프트가 없으면(아주 옛 카드) 그 프로젝트의 지금 글 — 이 칸에 떠 있으면 작성 칸, 아니면 작성 중 글.
+      const html = r.html ?? (paneProjectRef.current === pid && contentEditableRef.current ? contentEditableRef.current.innerHTML : now.draftPrompt || '');
+      await sendRequest(
+        { projectId: pid, promptHtml: html, settings: { ...now.settings, output_count: 1 }, assets: now.assets, writeBack4k: true },
+        { warn: warnFor(pid), busy: lock.busy, sent: () => { if (paneProjectRef.current === pid) setTimeout(() => scrollToBottom(), 150); } },
+      );
     } finally {
       regenLockRef.current = false;
+      window.setTimeout(lock.release, 1500);
     }
   };
 
