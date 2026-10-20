@@ -158,7 +158,13 @@ function signedTrackerUrl(base: string): string {
 // Measured 2026-08-11: cgt-20260811142046-7zfj4 and -8tlnn (one send, output_count 2)
 // reported ~68 minutes after creation with an empty project, while sends from six
 // minutes later reported "TA Test" correctly — the batch boundary is the restart.
-type TaskProject = { project: string; projectId: string };
+// reported: 시트에 보고했다(26.10.2001~ 디스크에 남긴다 — 예전엔 메모리 Set 뿐이라, 보고 직후 몇 초 안에 앱이 꺼지면 다시
+//   켰을 때 아직 '생성 중' 인 카드가 같은 작업을 다시 물어 한 번 더, 그것도 보고 뒤 지운 매핑 탓에 빈 프로젝트로 보고했다).
+// done: 실패 · 만료로 끝났다(보고할 것 없음 — 서버 확인(sweep)이 더 묻지 않게).
+// 매핑은 보고 뒤에도 지우지 않는다(14일 TTL 이 치운다) — 같은 작업을 다시 묻는 일이 있어도 같은 프로젝트를 본다.
+// sweep: 26.10.2001 판부터 만든 작업 — 서버 확인(sweepTasks)은 이것만 챙긴다. 이전 판에서 지운 카드의 옛 작업을 올리는 순간
+//   몰아서 보고하면 이미 지난 주의 시트가 바뀐다.
+type TaskProject = { project: string; projectId: string; reported?: boolean; done?: boolean; sweep?: boolean };
 const taskToProject = new Map<string, TaskProject>();
 // Same directory CACHE_DIR resolves to further down (userData/media-cache in the packaged
 // app), resolved independently because that constant is declared inside startServer().
@@ -173,13 +179,16 @@ function loadTaskProjects() {
   try {
     // 옛 모양({ project, at })도 읽는다 — 업데이트 순간 진행 중이던 작업의 보고가 프로젝트를
     // 잃지 않게. 그때는 projectId 가 '' 이고, 트래커는 이름으로 찾는다.
-    const raw = JSON.parse(fs.readFileSync(TASK_PROJECT_FILE, 'utf8')) as Record<string, { project?: string; projectId?: string; at: number }>;
+    const raw = JSON.parse(fs.readFileSync(TASK_PROJECT_FILE, 'utf8')) as Record<string, { project?: string; projectId?: string; at: number; reported?: boolean; done?: boolean; sweep?: boolean }>;
     const now = Date.now();
     let kept = 0;
     for (const [id, v] of Object.entries(raw || {})) {
-      if ((!v?.project && !v?.projectId) || now - (v.at || 0) > TASK_PROJECT_TTL_MS) continue;
-      taskToProject.set(id, { project: String(v.project || ''), projectId: typeof v.projectId === 'string' ? v.projectId : '' });
+      // 보고한 표시는 프로젝트가 비어 있어도 남긴다 — 다시 보고하지 않는 것이 그 줄의 일이다.
+      if ((!v?.project && !v?.projectId && !v?.reported) || now - (v.at || 0) > TASK_PROJECT_TTL_MS) continue;
+      taskToProject.set(id, { project: String(v.project || ''), projectId: typeof v.projectId === 'string' ? v.projectId : '',
+        ...(v.reported ? { reported: true } : {}), ...(v.done ? { done: true } : {}), ...(v.sweep ? { sweep: true } : {}) });
       taskProjectAt.set(id, v.at);
+      if (v.reported) reportedTasks.add(id);
       kept++;
     }
     if (kept) console.log(`[Tracker] restored ${kept} task→project mapping(s) from disk`);
@@ -191,8 +200,9 @@ function loadTaskProjects() {
 // a task created seconds before the app quits is precisely the one that needs the write.
 function saveTaskProjects() {
   try {
-    const out: Record<string, { project: string; projectId: string; at: number }> = {};
-    for (const [id, t] of taskToProject) out[id] = { project: t.project, projectId: t.projectId, at: taskProjectAt.get(id) || Date.now() };
+    const out: Record<string, { project: string; projectId: string; at: number; reported?: boolean; done?: boolean; sweep?: boolean }> = {};
+    for (const [id, t] of taskToProject) out[id] = { project: t.project, projectId: t.projectId, at: taskProjectAt.get(id) || Date.now(),
+      ...(t.reported ? { reported: true } : {}), ...(t.done ? { done: true } : {}), ...(t.sweep ? { sweep: true } : {}) };
     if (!fs.existsSync(TASK_PROJECT_DIR)) fs.mkdirSync(TASK_PROJECT_DIR, { recursive: true });
     fs.writeFileSync(TASK_PROJECT_FILE, JSON.stringify(out));
   } catch (e: any) {
@@ -2230,6 +2240,12 @@ async function startServer() {
     // receive them (unknown top-level fields can 400). The rest is forwarded as-is.
     const { project: billingProject, project_id: rawProjectId, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
     const billingProjectId = typeof rawProjectId === 'string' ? rawProjectId.trim() : '';
+    // 프로젝트 코드(과금) 없이는 만들지 않는다(26.10.2001~). 화면은 이미 막지만(handleSend · 본편), 어느 길로든 코드 없이
+    // 만들어지면 시트에 주인 없는 줄이 남는다 — 조용히 틀리느니 여기서 분명히 거절한다. 태스크가 만들어지기 전이라 과금 0.
+    if (!(typeof billingProject === 'string' && billingProject.trim()) && !billingProjectId) {
+      console.warn('[Tracker] 프로젝트 코드 없는 생성 요청 — 거절');
+      return res.status(400).json({ error: { message: '프로젝트 코드(과금)가 없어 보내지 않았습니다. 설정 패널 맨 위 "프로젝트 코드" 를 골라 주세요.' } });
+    }
 
     // Gated models (2.5) must be granted to the SELECTED billing project. Checked here,
     // against the tracker, so no amount of switching app projects / models / stored state
@@ -2298,7 +2314,7 @@ async function startServer() {
       // Remember which billing project this task belongs to (read at report time).
       const projName = typeof billingProject === 'string' ? billingProject : '';
       if (response.ok && data?.id && (projName || billingProjectId)) {
-        taskToProject.set(data.id, { project: projName, projectId: billingProjectId });
+        taskToProject.set(data.id, { project: projName, projectId: billingProjectId, sweep: true });
         taskProjectAt.set(data.id, Date.now());
         saveTaskProjects();   // 재시작을 넘겨야 하므로 만든 즉시 디스크에 남긴다
         console.log(`[Tracker] task ${data.id} → project "${projName}"${billingProjectId ? ` (${billingProjectId})` : ''}`);
@@ -2312,93 +2328,137 @@ async function startServer() {
     }
   });
 
+  // ── 작업 상태 처리 — 화면의 조회(아래 GET)와 서버 확인(sweepTasks)이 같이 쓴다 (26.10.2001~ 떼어 냄) ──
+  // 성공이면 시트 보고(한 번만 — reportedTasks · 디스크의 reported) · NCP 보관 예약, 끝났으면 R2 정리.
+  // 보고하는 프로젝트는 '보낼 때' 디스크에 적어 둔 것(taskToProject)이다 — 화면에서 칸을 바꾸든 자리를 바꾸든 그 프로젝트의
+  // 코드를 바꾸든, 이미 보낸 작업의 보고는 바뀌지 않는다.
+  function markTask(taskId: string, flags: { reported?: boolean; done?: boolean }) {
+    const cur = taskToProject.get(taskId) || { project: '', projectId: '' };
+    taskToProject.set(taskId, { ...cur, ...flags });
+    if (!taskProjectAt.has(taskId)) taskProjectAt.set(taskId, Date.now());
+    saveTaskProjects();
+  }
+  function handleTaskStatus(taskId: string, data: any, via: 'client' | 'sweep' = 'client') {
+    // Fire-and-forget report to the credit tracker. Only fires once per task
+    // (reportedTasks dedupes), only on success with valid usage data, and any
+    // failure here is swallowed so the polling response to the frontend is
+    // never delayed or corrupted.
+    if (data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(taskId)) {
+      reportedTasks.add(taskId);
+      markTask(taskId, { reported: true });   // 디스크에 — 다시 켜도 두 번 보고하지 않게
+      fetch(trackerUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(trackerAuth() || {}),   // ts + proof
+          team: teamName(),
+          project: taskToProject.get(taskId)?.project || '', // billing project (may be '')
+          // 트래커가 이 id 로 프로젝트를 찾아 '지금 이름' 으로 적는다. 이름이 그 사이 바뀌었어도
+          // 기록이 한 프로젝트로 모인다. 없으면('') 트래커가 project(이름)로 찾는다.
+          project_id: taskToProject.get(taskId)?.projectId || '',
+          task_id: taskId,
+          total_tokens: data.usage.total_tokens,
+          completion_tokens: data.usage.completion_tokens,
+          // Sent but NOT currently logged: the tracker deliberately drops these to keep
+          // usage_log thin (it's past 20k rows and gets fully re-read every 30 min).
+          // Costs a few bytes here and means turning resolution breakdown back on is a
+          // one-line change in the Apps Script, with no app redeploy. BytePlus echoes
+          // both on the succeeded response — verified 2026-07-27.
+          resolution: data.resolution || '',
+          model: data.model || '',
+          source: 'app',
+          // 서버 확인(sweep)이 늦게 찾은 작업은 끝난 시각으로 — 지금 시각으로 적으면 다른 날 · 다른 주로 들어간다.
+          timestamp: via === 'sweep' && Number(data.updated_at) > 0 ? Number(data.updated_at) * 1000 : Date.now(),
+        }),
+      }).catch(() => {});
+    }
+
+    // 성공 → NCP 보관 예약. 폴더 이름이 '보낼 때의 프로젝트' 라 taskToProject 에서 읽는다(26.10.2001~ 매핑은 지우지 않는다).
+    // 큐잉만 하고 즉시 넘어간다 — 폴링 응답은 8초 안에 끝나야 한다.
+    if (data?.status === 'succeeded' && data?.content?.video_url) {
+      const srcUrl = String(data.content.video_url);
+      // 확장자는 URL 에서 뽑는다. 2.5 는 .mov 를 준다. 이 URL 은 24시간 뒤 없어지므로
+      // 지금 결정해 두지 않으면 나중에는 확정할 방법이 없다.
+      const ext = (srcUrl.split('?')[0].match(/\.(mp4|mov|m4v|webm)$/i) || ['.mp4'])[0].toLowerCase();
+      enqueueArchive({
+        taskId: taskId,
+        // 폴더는 모델이 정한다 — 레인마다 상수를 박아두면 회사가 늘 때 또 갈라진다.
+        provider: brandOf(data.model),
+        // NCP 폴더는 지금처럼 '보낼 때의 이름' 이다. 이름이 바뀐 뒤 만든 영상은 새 이름 폴더로
+        // 간다(옛 영상은 옛 폴더에 그대로, 앱은 메시지에 구워 둔 이름으로 찾는다).
+        project: taskToProject.get(taskId)?.project || '',
+        // id 가 있으면 폴더가 id 가 된다(ncp.ts / archiveFolder). 없으면 지금처럼 이름 폴더.
+        projectId: taskToProject.get(taskId)?.projectId || '',
+        ext,
+        model: typeof data.model === 'string' ? data.model : '',
+        sourceUrl: srcUrl,
+      });
+    }
+
+    // Terminal status → clean up R2 inputs we tracked at submit time.
+    // Idempotent: the Map entry is deleted on first hit so repeated polling
+    // (the 10s interval may see the same terminal status twice before the
+    // client stops asking) doesn't fire duplicate DeleteObjects.
+    if (data?.status === 'succeeded' || data?.status === 'failed' || data?.status === 'expired') {
+      scheduleR2Delete(taskId);
+    }
+    // 끝났는데 보고할 것이 없다(실패 · 만료 · 취소 등 — 진행 중 · 성공이 아닌 모든 상태) → 서버 확인이 더 묻지 않게.
+    // 매핑은 지우지 않는다 — 보고 · 끝 표시를 남기고 14일 TTL 이 치운다(TaskProject 주석). 성공인데 usage 가 아직 없으면
+    // 아무 표시도 하지 않는다 — 다음 조회(화면 또는 서버 확인)가 보고한다.
+    const st = typeof data?.status === 'string' ? data.status : '';
+    if (st && st !== 'succeeded' && st !== 'queued' && st !== 'running' && !taskToProject.get(taskId)?.done) markTask(taskId, { done: true });
+
+  }
+  // 화면이 마지막으로 그 작업을 물은 때 — 묻고 있는 작업은 서버가 따로 확인하지 않는다(BytePlus 호출을 두 배로 늘리지 않게).
+  const lastClientPoll = new Map<string, number>();
+
   // BytePlus API — Get Task
   app.get('/api/byteplus/tasks/:id', async (req, res) => {
     try {
+      lastClientPoll.set(req.params.id, Date.now());
       const response = await fetch(`${bpTasks()}/${req.params.id}`, {
         headers: { 'Authorization': `Bearer ${apiKey()}` }
       });
       if (response.status === 401) refreshKeys('BytePlus 401').catch(() => {});   // 다음 조회부터 새 키
       const data = await response.json() as any;
-
-      // Fire-and-forget report to the credit tracker. Only fires once per task
-      // (reportedTasks dedupes), only on success with valid usage data, and any
-      // failure here is swallowed so the polling response to the frontend is
-      // never delayed or corrupted.
-      if (data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(req.params.id)) {
-        reportedTasks.add(req.params.id);
-        fetch(trackerUrl(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...(trackerAuth() || {}),   // ts + proof
-            team: teamName(),
-            project: taskToProject.get(req.params.id)?.project || '', // billing project (may be '')
-            // 트래커가 이 id 로 프로젝트를 찾아 '지금 이름' 으로 적는다. 이름이 그 사이 바뀌었어도
-            // 기록이 한 프로젝트로 모인다. 없으면('') 트래커가 project(이름)로 찾는다.
-            project_id: taskToProject.get(req.params.id)?.projectId || '',
-            task_id: req.params.id,
-            total_tokens: data.usage.total_tokens,
-            completion_tokens: data.usage.completion_tokens,
-            // Sent but NOT currently logged: the tracker deliberately drops these to keep
-            // usage_log thin (it's past 20k rows and gets fully re-read every 30 min).
-            // Costs a few bytes here and means turning resolution breakdown back on is a
-            // one-line change in the Apps Script, with no app redeploy. BytePlus echoes
-            // both on the succeeded response — verified 2026-07-27.
-            resolution: data.resolution || '',
-            model: data.model || '',
-            source: 'app',
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-      }
-
-      // 성공 → NCP 보관 예약. 반드시 아래 taskToProject.delete 보다 먼저 읽어야 한다.
-      // 폴더 이름이 프로젝트라서 그 값이 사라진 뒤엔 어디에 넣을지 알 수 없다.
-      // 큐잉만 하고 즉시 넘어간다 — 폴링 응답은 8초 안에 끝나야 한다.
-      if (data?.status === 'succeeded' && data?.content?.video_url) {
-        const srcUrl = String(data.content.video_url);
-        // 확장자는 URL 에서 뽑는다. 2.5 는 .mov 를 준다. 이 URL 은 24시간 뒤 없어지므로
-        // 지금 결정해 두지 않으면 나중에는 확정할 방법이 없다.
-        const ext = (srcUrl.split('?')[0].match(/\.(mp4|mov|m4v|webm)$/i) || ['.mp4'])[0].toLowerCase();
-        enqueueArchive({
-          taskId: req.params.id,
-          // 폴더는 모델이 정한다 — 레인마다 상수를 박아두면 회사가 늘 때 또 갈라진다.
-          provider: brandOf(data.model),
-          // NCP 폴더는 지금처럼 '보낼 때의 이름' 이다. 이름이 바뀐 뒤 만든 영상은 새 이름 폴더로
-          // 간다(옛 영상은 옛 폴더에 그대로, 앱은 메시지에 구워 둔 이름으로 찾는다).
-          project: taskToProject.get(req.params.id)?.project || '',
-          // id 가 있으면 폴더가 id 가 된다(ncp.ts / archiveFolder). 없으면 지금처럼 이름 폴더.
-          projectId: taskToProject.get(req.params.id)?.projectId || '',
-          ext,
-          model: typeof data.model === 'string' ? data.model : '',
-          sourceUrl: srcUrl,
-        });
-      }
-
-      // Terminal status → clean up R2 inputs we tracked at submit time.
-      // Idempotent: the Map entry is deleted on first hit so repeated polling
-      // (the 10s interval may see the same terminal status twice before the
-      // client stops asking) doesn't fire duplicate DeleteObjects.
-      if (data?.status === 'succeeded' || data?.status === 'failed' || data?.status === 'expired') {
-        scheduleR2Delete(req.params.id);
-        // Drop the mapping only once the report above has actually gone out. The old code
-        // deleted on ANY terminal status, but the report needs `usage.total_tokens` too —
-        // so a `succeeded` that arrived a moment before usage was populated threw the
-        // project away, and the next poll (10s later) reported it with a blank project.
-        // A failed/expired task is never reported at all, so it leaves nothing to read;
-        // those entries are cleaned up by the TTL prune at startup instead.
-        if (reportedTasks.has(req.params.id) && taskToProject.delete(req.params.id)) {
-          taskProjectAt.delete(req.params.id);
-          saveTaskProjects();
-        }
-      }
-
+      handleTaskStatus(req.params.id, data);
       res.status(response.status).json(data);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
+
+  // ── 서버 확인(26.10.2001~) — 화면이 묻지 않는 작업도 끝까지 챙겨 시트에 남긴다 ──
+  // 생성 중에 카드나 프로젝트를 지우면 화면은 그 작업을 더 묻지 않는다 → 성공해도 아무도 보고하지 않아, BytePlus 는 청구했는데
+  // 시트에는 없었다. 이제 서버가 90초마다 '보낸 기록은 있는데 보고 · 끝 표시가 없고, 화면이 1분 넘게 묻지 않은' 작업을 직접 묻는다.
+  // 같은 함수(handleTaskStatus)를 지나므로 보고는 여전히 한 번 · 보낼 때의 프로젝트로. 화면이 묻는 작업은 건드리지 않는다.
+  const SWEEP_EVERY_MS = 90_000;
+  const SWEEP_IDLE_MS = 60_000;     // 화면이 이만큼 안 물었으면 서버가 묻는다
+  const SWEEP_MIN_AGE_MS = 120_000; // 막 만든 작업은 화면이 곧 묻는다
+  let sweeping = false;
+  async function sweepTasks() {
+    if (sweeping) return;
+    sweeping = true;
+    try {
+      const now = Date.now();
+      for (const [taskId, t] of [...taskToProject]) {
+        if (!t.sweep || t.reported || t.done) continue;
+        if (now - (taskProjectAt.get(taskId) || 0) < SWEEP_MIN_AGE_MS) continue;
+        if (now - (lastClientPoll.get(taskId) || 0) < SWEEP_IDLE_MS) continue;
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 15_000);
+        try {
+          const r = await fetch(`${bpTasks()}/${taskId}`, { headers: { 'Authorization': `Bearer ${apiKey()}` }, signal: ac.signal });
+          if (r.status === 404) { markTask(taskId, { done: true }); continue; }   // BytePlus 에 없는 작업 — 더 묻지 않는다
+          if (!r.ok) continue;
+          const data = await r.json() as any;
+          if (data?.status === 'succeeded' && !t.reported) console.log(`[Tracker] 화면이 묻지 않던 작업 ${taskId} 를 서버가 확인해 보고`);
+          handleTaskStatus(taskId, data, 'sweep');
+        } catch { /* 다음 확인에 */ } finally { clearTimeout(timer); }
+      }
+    } finally { sweeping = false; }
+  }
+  setInterval(() => { void sweepTasks(); }, SWEEP_EVERY_MS);
 
   // BytePlus API — Cancel/Delete Task
   app.delete('/api/byteplus/tasks/:id', async (req, res) => {
