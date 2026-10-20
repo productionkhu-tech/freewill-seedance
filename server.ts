@@ -1393,11 +1393,27 @@ async function startServer() {
   // ★ 화면이 가져간 작업은 절대 다시 내놓지 않는다. 화면이 보내는 도중 멈췄으면 이미 BytePlus 에 작업이
   //   만들어졌을 수 있다 — 다시 내놓으면 같은 영상이 두 번 과금된다. 대신 그 화면이 1분 넘게 안 들르면
   //   실패로 닫고 "앱에서 생성됐는지 확인" 하라고 알린다.
+  // 26.10.2002~ 화면이 작성 칸을 빌리지 않고 spec.projectId(없으면 spec.project 이름)의 프로젝트로 바로 보낸다 — 열린
+  //   프로젝트가 바뀌지 않는다. 과금은 그 프로젝트의 코드다. 코드가 없는 프로젝트의 작업은 내주지 않고 기다린다(needsBilling,
+  //   사람이 고를 때까지 · 10분). 화면이 claim 마다 프로젝트별 코드 유무(projects)를 알려 준다.
   type AgentJob = {
     id: string; createdAt: number; updatedAt: number;
     status: 'pending' | 'taken' | 'sent' | 'done' | 'failed';
-    spec: { prompt: string; project?: string; billing?: string; name?: string; settings: Record<string, unknown>; refs: { path: string; role?: string }[] };
-    takenBy?: string; error?: string; projectName?: string; messages?: unknown[];
+    spec: { prompt: string; project?: string; projectId?: string; billing?: string; name?: string; settings: Record<string, unknown>; refs: { path: string; role?: string }[] };
+    takenBy?: string; error?: string; projectName?: string; projectId?: string; messages?: unknown[]; warnings?: string[];
+    needsBilling?: boolean; waitingFor?: { project: string; projectId: string };   // 그 프로젝트의 코드를 기다리는 중
+  };
+  type ScreenProject = { id: string; name: string; billing: string | null };
+  // 작업의 대상 — 화면의 agentResolveProject(ChatArea)와 같은 규칙: id 먼저, project 칸이 id 면 그것, 아니면 이름 그대로.
+  // 같은 이름이 둘이거나 못 찾으면 null — 그런 작업은 내준다(화면이 후보 · 이유를 붙여 실패로 돌려준다).
+  const agentJobTarget = (j: AgentJob, list: ScreenProject[]): ScreenProject | null => {
+    if (j.spec.projectId) return list.find(x => x.id === j.spec.projectId) || null;
+    const n = (j.spec.project || '').trim();
+    if (!n) return null;
+    const byId = list.find(x => x.id === n);
+    if (byId) return byId;
+    const hits = list.filter(x => x.name.trim() === n);
+    return hits.length === 1 ? hits[0] : null;
   };
   const agentJobs = new Map<string, AgentJob>();
   let agentScreen: {
@@ -1418,7 +1434,10 @@ async function startServer() {
       // 10분 안에 화면이 못 가져간 요청은 닫는다(입력 중 · 갤러리 화면 · 앱 꺼짐). 한참 뒤 갑자기 생성되면 안 된다.
       if (j.status === 'pending' && now - j.createdAt > 10 * 60000) {
         j.status = 'failed'; j.updatedAt = now;
-        j.error = '앱이 10분 안에 이 요청을 받지 못해 취소했습니다(앱이 꺼져 있었거나 · 갤러리 화면 · 계속 입력 중). 다시 보내 주세요.';
+        j.error = j.needsBilling && j.waitingFor
+          ? `"${j.waitingFor.project}" 의 프로젝트 코드가 10분 동안 골라지지 않아 취소했습니다. 사람에게 앱에서 그 프로젝트의 "프로젝트 코드" 를 골라 달라고 한 뒤 다시 보내 주세요.`
+          : '앱이 10분 안에 이 요청을 받지 못해 취소했습니다(앱이 꺼져 있었거나 다른 요청을 보내느라 바빴습니다). 다시 보내 주세요.';
+        j.needsBilling = false;
         console.warn(`[Agent] job ${j.id} → failed (10분 대기)`);
         continue;
       }
@@ -1432,6 +1451,7 @@ async function startServer() {
     }
   };
   const openAgentJobs = () => [...agentJobs.values()].filter(j => j.status === 'pending' || j.status === 'taken');
+  const waitingJobs = () => [...agentJobs.values()].filter(j => j.status === 'pending' && j.needsBilling && j.waitingFor);
 
   app.get('/api/agent/status', (req, res) => {
     pruneAgentJobs();
@@ -1448,6 +1468,10 @@ async function startServer() {
       generating: !!agentScreen.generating,
       composer: agentScreen.composer !== false,           // false = 갤러리 화면(작성 칸이 없어 받지 못함)
       pending: openAgentJobs().length,
+      // 26.10.2002~ 프로젝트 코드를 기다리는 작업 — 사람에게 그 프로젝트의 코드를 골라 달라고 할 것.
+      needsBilling: waitingJobs().length > 0,
+      waitingBilling: waitingJobs().map(j => ({ job: j.id, name: j.spec.name ?? null, project: j.waitingFor!.project, projectId: j.waitingFor!.projectId })),
+      features: (agentManual?.manual as any)?.features ?? [],
       manualVersion: manualVersionNow(),
       ...(have ? { manualStale: stale, ...(stale ? { notice: staleNotice(have) } : {}) } : {}),
     });
@@ -1478,6 +1502,10 @@ async function startServer() {
     if (b.manual !== agentManual.version) return res.status(409).json({ error: staleNotice(b.manual), stale: true, manualVersion: manualVersionNow() });
     const prompt = typeof b.prompt === 'string' ? b.prompt : '';
     if (!prompt.trim()) return res.status(400).json({ error: 'prompt 가 비었습니다' });
+    // 보낼 프로젝트는 꼭 — 26.10.2002~ 열린 프로젝트로 대신 가지 않는다.
+    const hasProjectId = typeof b.projectId === 'string' && !!b.projectId.trim();
+    const hasProject = typeof b.project === 'string' && !!b.project.trim();
+    if (!hasProjectId && !hasProject) return res.status(400).json({ error: '보낼 프로젝트가 없습니다 — projectId(projects.list 의 id) 또는 project(사이드바 이름 그대로)를 적어 주세요.' });
     if (prompt.length > 50000) return res.status(400).json({ error: 'prompt 가 너무 깁니다 (5만 자까지)' });
     const settings = b.settings && typeof b.settings === 'object' && !Array.isArray(b.settings) ? b.settings : {};
     const rawRefs: unknown[] = Array.isArray(b.refs) ? b.refs : [];
@@ -1495,7 +1523,8 @@ async function startServer() {
       spec: {
         prompt, settings, refs,
         // 확인 카드에서 사용자가 본 프로젝트(사이드바) · 과금 프로젝트. 화면의 지금 값과 다르면 화면이 보내지 않는다.
-        ...(typeof b.project === 'string' && b.project.trim() ? { project: b.project.trim() } : {}),
+        ...(hasProject ? { project: b.project.trim() } : {}),
+        ...(hasProjectId ? { projectId: b.projectId.trim().slice(0, 80) } : {}),
         ...(typeof b.billing === 'string' && b.billing.trim() ? { billing: b.billing.trim() } : {}),
         ...(typeof b.name === 'string' && b.name.trim() ? { name: b.name.trim().slice(0, 120) } : {}),
       },
@@ -1532,23 +1561,45 @@ async function startServer() {
         return res.json({ job: null, commands: cmds.map(c => ({ id: c.id, command: c.command, args: c.args })), manualVersion });
       }
     }
-    // peek: 상태만 알리고 가져가지는 않는다 — 사용자가 입력 중 · 생성 중 · 다른 작업을 보내는 중일 때.
-    if (b.peek || !screen) return res.json({ job: null, manualVersion });
-    const next = [...agentJobs.values()].filter(j => j.status === 'pending').sort((x, y) => x.createdAt - y.createdAt)[0];
-    if (!next) return res.json({ job: null, manualVersion });
+    // 프로젝트마다 코드가 있는지(화면이 가져갈 수 있을 때만 보낸다) — 코드가 없는 프로젝트의 작업은 내주지 않고 기다린다.
+    const list: ScreenProject[] | null = Array.isArray(b.projects)
+      ? b.projects.filter((x: any) => x && typeof x.id === 'string' && typeof x.name === 'string')
+        .slice(0, 5000).map((x: any) => ({ id: x.id, name: x.name, billing: typeof x.billing === 'string' && x.billing ? x.billing : null }))
+      : null;
+    let next: AgentJob | undefined;
+    if (!b.peek && screen) {
+      for (const j of [...agentJobs.values()].filter(j => j.status === 'pending').sort((x, y) => x.createdAt - y.createdAt)) {
+        const t = list ? agentJobTarget(j, list) : null;
+        if (t && !t.billing) {
+          if (!j.needsBilling) console.log(`[Agent] job ${j.id} — "${t.name}" 의 프로젝트 코드를 기다림`);
+          j.needsBilling = true; j.waitingFor = { project: t.name, projectId: t.id };
+          continue;   // 뒤의 다른 프로젝트 작업은 막지 않는다
+        }
+        j.needsBilling = false; delete j.waitingFor;
+        next = j;
+        break;
+      }
+    }
+    // 화면이 그 프로젝트에 알린다(설정 패널 '프로젝트 코드' 옆) — 프로젝트 id → 기다리는 수.
+    const waitingBilling: Record<string, number> = {};
+    for (const j of waitingJobs()) waitingBilling[j.waitingFor!.projectId] = (waitingBilling[j.waitingFor!.projectId] || 0) + 1;
+    // peek: 상태만 알리고 가져가지는 않는다 — 화면이 다른 요청을 보내는 중일 때.
+    if (!next) return res.json({ job: null, manualVersion, waitingBilling });
     next.status = 'taken'; next.updatedAt = now; next.takenBy = screen;
-    res.json({ job: { id: next.id, ...next.spec }, manualVersion });
+    res.json({ job: { id: next.id, ...next.spec }, manualVersion, waitingBilling });
   });
 
   app.post('/api/agent/jobs/:id/report', (req, res) => {
     const j = agentJobs.get(req.params.id);
     if (!j) return res.status(404).json({ error: 'no such job' });
     const b = req.body || {};
-    if (b.status === 'sent' || b.status === 'done' || b.status === 'failed') j.status = b.status;
+    if (b.status === 'sent' || b.status === 'done' || b.status === 'failed') { j.status = b.status; j.needsBilling = false; }
     // 늦게라도 화면이 '보냈다' 고 알려 오면 그게 사실이다 — 응답 없음으로 닫아 둔 문구를 지운다.
     if (typeof b.error === 'string') j.error = b.error.slice(0, 4000);
     else if (b.status === 'sent') delete j.error;
     if (typeof b.project === 'string') j.projectName = b.project;
+    if (typeof b.projectId === 'string') j.projectId = b.projectId;
+    if (Array.isArray(b.warnings)) j.warnings = b.warnings.filter((x: unknown) => typeof x === 'string').slice(0, 10).map((x: string) => x.slice(0, 1000));
     if (Array.isArray(b.messages)) j.messages = b.messages.slice(0, 10);
     j.updatedAt = Date.now();
     if (j.status === 'failed' || j.status === 'done') console.log(`[Agent] job ${j.id} → ${j.status}${j.error ? ` (${j.error.split('\n')[0]})` : ''}`);
@@ -1559,7 +1610,14 @@ async function startServer() {
     pruneAgentJobs();
     const j = agentJobs.get(req.params.id);
     if (!j) return res.status(404).json({ error: '없는 작업입니다 (앱을 다시 켜면 작업함이 비워집니다)' });
-    res.json({ id: j.id, name: j.spec.name, status: j.status, error: j.error, project: j.projectName, messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt, manualVersion: manualVersionNow() });
+    res.json({
+      id: j.id, name: j.spec.name, status: j.status, error: j.error,
+      project: j.projectName ?? j.waitingFor?.project, projectId: j.projectId ?? j.waitingFor?.projectId ?? j.spec.projectId,
+      // 26.10.2002~ 그 프로젝트의 코드를 기다리는 중(pending 일 때만) — 사람에게 그 프로젝트의 코드를 골라 달라고 할 것.
+      needsBilling: j.status === 'pending' && !!j.needsBilling,
+      ...(j.warnings?.length ? { warnings: j.warnings } : {}),
+      messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt, manualVersion: manualVersionNow(),
+    });
   });
 
   // ── 에이전트 명령 (26.10.305~) ───────────────────────────────────────────────

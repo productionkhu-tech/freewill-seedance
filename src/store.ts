@@ -1090,6 +1090,10 @@ interface AppState {
   // shared "panel + element" image budget in the Reference Assets hint.
   mentionedElementImages: number;
   setMentionedElementImages: (n: number) => void;
+  // Transient: 프로젝트 id → 그 프로젝트의 코드가 없어 서버 작업함에서 기다리는 에이전트 작업 수(26.10.2002~).
+  // ChatArea 의 작업함 확인(2초)이 서버 답을 그대로 적고, 설정 패널이 '프로젝트 코드' 옆에 알린다.
+  agentWaitingBilling: Record<string, number>;
+  setAgentWaitingBilling: (m: Record<string, number>) => void;
   // 작업창 나누기(26.10.2001~, src/lib/split.ts). split 은 저장한다(껐다 켜도 그대로). paneFocus(지금 손대는 칸)는
   // 저장하지 않는다 — 칸 사이를 오갈 때마다 기록 전체(수십 MB)를 다시 쓰지 않게(partialize 주석). 켜면 0번 칸이다.
   // ★ 나눴을 때 currentProjectId 는 늘 손대는 칸의 프로젝트다(split.ts 불변식 ②). 바꾸는 길은 아래 함수들과
@@ -1102,7 +1106,9 @@ interface AppState {
   closePane: (slot: PaneSlot) => void;
   setCurrentProjectId: (id: string) => void;
   // groupId 를 주면 그 그룹 안에 만든다(사이드바 그룹 머리의 +). 없거나 모르는 값이면 최상위.
-  createProject: (groupId?: string) => void;
+  // opts.open === false(에이전트 project.create, 26.10.2002~): 만들기만 하고 열지 않는다 — 화면(칸 · 접힌 그룹)이 그대로다.
+  // 만든 프로젝트 id 를 돌려준다.
+  createProject: (groupId?: string, opts?: { open?: boolean }) => string;
   renameProject: (id: string, name: string) => void;
   setProjectIcon: (id: string, icon: string | undefined) => void;
   markProjectSeen: (projectId: string) => void;
@@ -1122,7 +1128,7 @@ interface AppState {
   addAsset: (projectId: string, asset: Omit<Asset, 'id'>) => void;
   removeAsset: (projectId: string, assetId: string) => void;
   replaceAsset: (projectId: string, assetId: string, updates: Partial<Omit<Asset, 'id'>>) => void;
-  replaceAllAssets: (projectId: string, assets: Omit<Asset, 'id'>[]) => void;
+  replaceAllAssets: (projectId: string, assets: (Omit<Asset, 'id'> & { id?: string })[]) => void;
   setAssetOrder: (projectId: string, orderedIds: string[]) => void;
   clearAssets: (projectId: string) => void;
   updateDraftPrompt: (projectId: string, draft: string) => void;
@@ -2063,6 +2069,13 @@ export const useAppStore = create<AppState>()(
       setAutoDownload: (v) => set({ autoDownload: v }),
       billingProjects: [],
       trackerReachable: null,
+      agentWaitingBilling: {},
+      setAgentWaitingBilling: (m) => {
+        const cur = get().agentWaitingBilling;
+        const ka = Object.keys(cur), kb = Object.keys(m);
+        if (ka.length === kb.length && kb.every(k => cur[k] === m[k])) return;   // 같으면 안 바꾼다(2초마다 부른다)
+        set({ agentWaitingBilling: m });
+      },
       // 프로젝트 코드 고르기(26.10.2001~) — 프로젝트에 적는다. 빈 문자열이면 비운다(필드째 지워 저장본에 '' 를 남기지 않음).
       setProjectBilling: (projectId, key) => {
         const p = get().projects.find(x => x.id === projectId);
@@ -2172,7 +2185,7 @@ export const useAppStore = create<AppState>()(
         ...pointAt(paneOf(state), id),
         projectGroups: revealProject(state.projectGroups, state.projects, id),
       })),
-      createProject: (groupId) => {
+      createProject: (groupId, opts) => {
         // 어디에 만드나. 사이드바 그룹 머리의 + 는 그 그룹 id 를 넘긴다. 맨 위 New Project 버튼은
         // onClick 에 그대로 물려 있어 마우스 이벤트가 들어온다 — 문자열일 때만 그룹으로 받는다.
         // 지금 없는 그룹이면 최상위로: 없는 그룹 id 를 단 프로젝트는 최상위에 그려지므로(dangling
@@ -2192,6 +2205,10 @@ export const useAppStore = create<AppState>()(
           updatedAt: Date.now(),
           ...(home ? { groupId: home } : {}),
         };
+        if (opts?.open === false) {
+          set((state) => ({ projects: [newProject, ...state.projects] }));
+          return newProject.id;
+        }
         set((state) => {
           const projects = [newProject, ...state.projects];
           return {
@@ -2201,6 +2218,7 @@ export const useAppStore = create<AppState>()(
             projectGroups: revealProject(state.projectGroups, projects, newProject.id),
           };
         });
+        return newProject.id;
       },
       renameProject: (id, name) => {
         set((state) => {
@@ -2511,7 +2529,8 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           projects: state.projects.map((p) =>
             p.id === projectId
-              ? { ...p, assets: assets.map(a => ({ ...a, id: uuidv4() })), updatedAt: Date.now() }
+              // id 를 준 레퍼런스는 그 id 그대로(26.10.2002~ prepareReuse 가 알약을 그 id 로 묶어 둔다), 없으면 새로.
+              ? { ...p, assets: assets.map(a => ({ ...a, id: a.id || uuidv4() })), updatedAt: Date.now() }
               : p
           ),
         }));

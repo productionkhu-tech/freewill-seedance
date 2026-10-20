@@ -1,34 +1,18 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo } from 'react';
 import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
-import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage } from '../store';
+import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
 import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight } from 'lucide-react';
-import { getAssetNames } from './SettingsPanel';
-import { agentSettings, buildAgentManual, AGENT_COMMANDS } from '../lib/agent-inbox';
+import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink } from '../lib/send-request';
+import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from '../lib/agent-inbox';
+import { visibleProjectIds } from '../lib/split';
 import { CATEGORY_META, fileToElementImage, MAX_ELEMENT_IMAGES } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
 import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
 
-// Resolve one element-library image to a fresh R2 URL for the API payload — always the
-// ORIGINAL bytes, never the JPG preview. 26.9.3001~ the original is a file in the server
-// library (libId) and the server uploads that file untouched. Older assets may still carry
-// a media-cache id, or the base64 original itself while it is being moved to disk — both
-// still work. Same R2 path panel assets use, so element images reach the API identically.
-async function resolveElementImageUrl(img: ElementImage): Promise<string> {
-  for (const id of [img.libId, img.cacheId]) {
-    if (!id) continue;
-    try { return await reuploadFromCache(id); } catch { /* next source */ }
-  }
-  if (img.url && img.url.startsWith('data:')) {
-    const file = await dataUrlToFile(img.url, img.file_name || 'element.png');
-    const cacheId = await cacheFile(file);
-    return await reuploadFromCache(cacheId);
-  }
-  throw new Error('원본 이미지를 찾을 수 없습니다');
-}
 
 /* ─── Korean error translation ─── */
 function translateError(error: string): string {
@@ -587,81 +571,83 @@ const rebindMentionPills = (html: string, named: { id: string; name: string }[])
   return temp.innerHTML;
 };
 
+// 보낸 에이전트 작업 → 카드 상태를 올릴 것(26.10.2002~ 앱에 하나). 예전에는 칸(ChatArea)마다 들고 있어서, 보낸 칸을 닫으면
+// 그 작업이 'sent' 에서 멈췄다. 이제 손대는 칸이 누구 것이든 이어서 올린다(agentReportProgress).
+const agentActive = new Map<string, { projectId: string; ids: string[]; last: string }>();
+
+// 작업함 호출엔 시간 제한 — 서버가 답을 안 하면 agentBusy 가 안 풀려 에이전트 줄 전체가 소리 없이 멈췄다.
+// (BytePlus 생성 요청에는 두지 않는다 — 끊어도 작업은 만들어질 수 있어, 카드만 '실패' 가 된다.)
+const agentPost = (url: string, body: unknown, ms = 15000) => {
+  const ac = new AbortController();
+  const t = window.setTimeout(() => ac.abort(), ms);
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ac.signal })
+    .finally(() => window.clearTimeout(t));
+};
+const withTimeout = <T,>(p: Promise<T>, ms: number, what: string): Promise<T> => new Promise((resolve, reject) => {
+  const t = window.setTimeout(() => reject(new Error(`${what} — ${Math.round(ms / 1000)}초 안에 끝나지 않았습니다`)), ms);
+  p.then(v => { window.clearTimeout(t); resolve(v); }, e => { window.clearTimeout(t); reject(e); });
+});
+const agentReport = (id: string, body: Record<string, unknown>) =>
+  agentPost(`/api/agent/jobs/${encodeURIComponent(id)}/report`, body).then(() => undefined, () => undefined);
+
+// 카드 상태 → 에이전트에게 보여 줄 모양. 카드를 지웠으면 missing.
+const agentCards = (projectId: string, ids: string[]) => {
+  const msgs = useAppStore.getState().projects.find(p => p.id === projectId)?.messages || [];
+  return ids.map(id => {
+    const m = msgs.find(x => x.id === id) as any;
+    if (!m) return { id, status: 'missing' };
+    return {
+      id, status: m.status || 'queued',
+      ...(m.taskId ? { taskId: m.taskId } : {}),
+      ...(m.videoUrl ? { videoUrl: m.videoUrl } : {}),
+      ...(m.error ? { error: String(m.error).slice(0, 500) } : {}),
+    };
+  });
+};
+// 보낸 요청의 카드 상태를 올린다(바뀐 때만). 전부 끝나면(성공 · 실패 · 지워짐) done. 손대는 칸이 2초마다.
+const agentReportProgress = () => {
+  for (const [jobId, a] of agentActive) {
+    const cards = agentCards(a.projectId, a.ids);
+    const sig = JSON.stringify(cards);
+    if (sig === a.last) continue;
+    a.last = sig;
+    const finished = cards.every(c => c.status === 'succeeded' || c.status === 'failed' || c.status === 'missing');
+    if (finished) agentActive.delete(jobId);
+    void agentReport(jobId, { status: finished ? 'done' : 'sent', messages: cards });
+  }
+};
+// 에이전트가 가리킨 프로젝트 — id 먼저(projects.list 의 id), 없으면 사이드바 이름 그대로. 대상이 애매하면 고르지 않는다:
+// 같은 이름이 둘(다른 그룹)이면 후보를 돌려주고, 못 찾으면 실패다. 열린 프로젝트로 대신 가지 않는다(26.10.2002~).
+// ★ server.ts 의 작업함(claim)도 같은 규칙으로 대상을 찾는다(코드가 없는 프로젝트의 작업은 내주지 않으려고) — 같이 고칠 것.
+const agentResolveProject = (projectId: unknown, name: unknown, what = '보낼 프로젝트') => {
+  const st = useAppStore.getState();
+  const id = typeof projectId === 'string' ? projectId.trim() : '';
+  if (id) {
+    const p = st.projects.find(x => x.id === id);
+    if (!p) throw new Error(`프로젝트를 찾지 못했습니다(id ${id}) — 지워졌을 수 있습니다. projects.list 로 다시 확인해 주세요.`);
+    return p;
+  }
+  const n = typeof name === 'string' ? name.trim() : '';
+  if (!n) throw new Error(`${what}가 없습니다 — projectId(projects.list 의 id) 또는 project(사이드바 이름 그대로)를 적어 주세요.`);
+  const byId = st.projects.find(x => x.id === n);   // project 칸에 id 를 적은 경우(예전 명령은 둘 다 받았다)
+  if (byId) return byId;
+  const hits = st.projects.filter(x => x.name.trim() === n);
+  if (hits.length > 1) {
+    const g = (gid?: string) => st.projectGroups.find(x => x.id === gid)?.name;
+    throw new Error(`같은 이름의 프로젝트가 ${hits.length}개입니다: "${n}" — projectId 로 정해 보내 주세요.\n`
+      + hits.map(h => `  ${h.id}${g(h.groupId) ? ` (그룹 "${g(h.groupId)}")` : ' (최상위)'}`).join('\n'));
+  }
+  if (!hits.length) throw new Error(`프로젝트를 찾지 못했습니다: "${n}"\n(있는 프로젝트: ${st.projects.slice(0, 40).map(x => x.name).join(', ')}${st.projects.length > 40 ? ' …' : ''})`);
+  return hits[0];
+};
+// 코드를 기다리는 작업 수(프로젝트 id → 수) — 늘어난 때만 토스트(손대는 칸).
+let agentWaitingPrev: Record<string, number> = {};
+
 // 에이전트 설명서(src/lib/agent-inbox.ts) — 모듈 상수에서 만들므로 한 번만 만든다(바뀌려면 앱을 다시 켜야 한다).
 let agentManualCache: ReturnType<typeof buildAgentManual> | null = null;
 const agentManual = () => (agentManualCache ??= buildAgentManual(__APP_VERSION__));
 
-// Block-level tags that occupy their own line when the prompt HTML is serialized.
-// contentEditable writes <div> per line; pasted rich text can add <p>/<li>/headings.
-const BLOCK_TAGS = new Set(['DIV', 'P', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
-  'BLOCKQUOTE', 'PRE', 'SECTION', 'ARTICLE', 'TABLE', 'TR', 'TBODY', 'FIGURE', 'DL', 'DT', 'DD',
-  'MAIN', 'HEADER', 'FOOTER', 'NAV', 'ASIDE']);
 
-// elementTagMap (send only): element-pill id → "[Image N]" reference marker.
-// When given, element mentions become the BytePlus positional marker so the
-// model binds the name to its reference image (same as panel [Image N]). When
-// omitted (display / draft / copy), they resolve to the bare asset name so the
-// prompt reads naturally ("김현우가 걷는다").
-const getPlainText = (html: string, elementTagMap?: Map<string, string>, mentionTagMap?: Map<string, string>) => {
-  const temp = document.createElement('div');
-  temp.innerHTML = html;
-  temp.querySelectorAll('.mention-pill').forEach(pill => {
-    // Panel-asset mention. mentionTagMap (Omni only) rebinds it to <IMAGE_REF_N>; without
-    // it (Seedance / display) it stays the [Image N] positional marker.
-    const id = pill.getAttribute('data-asset-id');
-    const tag = id ? mentionTagMap?.get(id) : undefined;
-    pill.replaceWith(tag != null ? tag : `[${pill.getAttribute('data-name')}]`);
-  });
-  temp.querySelectorAll('.element-pill').forEach(pill => {
-    const id = pill.getAttribute('data-element-id');
-    const tag = id ? elementTagMap?.get(id) : undefined;
-    pill.replaceWith(tag != null ? tag : (pill.getAttribute('data-name') || ''));
-  });
-  // Serialize by walking the DOM — deliberately NOT innerText. innerText emitted one
-  // newline for the block boundary AND another for the placeholder <br> Chromium puts
-  // inside an empty <div>, so every intentional blank line came back doubled (a 3300-char
-  // prompt copied out as ~3800, and the model was fed the doubled version too). Walking
-  // gives exactly one line per block, so blank lines survive as the user wrote them —
-  // one stays one, three stay three. No layout needed either (no body append/reflow).
-  const lines: string[] = [''];
-  const walk = (parent: Node) => {
-    parent.childNodes.forEach(node => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        const data = node.nodeValue || '';
-        // Whitespace-only text containing a newline is markup indentation from pasted
-        // HTML, never user content — our editor stores blank lines as empty blocks.
-        if (/^\s*$/.test(data) && /[\n\r]/.test(data)) return;
-        lines[lines.length - 1] += data;
-        return;
-      }
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
-      const el = node as HTMLElement;
-      if (el.tagName === 'BR') {
-        // A <br> with no next sibling is Chromium's filler for an empty/last line; the
-        // block boundary already accounts for it. Only a real mid-block break adds one.
-        if (el.nextSibling) lines.push('');
-        return;
-      }
-      if (BLOCK_TAGS.has(el.tagName)) {
-        if (lines[lines.length - 1] !== '') lines.push('');
-        walk(el);
-        lines.push('');
-        return;
-      }
-      walk(el);
-    });
-  };
-  walk(temp);
-  // NBSP → plain space: contentEditable stores runs of spaces as alternating
-  // "&nbsp; &nbsp; ", so this restores the exact spacing the user typed (and keeps
-  // platforms that choke on U+00A0 happy). Trailing blank lines are structural.
-  return lines.join('\n').replace(/\n+$/, '').replace(/\u00A0/g, ' ');
-};
-
-const OMNI_TASK_LABELS: Record<string, string> = {
-  text_to_video: 'Text→Video', image_to_video: 'Image→Video',
-  reference_to_video: 'Reference→Video', edit: 'Edit Video', extend: 'Extend Video',
-};
 // Settings chips for a message / preview card. Omni shows its task + fixed 720p (its
 // `mode` field is a stale Seedance leftover); Seedance shows mode / resolution as before.
 /**
@@ -2203,10 +2189,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 2초마다 server.ts 작업함을 들여다본다(폴링은 setInterval 하나 — HANDOFF §7 API 4). 실제 처리(agentTick)는
   // handleSend 아래에 있고, 렌더마다 새 함수로 바꿔 끼운다 — 그래야 지금 화면의 상태(isGenerating 등)를 본다.
   const agentScreenId = useMemo(() => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, []);
-  const agentBusyRef = useRef(false);   // 작업 하나를 보내는 중(작성 칸을 빌려 쓰는 중)
+  const agentBusyRef = useRef(false);   // 작업 하나를 보내는 중(가져온 요청을 처리하는 중)
   const restoreBusyRef = useRef(false); // 받은 영상을 작성 칸에 불러오는 중(26.10.801~ runRestore — 둘이 섞이지 않게)
-  const lastTypedAtRef = useRef(0);     // 마지막 타자 시각 — 입력 중에는 가져가지 않는다
-  const agentActiveRef = useRef(new Map<string, { projectId: string; ids: string[]; last: string }>());   // 보낸 뒤 카드 상태를 올리는 작업
   const agentTickRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => {
     const t = window.setInterval(() => { void agentTickRef.current(); }, 2000);
@@ -2222,6 +2206,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 열린 프로젝트가 없을 때(아래 가드에서 멈춤)도 '화면은 켜져 있음' 과 설명서는 알린다 — 가드 뒤에서 진짜 처리로 바꿔 끼운다.
   agentTickRef.current = async () => {
     if (!activeRef.current) return;   // 에이전트에게 '화면' 은 하나 — 손대는 칸만 알린다(나누기 26.10.2001~)
+    agentReportProgress();
     try {
       const r = await fetch('/api/agent/jobs/claim', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2376,192 +2361,10 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const handleDragOver = (e: React.DragEvent) => e.preventDefault();
   const handleDragLeave = (e: React.DragEvent) => { e.preventDefault(); dragCounter.current -= 1; if (dragCounter.current === 0) { setIsDragging(false); setDropZone(null); } };
 
-  // 파일 붙이기 — 드래그와 에이전트 작업함(경로로 받은 파일)이 같이 쓴다. 규칙이 갈라지지 않게 한 곳에 둔다.
-  // 모델·모드는 파일마다 스토어에서 새로 읽는다. 에이전트는 설정을 바꾼 바로 그 틱에(렌더 전에) 붙이기 때문이다 —
-  // 재생성(handleReuse → handleSend)이 스토어를 새로 읽는 것과 같은 이유. 드래그에서는 화면에 보이는 값과 같다.
-  // src: 파일 객체만으로는 원본 경로를 알 수 없을 때(경로에서 읽어 만든 File) 그 경로와 이미 캐시해 둔 id.
-  // 붙이지 못한 파일과 이유를 돌려준다 — 알리는 건 부르는 쪽이다.
-  const attachFiles = async (allFiles: File[], src?: (f: File) => { path?: string; cacheId?: string } | undefined): Promise<string[]> => {
-    const rejected: string[] = [];
-    for (const file of allFiles) {
-      const freshProject = useAppStore.getState().projects.find(p => p.id === project.id);
-      const assets = freshProject?.assets || [];
-      const model = freshProject?.settings.model || project.settings.model;
-      const mode = freshProject?.settings.mode || project.settings.mode;
-      const given = src?.(file);
-      const pathOf = (f: File) => getFilePath(f) || given?.path || '';
-      const cacheOf = (f: File) => (given?.cacheId ? Promise.resolve(given.cacheId) : cacheFile(f));
-
-      // ── Gemini Omni: route drops by the selected Video task (bypasses Seedance mode rules) ──
-      if (modelProvider(model) === 'gemini') {
-        const task = resolveOmniTask(freshProject?.settings.model, freshProject?.settings.omniTask);
-        const isImg = file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif)$/i.test(file.name);
-        const isVid = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mpe?g|wmv|3gpp?|flv)$/i.test(file.name);
-        if (task === 'text_to_video') { rejected.push(`${file.name}: Text to Video는 에셋을 사용하지 않습니다.`); continue; }
-        // Extend takes the same single source clip as Edit — one branch, so the two can
-        // never drift apart on size caps, replace-vs-add, or thumbnailing.
-        if (task === 'edit' || task === 'extend') {
-          if (!isVid) { rejected.push(`${file.name}: ${task === 'extend' ? 'Extend' : 'Edit'} Video는 영상만 받습니다.`); continue; }
-          const sizeMB = file.size / (1024 * 1024);
-          if (sizeMB > OMNI_VIDEO_MAX_MB) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 ${OMNI_VIDEO_MAX_MB}MB)`); continue; }
-          // Measure and STORE the length. This path used to skip it entirely, which meant a
-          // dropped clip carried no durationSec — so the panel's extend arithmetic and the
-          // send-time 30s guard both silently did nothing for anything dropped rather than
-          // picked through the panel. Rejecting here matches how every other cap in this
-          // app behaves (size, count): refuse at attach, with the reason.
-          const dropDur = await getMediaDurationSec(file as File, 'video');
-          const dropCap = modelExtendMaxSrcSec(model);
-          if (task === 'extend' && dropCap !== undefined && typeof dropDur === 'number' && dropDur > dropCap) {
-            rejected.push(`${(file as File).name}: ${dropDur.toFixed(1)}초 — 이어붙일 원본은 ${dropCap}초까지입니다`); continue;
-          }
-          const existing = assets.find(a => a.type === 'video_url');
-          try {
-            const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
-            const originalPath = pathOf(file);
-            const cacheId = await cacheOf(file);
-            const durPatch = dropDur != null ? { durationSec: dropDur } : {};
-            if (existing) useAppStore.getState().replaceAsset(project.id, existing.id, { url: '', file_name: file.name, cacheId, thumbnailUrl, ...durPatch, ...(originalPath ? { originalPath } : {}) });
-            else addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...durPatch, ...(originalPath ? { originalPath } : {}) });
-          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-          continue;
-        }
-        // reference_to_video also accepts video references — 3 verified working 2026-08-28
-        // (it was capped at 1 here from an older doc line saying multiple were unsupported,
-        // which left the panel showing "비디오 1/3" while a drop was refused at the 2nd file).
-        if (task === 'reference_to_video' && isVid) {
-          // Count LIVE, not from the `assets` snapshot taken before this loop: dropping
-          // three clips at once would otherwise see zero for all three and add them all.
-          const vidNow = (useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []).filter(a => a.type === 'video_url').length;
-          const vidCapDrop = omniTaskRefCaps(model, task).video;
-          if (vidNow >= vidCapDrop) { rejected.push(`${file.name}: 참조 영상은 ${vidCapDrop}개까지입니다`); continue; }
-          const sizeMB = file.size / (1024 * 1024);
-          if (sizeMB > OMNI_VIDEO_MAX_MB) { rejected.push(`${file.name}: 비디오 크기 초과 ${sizeMB.toFixed(1)}MB (Omni 최대 ${OMNI_VIDEO_MAX_MB}MB)`); continue; }
-          try {
-            const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
-            const originalPath = pathOf(file);
-            const cacheId = await cacheOf(file);
-            addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-          } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-          continue;
-        }
-        // image tasks: image_to_video (start/end frames) | reference_to_video (≤10 image refs)
-        if (!isImg) { rejected.push(`${file.name}: 이 태스크는 이미지만 받습니다. (영상 편집은 Edit Video 태스크)`); continue; }
-        const sizeErr = validateImageFile(file);
-        if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
-        let role: any = 'reference_image';
-        if (task === 'image_to_video') {
-          if (!assets.some(a => a.role === 'first_frame')) role = 'first_frame';
-          else if (!assets.some(a => a.role === 'last_frame')) role = 'last_frame';
-          else { rejected.push(`${file.name}: Image to Video는 시작·끝 프레임 2장까지입니다.`); continue; }
-        } else {
-          // modelImageMax, not a literal — same reason the reference-video cap moved to
-          // modelVideoMax: the panel and this handler each held their own copy and drifted
-          // (panel said "비디오 1/3" while a drop was refused at the 2nd file).
-          const imgCapDrop = omniTaskRefCaps(model, task).image;
-          if (assets.filter(a => a.type === 'image_url').length >= imgCapDrop) {
-            rejected.push(`${file.name}: 이미지 한도 ${imgCapDrop}장 초과`); continue;
-          }
-        }
-        try {
-          const thumbnailUrl = await createThumbnail(file);
-          const originalPath = pathOf(file);
-          const cacheId = await cacheOf(file);
-          addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-        } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
-        continue;
-      }
-
-      if (file.type.startsWith('image/')) {
-        if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
-        const imgCount = assets.filter(a => a.type === 'image_url').length;
-        const maxImg = modeRefCaps(model, mode).image;   // store.ts — 에이전트 설명서도 같은 수를 읽는다
-        if (imgCount >= maxImg) { rejected.push(`${file.name}: 이미지 한도 ${maxImg}개 초과`); continue; }
-        let role: any = 'reference_image';
-        if (mode === 'image_to_video_first') role = 'first_frame';
-        else if (mode === 'image_to_video_first_last') role = assets.some(a => a.role === 'first_frame') ? 'last_frame' : 'first_frame';
-        const sizeErr = validateImageFile(file);
-        if (sizeErr) { rejected.push(`${file.name}: ${sizeErr}`); continue; }
-        try {
-          const dimErr = await validateImageDimensions(file);
-          if (dimErr) { rejected.push(`${file.name}: ${dimErr}`); continue; }
-          const thumbnailUrl = await createThumbnail(file);
-          const originalPath = pathOf(file);
-          // Attach → media-cache only. R2 upload happens at send time so
-          // every R2 object is born with a task to be tied to.
-          const cacheId = await cacheOf(file);
-          addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
-        } catch (e: any) { rejected.push(`${file.name}: 처리 실패 — ${e.message || ''}`); }
-
-      } else if (file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(file.name)) {
-        // Trust the extension regardless of MIME. Chromium reports .mov as '',
-        // 'video/quicktime', or even the non-standard 'video/mov' depending on
-        // build/OS — checking only video/* MIME drops valid files. The
-        // <video> metadata decode in validateVideoFile is the real gatekeeper.
-        if (mode === 'image_to_video_first' || mode === 'image_to_video_first_last') {
-          rejected.push(`${file.name}: 이 모드는 이미지만 받습니다.`); continue;
-        }
-        const existingVideos = assets.filter(a => a.type === 'video_url');
-        const vidCount = existingVideos.length;
-        const maxVid = modeRefCaps(model, mode).video;
-        // edit_video has a 1-video cap. When the user drops a new video while one
-        // is already attached, treat it as a replace (preserve asset id so any
-        // "@[Video 1]" mention keeps pointing to the same slot) rather than
-        // rejecting with the over-limit alert.
-        const shouldReplace = mode === 'edit_video' && vidCount >= 1;
-        if (!shouldReplace && vidCount >= maxVid) {
-          rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue;
-        }
-        const vidErr = await validateVideoFile(file, modelRefVideoSec(model), refVideoMinSecFor(model, mode));
-        if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
-        const vidDuration = await getMediaDurationSec(file, 'video');
-        // Combined cap: all reference videos in one request ≤ 15s total.
-        // When replacing, the outgoing video's duration doesn't count.
-        const vidOthers = shouldReplace ? assets.filter(a => a.id !== existingVideos[0].id) : assets;
-        const vidTotErr = totalDurationError(vidOthers, 'video_url', vidDuration, modelRefVideoSec(model));
-        if (vidTotErr) { rejected.push(`${file.name}: ${vidTotErr}`); continue; }
-        try {
-          const thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
-          const originalPath = pathOf(file);
-          // Attach → media-cache only (R2 upload deferred to send time)
-          const cacheId = await cacheOf(file);
-          if (shouldReplace) {
-            const existing = existingVideos[0];
-            useAppStore.getState().replaceAsset(project.id, existing.id, {
-              url: '', file_name: file.name, cacheId, thumbnailUrl,
-              durationSec: vidDuration ?? undefined,
-              ...(originalPath ? { originalPath } : {}),
-            });
-          } else {
-            addAsset(project.id, { type: 'video_url', url: '', role: 'reference_video', file_name: file.name, cacheId, thumbnailUrl, ...(vidDuration != null ? { durationSec: vidDuration } : {}), ...(originalPath ? { originalPath } : {}) });
-          }
-        } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-
-      } else if (file.type.startsWith('audio/') || /\.(wav|mp3|mpeg|mpga)$/i.test(file.name)) {
-        if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
-          rejected.push(`${file.name}: 이 모드에서는 오디오를 사용할 수 없습니다.`); continue;
-        }
-        const audCount = assets.filter(a => a.type === 'audio_url').length;
-        const maxAud = modeRefCaps(model, mode).audio;
-        if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
-        const audErr = await validateAudioFile(file, modelRefAudioSec(model));
-        if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
-        const audDuration = await getMediaDurationSec(file, 'audio');
-        // Combined cap: all reference audio in one request ≤ the model's limit
-        // (2.0 15.2s / 2.5 30.2s). Was defaulting to 15 for every model.
-        const audTotErr = totalDurationError(assets, 'audio_url', audDuration, modelRefAudioSec(model));
-        if (audTotErr) { rejected.push(`${file.name}: ${audTotErr}`); continue; }
-        try {
-          const originalPath = pathOf(file);
-          // Attach → media-cache only (R2 upload deferred to send time)
-          const cacheId = await cacheOf(file);
-          addAsset(project.id, { type: 'audio_url', url: '', role: 'reference_audio', file_name: file.name, cacheId, ...(audDuration != null ? { durationSec: audDuration } : {}), ...(originalPath ? { originalPath } : {}) });
-        } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
-      } else {
-        rejected.push(`${file.name}: 지원하지 않는 파일 형식 (${file.type || '알 수 없음'})`);
-      }
-    }
-    return rejected;
-  };
+  // 파일 붙이기 — 이 칸 프로젝트의 레퍼런스 칸에. 검사는 attachFilesTo(src/lib/send-request.ts) 한 곳이다 — 에이전트는
+  // 같은 함수로 메모리에 붙인다(사용자의 레퍼런스 칸을 건드리지 않게). 붙이지 못한 파일과 이유를 돌려준다.
+  const attachFiles = (allFiles: File[], src?: (f: File) => { path?: string; cacheId?: string } | undefined) =>
+    attachFilesTo(projectAssetSink(project.id), allFiles, src);
 
   // ─── 받은 영상에서 되살리기 (26.10.801~) ───
   const findLocalByTask = (taskId?: string): LocalMatch | null => {
@@ -2691,11 +2494,11 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   };
   // 두 칸의 공통 틀(26.10.801 검토): 하나가 끝날 때까지 다음 것을 받지 않고(두 초기화가 섞이지 않게), 시작한 채팅을 고정하고
   // (기다리는 사이 다른 채팅으로 옮기면 거기에 섞이지 않게 — 초기화 전이면 멈추고, 뒤면 원래 채팅에 넣어 둔다), 도중에 실패하면
-  // 불러오기 전으로 되돌린다(초기화만 되고 끝나면 쓰던 글을 잃는다). 에이전트가 작성 칸을 빌려 쓰는 동안에는 받지 않는다.
+  // 불러오기 전으로 되돌린다(초기화만 되고 끝나면 쓰던 글을 잃는다).
   // (restoreBusyRef 는 위 agentBusyRef 옆에 있다 — 훅은 'if (!project) return' 보다 앞이어야 한다.)
+  // 26.10.2002~ 에이전트는 작성 칸을 빌리지 않는다 — 에이전트가 보내는 중이어도 불러오기를 막지 않는다.
   const runRestore = async (how: 'paste' | 'restore', t: RestoreTarget, pick: LocalMatch | null, snapshot?: ComposerSnapshot) => {
     if (restoreBusyRef.current) { warn('앞의 영상을 불러오는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
-    if (agentBusyRef.current) { warn('에이전트가 작성 칸을 쓰는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
     restoreBusyRef.current = true;
     setRestoreTarget(null);
     const pid = project.id;
@@ -2723,8 +2526,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   };
   const applyRestore = (t: RestoreTarget, pick: LocalMatch | null, snapshot?: ComposerSnapshot) => runRestore('restore', t, pick, snapshot);
   const pasteFrom = (t: RestoreTarget, pick: LocalMatch | null, snapshot?: ComposerSnapshot) => runRestore('paste', t, pick, snapshot);
-  // 안내의 '되돌리기' — 불러오기 직전의 작성 칸 · 레퍼런스 · 오른쪽 설정 · 컬렉션 연결로. 에이전트 작업이 작성 칸을 돌려주는 것과
-  // 같은 방식이다(agentBorrow): 레퍼런스는 다시 찾지 않고 그대로 넣고(주소만 있는 레퍼런스도 되돌아온다), 알약은 이름으로 다시 묶는다.
+  // 안내의 '되돌리기' — 불러오기 직전의 작성 칸 · 레퍼런스 · 오른쪽 설정 · 컬렉션 연결로. 레퍼런스는 다시 찾지 않고 그대로 넣고
+  // (주소만 있는 레퍼런스도 되돌아온다), 알약은 이름으로 다시 묶는다.
   const undoRestore = (snap: ComposerSnapshot, quiet = false) => {
     setRestoreReport(null);
     const st = useAppStore.getState();
@@ -2765,7 +2568,6 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 작성 칸 쪽 두 칸('프롬프트만' · '그때 설정 그대로')에 놓은 영상.
   const loadPromptFromFile = async (file: File, how: 'paste' | 'restore') => {
     if (restoreBusyRef.current) { warn('앞의 영상을 불러오는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
-    if (agentBusyRef.current) { warn('에이전트가 작성 칸을 쓰는 중이에요 — 끝난 뒤에 다시 놓아 주세요'); return; }
     const t = await inspectDroppedFile(file).catch(() => null);
     if (!t) {
       warn('이 영상에는 불러올 설정이 없어요.\n이 앱에서 받은 영상이 아니거나, 카톡처럼 다시 압축되면서 정보가 지워진 영상이에요.');
@@ -2825,7 +2627,6 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   }, []);
 
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
-    lastTypedAtRef.current = Date.now();   // 에이전트 작업함: 입력 중에는 작성 칸을 빌려 쓰지 않는다
     setHasText(!!e.currentTarget.innerText.trim());
     syncMentionCount();
     const sel = window.getSelection();
@@ -3235,11 +3036,18 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
+  // 카드의 설정 · 레퍼런스 · 프롬프트를 '되살린 값' 으로 만든다 — 어디에도 쓰지 않는다(26.10.2002~ handleReuse 에서 떼어 냄).
+  // 화면의 재사용 · 재생성 · 받은 영상 불러오기는 handleReuse 가 이 값을 작성 칸에 넣고, 에이전트의 card.regenerate 는 작성 칸을
+  // 건드리지 않고 이 값 그대로 sendRequest 로 보낸다. pid: 되살릴 프로젝트(지금 해상도 · 연결된 컬렉션을 거기서 읽는다).
+  // 레퍼런스의 새 id 는 여기서 주고 알약도 그 id 로 묶는다 — handleReuse 는 준 id 를 지키는 replaceAllAssets 로 넣는다.
   // opts.fromFile(26.10.801~): 끌어다 놓은 받은 영상에서 온 메시지 — 다른 PC 것일 수 있다. 어셋 멘션을 id 대신
   // 이름으로도 찾고(그때 컬렉션 opts.collectionId 의 것을 먼저), 이 PC 에 없는 어셋은 지우지 않고 '@이름' 글자로 남긴다.
   // opts.report: 받은 영상에서 불러올 때 — 결과를 토스트 대신 작성 칸 위 안내에 모은다.
-  const handleReuse = async (msg: any, opts?: { fromFile?: boolean; report?: ReportSink; collectionId?: string }): Promise<boolean> => {
-    const report = opts?.report;
+  type Reused = { settings?: Partial<GenerationSettings>; assets?: Asset[]; html?: string; assetsOk: boolean };
+  const prepareReuse = async (msg: any, pid: string, opts: { fromFile?: boolean; report?: ReportSink; collectionId?: string; warn: (m: string) => void }): Promise<Reused> => {
+    const out: Reused = { assetsOk: true };
+    const report = opts.report;
+    const warn = opts.warn;
     const say = (m: string) => { if (report) report.missing.push(m); else warn(m); };
     // Returns false if any reference asset could not be restored (already alerted).
     // 재사용 ignores the return; 재생성 uses it to abort before sending.
@@ -3261,17 +3069,17 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       let restore: any = msg.usedSettings;
       if (msg.usedSettings.draft) {
         const { resolution: _forced, ...rest } = msg.usedSettings;
-        const cur = useAppStore.getState().projects.find(p => p.id === project.id)?.settings.resolution;
+        const cur = useAppStore.getState().projects.find(p => p.id === pid)?.settings.resolution;
         const m: string = targetModel || msg.usedSettings.model || '';
         restore = { ...rest, resolution: cur && modelResolutions(m).includes(cur) ? cur : (MODELS.find(x => x.id === m)?.defaults?.resolution || '720p') };
       }
-      useAppStore.getState().updateProjectSettings(project.id, {
+      out.settings = {
         ...restore,
         ...(targetModel ? { model: targetModel } : {}),
         // Draft 는 그 카드가 실제로 어땠는지를 true/false 로 못 박는다. 2.5 는 Draft 가 기본이라,
         // 값을 비워 두면 Draft 이전에 1080p 로 만든 카드를 재생성해도 480p Draft 가 나간다.
         draft: !!msg.usedSettings.draft,
-      });
+      };
       if (report && targetModel && msg.usedSettings.model && targetModel !== msg.usedSettings.model) {
         report.missing.push(`그때 모델은 없어져서 ${MODELS.find(m => m.id === targetModel)?.name || targetModel} 로 바꿨어요`);
       }
@@ -3336,7 +3144,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         if (oldName) pillMap.set(oldName, recovered ? { ok: true, index: before } : { ok: false, label });
         if (!recovered) failedNames.push(label);
       }
-      useAppStore.getState().replaceAllAssets(project.id, restored);
+      out.assets = restored.map(x => ({ ...x, id: crypto.randomUUID() }));
       if (failures.length > 0) {
         assetsOk = false;
         say(report ? `레퍼런스 원본 없음: ${failedNames.join(', ')}`
@@ -3356,7 +3164,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         : textToHtml(msg.promptText, getAssetNames(msg.usedAssets || []));
       // Panel pills: re-bind data-asset-id — replaceAllAssets just gave the restored assets
       // fresh ids, so the snapshot's ids are stale. 되살린 순서(pillMap)로 묶고, 번호가 당겨졌으면 알약 글자도 지금 이름으로.
-      const freshAssets = getAssetNames(useAppStore.getState().projects.find(p => p.id === project.id)?.assets || []);
+      const freshAssets = getAssetNames(out.assets || useAppStore.getState().projects.find(p => p.id === pid)?.assets || []);
       box.querySelectorAll('.mention-pill').forEach(pill => {
         const name = pill.getAttribute('data-name') || '';
         const hit = pillMap.get(name);
@@ -3388,7 +3196,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         // 받은 영상에서 불러올 때(파일 · 안내)는 '그때 그대로' 를 최대한 — 같은 이름의 어셋으로도 묶고, 없으면 지우지 않고 '@이름' 글자로.
         const keep = !!(opts?.fromFile || report);
         const once = (list: string[]) => { if (!list.some(x => mentionKey(x) === mentionKey(nm))) list.push(nm || '(이름 없음)'); };
-        if (!el && keep && nm) el = findElementByName(nm, [opts?.collectionId, useAppStore.getState().projectCollectionId[project.id]]);
+        if (!el && keep && nm) el = findElementByName(nm, [opts?.collectionId, useAppStore.getState().projectCollectionId[pid]]);
         if (!el && keep) { once(missingByName); pill.replaceWith(document.createTextNode(`@${nm}`)); return; }
         if (!el) { once(droppedElements); pill.remove(); return; }
         if (report && elementImagesChanged(msg, el, id, nm) && !changedEls.includes(el.name)) changedEls.push(el.name);
@@ -3413,769 +3221,83 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           : `이 PC 어셋 라이브러리에 없는 어셋이라 이름만 글자로 남겼어요:\n\n${missingByName.join(', ')}\n\n어셋을 넣은 뒤 @로 다시 멘션해 주세요.`);
       }
       if (changedEls.length) say(`그때와 그림이 다른 어셋(지금 그림으로 보내요): ${changedEls.map(n => '@' + n).join(', ')}`);
-      const html = box.innerHTML;
-      if (paneProjectRef.current === project.id && contentEditableRef.current) {
-        contentEditableRef.current.innerHTML = html;
+      out.html = box.innerHTML;
+    }
+    out.assetsOk = assetsOk;
+    return out;
+  };
+
+  // 카드의 설정을 이 칸의 작성 칸 · 설정 · 레퍼런스에 넣는다(재사용 · 재생성 · 받은 영상 불러오기).
+  // Returns false if any reference asset could not be restored (already alerted).
+  const handleReuse = async (msg: any, opts?: { fromFile?: boolean; report?: ReportSink; collectionId?: string }): Promise<boolean> => {
+    const pid = project.id;
+    const r = await prepareReuse(msg, pid, { ...opts, warn });
+    if (r.settings) useAppStore.getState().updateProjectSettings(pid, r.settings);
+    if (r.assets) useAppStore.getState().replaceAllAssets(pid, r.assets);   // 알약이 묶인 그 id 그대로
+    if (r.html !== undefined) {
+      if (paneProjectRef.current === pid && contentEditableRef.current) {
+        contentEditableRef.current.innerHTML = r.html;
         setHasText(!!contentEditableRef.current.innerText.trim());
         syncMentionCount();
       }
-      useAppStore.getState().updateDraftPrompt(project.id, html);
+      useAppStore.getState().updateDraftPrompt(pid, r.html);
     }
     if (showGallery) exitGallery();
     setPreviewItem(null);
-    return assetsOk;
+    return r.assetsOk;
   };
 
   /* ─── Send ─── */
-  const handleSend = async () => {
-    if (!contentEditableRef.current || isGenerating) return;
-    // Read the project FRESH from the store rather than the render closure: 재생성
-    // calls handleReuse() (which mutates settings + assets) and then handleSend()
-    // in the SAME tick, before React re-renders — so the closure's `project` would
-    // be stale and we'd send the OLD setup. getState() guarantees the just-restored
-    // setup is what gets sent. For a normal send this is identical to the closure.
+  // 이 칸의 작성 칸 · 설정 · 레퍼런스로 보낸다. 실제 일은 sendRequest(src/lib/send-request.ts) — 에이전트 작업함도 같은 함수다.
+  // Read the project FRESH from the store rather than the render closure: 재생성
+  // calls handleReuse() (which mutates settings + assets) and then handleSend()
+  // in the SAME tick, before React re-renders — so the closure's `project` would
+  // be stale and we'd send the OLD setup. getState() guarantees the just-restored
+  // setup is what gets sent. For a normal send this is identical to the closure.
+  // 만든 카드 id 를 돌려준다. 멈춘 경우는 undefined.
+  const handleSend = async (): Promise<string[] | undefined> => {
+    const editor = contentEditableRef.current;
+    if (!editor || isGenerating) return;
     const project = useAppStore.getState().projects.find(p => p.id === currentProjectId);
     if (!project) return;
-
-    // ─── Project gate (strict) — applies to ALL providers, Gemini Omni included ───
-    // A project MUST be selected to generate — no exceptions, even if the list is
-    // empty / offline (no project → no send). Every send path (Enter / 전송 버튼 /
-    // 재생성) funnels through here. Read FRESH from the store (never a stale closure)
-    // → a just-picked code is always honored. 26.10.2001~ 코드는 이 프로젝트의 것(Project.billingKey) —
-    // 작업창을 나눠도 칸마다 자기 프로젝트의 코드로 찍힌다.
-    // 선택은 key 로 들고 있다 — 이름·id 는 지금 목록에서 찾는다(이름이 바뀌었으면 새 이름).
-    const bill = projectBilling(useAppStore.getState(), project.id);
-    if (!bill) {
-      warn(project.billingKey
-        ? '이 프로젝트의 프로젝트 코드를 목록에서 찾을 수 없습니다(종료됐을 수 있어요).\n코드를 다시 골라 주세요.'
-        : '이 프로젝트의 프로젝트 코드를 먼저 골라 주세요.\n(설정 패널 맨 위 "프로젝트 코드")');
-      return;
-    }
-    // ★ Model grant (tracker sheet column G → allow25). Blocks rather than downgrading:
-    // clamping 4k→1080p is a graceful loss of a knob, but silently swapping 2.5 for 2.0
-    // would hand back a different model's output under the user's own settings. And the
-    // stored settings.model is left ALONE — permission can be false before the tracker list
-    // lands or while a project has no code yet, so rewriting it here would knock a saved 2.5
-    // project back to 2.0. Same rule as the 4k hydration clamp in §5-2.
-    if (!isModelAllowed(project.settings.model, billingOf(useAppStore.getState(), project.id))) {
-      const label = MODELS.find(m => m.id === project.settings.model)?.name || '이 모델';
-      warn(`프로젝트 코드 "${bill.project}" 는 ${label} 권한이 없습니다.\n(다른 모델로 바꾸면 바로 생성할 수 있습니다.)`);
-      return;
-    }
-
-    // Gemini Omni = separate provider → its own send path (no BytePlus payload).
-    // (Success reporting to the sheet is Seedance-only; Omni still requires the gate above.)
-    if (modelProvider(project.settings.model) === 'gemini') { return await handleSendGemini(project); }
-    // Force mention labels to the CURRENT asset order before reading the prompt.
-    // The [project.assets] sync effect is async (passive), so if the user
-    // reorders/replaces and sends in the same tick, the pills could still hold
-    // stale "[Image N]" labels — which would mismatch the (current-order)
-    // content[] array sent to the API and point a mention at the wrong asset.
-    // Re-resolving each pill by its stable data-asset-id closes that race.
-    {
-      const namedNow = getAssetNames(project.assets);
-      contentEditableRef.current.querySelectorAll('.mention-pill').forEach(pill => {
-        const id = pill.getAttribute('data-asset-id');
-        const a = id ? namedNow.find(n => n.id === id) : null;
-        if (a) {
-          pill.setAttribute('data-name', a.name);
-          const t = pill.querySelector('span[style*="font-weight"]');
-          if (t) t.textContent = `[${a.name}]`;
-        }
-      });
-    }
-    const plainText = getPlainText(contentEditableRef.current.innerHTML);
-    if (!plainText.trim()) return;
-    // Snapshot the pill-bearing HTML so 재사용 can restore mentions exactly —
-    // element mentions resolve to bare names in plainText and are otherwise lost.
-    const promptHtml = contentEditableRef.current.innerHTML;
-
-    // Validate required assets BEFORE anything else
-    const mode = project.settings.mode;
-    if (mode === 'image_to_video_first' && !project.assets.some(a => a.role === 'first_frame')) {
-      warn('시작 프레임 이미지를 첨부해주세요.'); return;
-    }
-    if (mode === 'image_to_video_first_last') {
-      if (!project.assets.some(a => a.role === 'first_frame') || !project.assets.some(a => a.role === 'last_frame')) {
-        warn('시작 프레임과 끝 프레임 이미지를 모두 첨부해주세요.'); return;
-      }
-    }
-    if ((mode === 'edit_video' || mode === 'extend_video') && !project.assets.some(a => a.type === 'video_url')) {
-      warn('비디오를 첨부해주세요.'); return;
-    }
-    // API rule: on 2.0 audio can never be the only reference — at least one image or
-    // video must accompany it. Only multimodal can reach this state (other
-    // modes either reject audio or already require an image/video above).
-    // 2.5 lifted this ("newly supports generating videos with pure audio references"),
-    // so it is a per-model capability now, not a blanket rule.
-    if (mode === 'multimodal_reference' && !modelAllowsAudioOnly(project.settings.model)
-        && project.assets.length > 0 && project.assets.every(a => a.type === 'audio_url')) {
-      warn('이 모델은 오디오만으로 생성할 수 없습니다.\n이미지 또는 비디오를 최소 1개 함께 첨부하거나, Seedance 2.5 로 바꿔주세요.'); return;
-    }
-    // Re-check combined reference durations at send time — assets can arrive
-    // via reuse/restore without passing through the attach-time check.
-    for (const refType of ['video_url', 'audio_url'] as const) {
-      // Each type has its OWN per-model cap. Passing the video one for both meant a 2.5
-      // project summed its audio against the video limit — same number by luck on 2.5,
-      // but wrong on 2.0 the moment the two ever differ.
-      const cap = refType === 'audio_url'
-        ? modelRefAudioSec(project.settings.model)
-        : modelRefVideoSec(project.settings.model);
-      const totErr = totalDurationError(project.assets, refType, null, cap);
-      if (totErr) { warn(totErr); return; }
-    }
-
-    // ─── Element-library mentions → reference images (merged at send only) ───
-    // Collect distinct .element-pill ids in document order, resolve to assets.
-    const mentionedElementIds: string[] = [];
-    {
-      const seen = new Set<string>();
-      contentEditableRef.current.querySelectorAll('.element-pill').forEach(p => {
-        const id = p.getAttribute('data-element-id');
-        if (id && !seen.has(id)) { seen.add(id); mentionedElementIds.push(id); }
-      });
-    }
-    const mentionedElements = mentionedElementIds
-      .map(id => elementById.get(id))
-      .filter(Boolean) as typeof elementAssets;
-    if (mentionedElements.length > 0) {
-      // Reference images only carry in these two modes.
-      if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
-        warn('어셋 멘션은 Multimodal Reference 또는 Edit Video 모드에서만 레퍼런스로 전송됩니다.\n해당 모드로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.');
-        return;
-      }
-    }
-    // Image cap — deliberately OUTSIDE the mention branch above. It used to run only when
-    // element mentions existed, so a panel full of images sailed straight through to an
-    // API 400. That became reachable once caps differ per model: switch 2.5 (30 images)
-    // → 2.0 (9) and the leftovers are over the limit with no mention involved.
-    {
-      const panelImageCount = project.assets.filter(a => a.type === 'image_url').length;
-      const elementImageCount = mentionedElements.reduce((n, e) => n + e.images.length, 0);
-      const cap = modelImageMax(project.settings.model);
-      if (panelImageCount + elementImageCount > cap) {
-        warn(`이미지 합산 ${panelImageCount + elementImageCount}장 — 최대 ${cap}장까지만 보낼 수 있습니다.\n(래퍼런스 패널 ${panelImageCount}장 + 어셋 멘션 ${elementImageCount}장)\n이미지를 줄이거나 모델을 바꿔주세요.`);
-        return;
-      }
-    }
-    // Same story for video/audio COUNT. Attach-time already caps these, but a model switch
-    // can strand assets that were legal under the previous model (2.5 allows 10 videos,
-    // 2.0 only 3) — without this the request goes out and BytePlus 400s with an English
-    // message the user can't act on. Reference mode only: edit/extend have their own
-    // structural counts (1 source / 1–3 clips) that don't vary by model.
-    if (mode === 'multimodal_reference') {
-      const vCount = project.assets.filter(a => a.type === 'video_url').length;
-      const aCount = project.assets.filter(a => a.type === 'audio_url').length;
-      const vCap = modelVideoMax(project.settings.model);
-      const aCap = modelAudioMax(project.settings.model);
-      if (vCount > vCap) { warn(`비디오 ${vCount}개 — 최대 ${vCap}개까지만 보낼 수 있습니다.\n비디오를 줄이거나 모델을 바꿔주세요.`); return; }
-      if (aCount > aCap) { warn(`오디오 ${aCount}개 — 최대 ${aCap}개까지만 보낼 수 있습니다.\n오디오를 줄이거나 모델을 바꿔주세요.`); return; }
-    }
-
-    // ★ Task-type constraints BEFORE anything reads these settings, so the payload, the
-    // stored usedSettings and the card tag all show what was actually sent. Getting this
-    // wrong is expensive in a way a 400 is not: the API accepts the request, queues it,
-    // classifies it, and only then fails with InvalidParameter.TaskTypeConstraint — the
-    // wait and the slot are already spent. Applied here rather than in the panel because a
-    // project restored by 재사용 never passes through the panel at all.
-    // ★ Deliberately NOT written back to the project. The constraint belongs to (model,
-    // mode), not to the project: writing it would leave Edit Video's forced -1 sitting in
-    // the settings after the user moves to a mode that allows a duration, with nothing to
-    // restore their own value. Same rule the 4k clamp follows in reverse — that one writes
-    // back because the permission really did change; this one must not, because nothing
-    // about the user's choice changed. usedSettings below still records what was SENT.
-    const currentSettings = applyTaskConstraints(project.settings.model, project.settings.mode, { ...project.settings });
-    // Clamp resolution up-front so the payload, the stored usedSettings, the card tag,
-    // and 재사용 all agree on the value actually sent. Two things are enforced here:
-    //   · model capability (Fast/Mini have no 1080p; 4k is flagship-only)
-    //   · the live per-project 4k permission from the tracker sheet
-    // This is the ONLY place the 4k grant is enforced. The settings panel deliberately
-    // never rewrites the setting when permission disappears — doing that mid-typing
-    // would yank the config out from under the user. Instead it shows a locked chip and
-    // we clamp here, at the moment the queue is fired, exactly as intended.
-    {
-      const allow4k = isFourKAllowed(billingOf(useAppStore.getState(), project.id));
-      const clamped = clampResolution(currentSettings.model, currentSettings.resolution, allow4k);
-      if (clamped !== currentSettings.resolution) {
-        const was4k = currentSettings.resolution === '4k';
-        currentSettings.resolution = clamped;
-        // Write back ONLY now, so the panel visibly returns to the allowed tier once the
-        // user actually sends — never while they're still composing.
-        useAppStore.getState().updateProjectSettings(project.id, { resolution: clamped });
-        if (was4k) warn(`4K 권한이 해제되어 ${clamped}로 전송합니다.`);
-      }
-    }
-    const currentAssets = [...project.assets];
-
-    // Pre-flight: legacy data URL safety check (only matters for old assets pre-URL migration)
-    const totalPayloadBytes = currentAssets.reduce((sum, a) => {
-      if (a.url.startsWith('data:')) return sum + a.url.length;
-      return sum;
-    }, 0);
-    const totalMB = totalPayloadBytes / (1024 * 1024);
-    if (totalMB > 60) {
-      warn(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB\n이미지를 다시 첨부해주세요.`);
-      return;
-    }
-
-    // Refresh each reference before sending — all media types go through R2 now,
-    // so a single recovery path: cacheId hit → fresh presigned URL, then
-    // originalPath fallback (re-read from disk). User-pasted asset:// URIs and
-    // raw public URLs have no cacheId, so they're passed through unchanged.
-    setIsGenerating(true);
-    for (let i = 0; i < currentAssets.length; i++) {
-      const a = currentAssets[i];
-      if (!a.cacheId && !a.originalPath) continue;
-
-      let done = false;
-      if (a.cacheId) {
-        try {
-          const newUrl = await reuploadFromCache(a.cacheId);
-          currentAssets[i] = { ...a, url: newUrl };
-          done = true;
-        } catch { /* fall through to originalPath */ }
-      }
-      if (!done && a.originalPath) {
-        try {
-          // 첨부 때의 cacheId 로 '패널에 보이는 그 파일' 인지 확인한다. 같은 이름의 수정본이
-          // 덮어써져 있으면 패널 썸네일과 다른 것이 나가므로, 대신 보내지 않고 멈춘다.
-          const result = await reuploadFromPath(a.originalPath, a.cacheId);
-          currentAssets[i] = { ...a, url: result.url, cacheId: result.cacheId };
-          done = true;
-        } catch (err: any) {
-          if (err instanceof SourceChangedError) {
-            warn(`래퍼런스 '${a.file_name || a.type}' 의 원본 파일이 첨부한 뒤 수정됐습니다.\n첨부할 때의 내용은 캐시가 지워져 되살릴 수 없어서, 수정본을 대신 보내지 않고 멈췄습니다.\n지금 파일로 보내려면 ↻로 다시 첨부해주세요.`);
-            setIsGenerating(false);
-            return;
-          }
-          /* 그 밖의 실패는 아래에서 한꺼번에 알린다 */
-        }
-      }
-
-      if (!done) {
-        warn(`래퍼런스 파일 재업로드 실패: ${a.file_name || a.type}\n원본 파일이 이동/삭제됐을 수 있습니다. 다시 첨부해주세요.`);
-        setIsGenerating(false);
-        return;
-      }
-    }
-
-    // Resolve mentioned element images → fresh R2 URLs (same cache→R2 path as
-    // panel assets). Built as reference_image content items, appended AFTER the
-    // panel assets so the panel's own [Image N] numbering is unaffected.
-    const elementContent: any[] = [];
-    for (const el of mentionedElements) {
-      for (const img of el.images) {
-        try {
-          const url = await resolveElementImageUrl(img);
-          elementContent.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
-        } catch {
-          warn(`어셋 '${el.name}'의 이미지 업로드에 실패했습니다. 다시 시도해주세요.`);
-          setIsGenerating(false);
-          return;
-        }
-      }
-    }
-
-    // All checks passed — keep prompt/settings/assets intact for fast iteration; user manually clears if needed
-
-    // 1~3 으로 막는다 — 설정은 받은 영상이나 에이전트 요청에서도 들어온다(26.10.801 검토: 50 이 들어오면 50번 결제된다).
-    const outputCount = Math.min(Math.max(1, Math.floor(Number(project.settings.output_count) || 1)), OUTPUT_COUNT_MAX);
-    const systemMessageIds: string[] = [];
-
-    // Build a snapshot of the assets at send time. Used by past message cards
-    // to render the prompt mention pills + side thumbnails *frozen* — replacing
-    // an asset later (replaceAsset keeps id stable) must NOT mutate any past
-    // message. Keeps id/type/role/file_name/cacheId/thumbnailUrl as-is.
-    //
-    // For images we additionally bake the thumbnail into url so that the side
-    // thumbnail keeps rendering after the original tmpfiles URL expires (~24h).
-    // For videos we KEEP the original url — overwriting it with the base64
-    // thumbnail (added in 2404) made <video src=…> render a broken element.
-    const thumbAssets = await Promise.all(currentAssets.map(async a => {
-      const out: any = { ...a };
-      if (a.type === 'image_url') {
-        out.url = a.thumbnailUrl || (await createThumbnail(a.url)) || a.url;
-      }
-      return out;
-    }));
-
-    // Mentioned-element images for the card's reference strip. Kept separate from
-    // usedAssets (panel refs) because reuse restores usedAssets to the panel,
-    // whereas element images must ride the mention, not the panel. Thumbnails only.
-    const usedElementImages = mentionedElements.flatMap(el =>
-      el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, libId: img.libId, url: img.thumbnailUrl || img.url }))
+    return await sendRequest(
+      { projectId: project.id, promptHtml: editor.innerHTML, settings: project.settings, assets: project.assets, writeBack4k: true },
+      { warn, busy: setIsGenerating, sent: () => setTimeout(() => scrollToBottom(), 150) },
     );
-
-    for (let i = 0; i < outputCount; i++) {
-      const id = crypto.randomUUID();
-      systemMessageIds.push(id);
-      // 보낼 때의 프로젝트 코드를 메시지에 굽는다. 프로젝트의 코드는 나중에 바뀔 수 있고 시트에서 이름이
-      // 바뀔 수도 있다 — 이 카드가 어디로 찍혔는지 · NCP 폴더를 되찾는 힌트다.
-      addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, usedCollection: boundCollectionOf(project.id), videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key } } as any);
-    }
-    setTimeout(() => scrollToBottom(), 150);
-
-    try {
-      // Bind each element mention to its reference image via the BytePlus
-      // positional marker [Image N]. N continues AFTER the panel images and is
-      // computed fresh from the CURRENT panel here (never cached) — so trimming
-      // the panel 8→7 shifts the asset to [Image 8] correctly. Multi-image
-      // assets take consecutive numbers ([Image 8][Image 9]). Numbering walks
-      // mentionedElements in the SAME order their images are appended to
-      // content below, so labels and images line up exactly. The displayed pill
-      // and stored promptText stay the bare name; only this API text changes.
-      let imgN = currentAssets.filter(a => a.type === 'image_url').length;
-      const elementTagMap = new Map<string, string>();
-      for (const el of mentionedElements) {
-        elementTagMap.set(el.id, el.images.map(() => `[Image ${++imgN}]`).join(''));
-      }
-      const apiText = getPlainText(promptHtml, elementTagMap);
-      const content: any[] = [{ type: 'text', text: apiText }];
-      content.push(...currentAssets.map(asset => {
-        const item: any = { type: asset.type, [asset.type]: { url: asset.url } };
-        if (currentSettings.mode !== 'image_to_video_first') item.role = asset.role;
-        return item;
-      }));
-      content.push(...elementContent); // element-library mentions as extra reference images
-      const payload: any = {
-        model: currentSettings.model, content,
-        generate_audio: currentSettings.return_last_frame ? false : currentSettings.generate_audio,
-        ratio: currentSettings.ratio, duration: currentSettings.duration,
-        resolution: currentSettings.resolution, watermark: false,
-        // app-only fields; server.ts strips both before BytePlus + maps them to the task for credit
-        // reporting. project_id 가 있으면 트래커가 그것으로 프로젝트를 찾아 '지금 이름' 으로 적는다.
-        project: bill.project, project_id: bill.id,
-      };
-      // Only models that declare one send output_format at all — omitting it keeps every
-      // 2.0 request byte-for-byte what it has always been.
-      // User's pick when this model offers one, else the model's default. Models that
-      // never declared a format still send nothing at all — unchanged requests.
-      const outFmt = resolveOutputFormat(currentSettings.model, currentSettings.output_format);
-      if (outFmt) payload.output_format = outFmt;
-      // The mode the user picked, stated outright. reference / edit / extend all travel as
-      // the same reference_* role, so without this the API had to read the intent out of the
-      // prompt's wording — meaning the mode dropdown never actually reached the server, and a
-      // plainly-worded prompt in Edit Video quietly generated a brand-new clip instead.
-      // Read from `content` (already fully built above, elements included) and from
-      // `currentSettings` — the same constrained copy the rest of the payload uses — so the
-      // declared task can't disagree with either the attachments or the ratio/duration
-      // going with it. Nothing to assert → omitted, and the API infers as it always did.
-      const refTask = refTaskTypeFor(currentSettings.model, currentSettings.mode, content);
-      if (refTask) payload.omni_reference_task_type = refTask;
-      if (currentSettings.return_last_frame) payload.return_last_frame = true;
-      // 초안. 해상도는 applyTaskConstraints 가 이미 480p 로 바꿔 두었고, 초안을 모르는 모델이면
-      // 거기서 draft 자체가 꺼진다. 나머지(모델·토큰 과금·트래커 보고)는 일반 생성과 똑같다.
-      if (currentSettings.draft) payload.draft = true;
-
-      // Settings + assets are preserved after send so user can iterate quickly with same setup
-
-      await Promise.allSettled(systemMessageIds.map(async (sysMsgId) => {
-        try {
-          const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-          const text = await res.text();
-          let data; try { data = JSON.parse(text); } catch { throw new Error(res.status === 413 ? '파일 크기 초과 (이미지 개당 30MB, 전체 64MB 이하)' : `서버 응답 오류 (${res.status})`); }
-          if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
-          const taskId = data.id || data.data?.task_id;
-          if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-          updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, apiPrompt: apiText });
-          useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
-        } catch (error: any) {
-          updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
-        }
-      }));
-    } catch (error: any) {
-      systemMessageIds.forEach(id => updateMessage(project.id, id, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() }));
-    } finally { setIsGenerating(false); }
-    // 만든 카드 id — 에이전트 작업함이 진행을 따라가는 데 쓴다. 위에서 멈춘 경우는 undefined.
-    return systemMessageIds;
   };
 
-  /* ─── Gemini Omni Flash send (separate provider, sync) ─── */
-  // /api/gemini/generate holds ~30-40s and returns a cached .mp4 URL. No BytePlus
-  // task/poll — the message goes running → (awaited) → succeeded. Panel images
-  // (max 10) ride as inline base64; ratio→aspect(16:9|9:16), duration→"Ns"(3-10),
-  // thinking always high, task always explicit (no Unspecified). Seedance path untouched.
-  const handleSendGemini = async (project: any): Promise<string[] | undefined> => {
-    let sentIds: string[] | undefined;   // 만든 카드 id (에이전트 작업함용)
-    if (!contentEditableRef.current) return;
-    const userPrompt = getPlainText(contentEditableRef.current.innerHTML);
-    const s = project.settings;
-    const promptHtml = contentEditableRef.current.innerHTML;
-
-    // @element mentions — shared across the image tasks
-    const mentionedElementIds: string[] = [];
-    { const seen = new Set<string>(); contentEditableRef.current.querySelectorAll('.element-pill').forEach(p => { const id = p.getAttribute('data-element-id'); if (id && !seen.has(id)) { seen.add(id); mentionedElementIds.push(id); } }); }
-    const mentionedElements = mentionedElementIds.map(id => elementById.get(id)).filter(Boolean) as typeof elementAssets;
-
-    // Resolved against THIS model — a stored task the selected model doesn't offer (1.1's
-    // Extend on the Flash preview) must never reach the wire. The API validates the request
-    // schema, not the model, so it would accept 'extend' addressed to the preview and we
-    // would only find out from the output. Never read s.omniTask raw on the send path.
-    const task = resolveOmniTask(s.model, s.omniTask);
-    // `resolution` for a model that offers more than one, clamped by the 4K grant.
-    // Used by every Omni task including edit/extend — verified 2026-08-28 that BOTH honour
-    // it (360p source + resolution:'1080p' returned 1920x1080). They reject aspect_ratio,
-    // which is what made "geometry comes from the source" look true for resolution too;
-    // omitting it actually caps the output at 720p, so a 4K source came back 720p.
-    const omniResolution = (): string | undefined => {
-      if (modelResolutions(s.model).length <= 1) return undefined;
-      const st = useAppStore.getState();
-      return clampResolution(s.model, s.resolution, isFourKAllowed(billingOf(st, project.id)));
-    };
-    // Element @mentions only mean something for reference_to_video, where they become
-    // <IMAGE_REF_N>. Switching the task clears the ASSETS but not the PROMPT, so a pill
-    // outlives the task it was written for — and the failure was silent in both directions:
-    // image_to_video with no start frame quietly promoted the element's image TO the start
-    // frame, and edit dropped it while leaving the bare element name sitting in the
-    // instruction text. Mirrors the Seedance guard in handleSend (mode !== reference/edit).
-    if (mentionedElements.length > 0 && task !== 'reference_to_video') {
-      warn(`어셋 멘션은 Reference to Video에서만 레퍼런스로 전송됩니다.\n(현재 ${OMNI_TASK_LABELS[task] || task})\nReference to Video로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.`);
-      return;
-    }
-    // Read a cached IMAGE as {base64,mime}. (Edit's source video skips this: the server
-    // reads it straight off the media-cache disk by id — see _uploadCacheId below.)
-    const readCacheB64 = async (cacheId?: string, rawUrl?: string): Promise<{ data: string; mime: string } | null> => {
-      let dataUrl = '';
-      if (cacheId) { try { dataUrl = await readCacheAsDataUrl(cacheId); } catch { /* fall through */ } }
-      if (!dataUrl && typeof rawUrl === 'string' && rawUrl.startsWith('data:')) dataUrl = rawUrl;
-      const m = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
-      return m ? { data: m[2], mime: m[1] } : null;
-    };
-    const videoMimeOf = (fn?: string) => { const n = (fn || '').toLowerCase(); return n.endsWith('.mov') ? 'video/quicktime' : n.endsWith('.webm') ? 'video/webm' : n.endsWith('.mpeg') || n.endsWith('.mpg') ? 'video/mpeg' : n.endsWith('.wmv') ? 'video/x-ms-wmv' : n.endsWith('.3gp') || n.endsWith('.3gpp') ? 'video/3gpp' : n.endsWith('.flv') ? 'video/x-flv' : 'video/mp4'; };
-
-    let payload: any;
-    let usedImgAssets: any[] = [];
-    let usedElementImages: any[] = [];
-
-    if (task === 'extend') {
-      // ── Extend Video: 1 source VIDEO → appends to its end ────────────────────────────
-      // Same asset shape as Edit on purpose — 1 clip, no images — so Extend never touches
-      // the reference/element path. Measured 2026-08-28: response_format.duration is the
-      // number of seconds to APPEND (10s source + '3s' → 13.0s), aspect_ratio is REJECTED
-      // outright ("Aspect ratio cannot be set in response format for extend task"), and
-      // `resolution` IS honoured — omitting it caps the output at 720p regardless of the
-      // source, so it must be sent. Source clip must be <= 30s; output tops out at 40s.
-      const video = project.assets.find((a: any) => a.type === 'video_url');
-      if (!video) { warn('Extend Video는 이어붙일 원본 영상 1개가 필요합니다. 아래 에셋 영역에서 영상을 올려주세요.'); return; }
-      if (!video.cacheId) { warn('원본 영상 캐시를 찾지 못했습니다. 영상을 다시 올려주세요.'); return; }
-      // The API refuses a source over 30s outright ("Videos longer than 30s are not supported
-      // for extension."), and Omni's call is synchronous — sending anyway costs the user a
-      // ~30s wait for a certain failure. Measured 2026-08-28: 30.016s passed, 33.0s did not.
-      {
-        const srcCap = modelExtendMaxSrcSec(s.model);
-        const d = (video as any).durationSec;
-        if (srcCap !== undefined && typeof d === 'number' && d > srcCap) {
-          warn(`원본이 ${d.toFixed(1)}초입니다 — ${srcCap}초를 넘는 영상은 이어붙일 수 없습니다.
-(만들 수 있는 최대 길이는 ${modelExtendMaxOutSec(s.model)}초입니다.)`);
-          return;
-        }
-      }
-      if (!userPrompt.trim()) { warn('이어서 무슨 일이 일어날지 설명을 입력해주세요. (예: 그대로 걸어가 문을 연다)'); return; }
-      if (project.assets.some((a: any) => a.type === 'image_url')) { warn('Extend Video는 이미지를 사용하지 않습니다. 원본 영상 1개만 남겨주세요.'); return; }
-      // Continuation instruction over 1 clip — no positional markers exist for this task,
-      // so strip any Seedance [Image/Video/Audio N] a stray panel mention would leave behind.
-      const extText = userPrompt.replace(/\[(?:Image|Video|Audio) \d+\]\s*/g, '').trim();
-      const addSec = Math.max(3, Math.min(10, Math.round(s.duration || 5)));
-      payload = {
-        model: s.model,
-        input: [{ type: 'video', _uploadCacheId: video.cacheId, mime_type: videoMimeOf(video.file_name) }, { type: 'text', text: extText }],
-        response_format: { type: 'video', duration: `${addSec}s`, delivery: 'uri', ...(omniResolution() ? { resolution: omniResolution() } : {}) }, // no aspect_ratio — the API rejects it for extend
-        generation_config: { video_config: { task: 'extend' }, thinking_level: 'high' },
-      };
-      usedImgAssets = [{ ...video, url: video.thumbnailUrl || video.url }];
-      setIsGenerating(true);
-    } else if (task === 'edit') {
-      // ── Edit Video: exactly 1 source VIDEO → Files API (uploaded server-side by cacheId) ──
-      const video = project.assets.find((a: any) => a.type === 'video_url');
-      if (!video) { warn('Edit Video는 편집할 소스 영상 1개가 필요합니다. 아래 에셋 영역에서 영상을 올려주세요.'); return; }
-      if (!video.cacheId) { warn('소스 영상 캐시를 찾지 못했습니다. 영상을 다시 올려주세요.'); return; }
-      if (!userPrompt.trim()) { warn('영상을 어떻게 편집할지 설명을 입력해주세요. (예: 화면 전체에 눈 내리는 효과 추가)'); return; }
-      if (project.assets.some((a: any) => a.type === 'image_url')) { warn('Edit Video는 이미지를 사용하지 않습니다. 소스 영상 1개만 남겨주세요.'); return; }
-      // Edit is a plain instruction over the 1 source video — it uses no positional markers,
-      // so strip any Seedance [Image/Video/Audio N] that a stray panel mention would leave in.
-      const editText = userPrompt.replace(/\[(?:Image|Video|Audio) \d+\]\s*/g, '').trim();
-      payload = {
-        model: s.model,
-        input: [{ type: 'video', _uploadCacheId: video.cacheId, mime_type: videoMimeOf(video.file_name) }, { type: 'text', text: editText }],
-        response_format: { type: 'video', delivery: 'uri', ...(omniResolution() ? { resolution: omniResolution() } : {}) }, // edit: duration/aspect rejected by the API; resolution IS honoured
-        generation_config: { video_config: { task: 'edit' }, thinking_level: 'high' },
-      };
-      usedImgAssets = [{ ...video, url: video.thumbnailUrl || video.url }];
-      setIsGenerating(true);
-    } else {
-      // ── Text / Image / Reference tasks (+ unofficial end-frame under image_to_video) ──
-      const firstFrame = project.assets.find((a: any) => a.type === 'image_url' && a.role === 'first_frame');
-      const lastFrame = project.assets.find((a: any) => a.type === 'image_url' && a.role === 'last_frame');
-      const refImgs = project.assets.filter((a: any) => a.type === 'image_url' && a.role !== 'first_frame' && a.role !== 'last_frame');
-      // reference_to_video may also take a video reference — VERIFIED to work (the clip's scene
-      // is reproduced, image refs restyle it). Capped at 1 (doc: multiple videos unsupported).
-      const refVideos = task === 'reference_to_video' ? project.assets.filter((a: any) => a.type === 'video_url') : [];
-
-      // Ordered image inputs = [firstFrame?, lastFrame?, panel refImgs…, element images…].
-      // The doc's <IMAGE_REF_N> tags map 1:1 to this array order (0-based), so element
-      // @mentions can be bound to their image positionally — the Omni analogue of the
-      // Seedance [Image N] marker. A reference video (if any) is appended after the images.
-      const imgSources: { asset?: any; img?: any }[] = [];
-      if (firstFrame) imgSources.push({ asset: firstFrame });
-      if (lastFrame) imgSources.push({ asset: lastFrame });
-      for (const a of refImgs) imgSources.push({ asset: a });
-      for (const el of mentionedElements) for (const img of el.images) imgSources.push({ img });
-
-      if (!userPrompt.trim() && imgSources.length === 0) return;
-      if (lastFrame && !firstFrame) { warn('끝 프레임만은 넣을 수 없습니다 — 시작 프레임을 먼저 넣어주세요.'); return; }
-      // modelImageMax, not a literal — the panel counter and this check disagreed (9 vs 10)
-      // once before, exactly because one of them held its own copy of the number.
-      const omniImgCap = modelImageMax(s.model);
-      if (imgSources.length > omniImgCap) { warn(`${MODELS.find(m => m.id === s.model)?.name || 'Omni'}는 이미지 최대 ${omniImgCap}장입니다. 현재 ${imgSources.length}장(프레임 + 래퍼런스 + 어셋멘션 합산) — 줄여주세요.`); return; }
-
-      setIsGenerating(true);
-      const imageParts: any[] = [];
-      try {
-        // 원본만 보낸다. 못 읽으면 멈춘다 — 예전에는 빠뜨리고 보내거나(<IMAGE_REF_N> 번호가 밀린다) 썸네일을 대신 보냈다.
-        for (const src of imgSources) { const b = await readCacheB64(src.asset?.cacheId || src.img?.libId || src.img?.cacheId, src.asset?.url || src.img?.url); if (!b) throw new Error(`'${src.asset?.file_name || src.img?.file_name || '레퍼런스'}' 원본을 읽지 못했습니다. 다시 넣어주세요.`); imageParts.push({ type: 'image', data: b.data, mime_type: b.mime }); }
-      } catch (e: any) { warn('이미지 읽기 실패: ' + e.message); setIsGenerating(false); return; }
-      if (imgSources.length > 0 && imageParts.length === 0) { warn('첨부 이미지를 읽지 못했습니다. 다시 넣어주세요.'); setIsGenerating(false); return; }
-
-      // Gemini's image rules differ from BytePlus's, and every upload route in this app
-      // validates against BytePlus (30MB · JPEG/PNG/WebP/BMP/GIF/TIFF). Google's model card
-      // says 20MB inline and PNG/JPEG/WebP/HEIC/HEIF — so BMP/GIF/TIFF pass our uploader and
-      // fail at Google, and a 21–30MB image does the same. Checked HERE, once, because the
-      // eight upload sites (panel, replace, drop, paste, element library…) all converge on
-      // this array; putting it in the uploader would mean eight copies of the same rule and
-      // would wrongly restrict the element library, whose images are shared with Seedance.
-      const GEMINI_IMG_MIME = ['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'];
-      for (const p of imageParts) {
-        const mb = (p.data?.length || 0) * 0.75 / (1024 * 1024); // base64 → bytes
-        if (mb > 20) { warn(`이미지 하나가 ${mb.toFixed(1)}MB입니다 — Gemini는 20MB까지입니다.\n(Seedance는 30MB라 업로드는 통과했습니다.)`); setIsGenerating(false); return; }
-        if (!GEMINI_IMG_MIME.includes(p.mime_type)) { warn(`Gemini가 지원하지 않는 이미지 형식입니다: ${p.mime_type}\n(PNG · JPEG · WebP · HEIC · HEIF만 가능. Seedance는 BMP/GIF/TIFF도 받습니다.)`); setIsGenerating(false); return; }
-      }
-
-      // Documented per-task image rules — fail clearly HERE instead of with a raw API error.
-      if (task === 'text_to_video' && imageParts.length > 0) { warn('Text to Video는 이미지를 사용하지 않습니다.\n이미지를 빼거나 Image / Reference to Video로 바꿔주세요.'); setIsGenerating(false); return; }
-      if (task === 'image_to_video' && imageParts.length === 0) { warn('Image to Video는 이미지가 필요합니다. 시작 프레임을 넣어주세요.'); setIsGenerating(false); return; }
-      if (task === 'image_to_video' && !lastFrame && imageParts.length > 1) { warn('Image to Video는 시작 프레임 1장만 지원합니다.\n여러 장이면 Reference to Video로 바꾸거나, 끝 프레임을 쓰려면 시작·끝 2장만 두세요.'); setIsGenerating(false); return; }
-      if (task === 'reference_to_video' && imageParts.length === 0) { warn('Reference to Video는 참조 이미지가 최소 1장 필요합니다.\n위 래퍼런스 영역에서 이미지를 올리거나 @어셋을 멘션해주세요.'); setIsGenerating(false); return; }
-
-      // Build the API prompt with the doc's image-role tags (<FIRST_FRAME>, <IMAGE_REF_N>).
-      let effTask = task;
-      let promptText: string;
-      const videoParts: any[] = []; // reference_to_video: optional video reference (server-uploaded)
-      if (task === 'image_to_video' && lastFrame && modelHasFirstLastFrame(s.model)) {
-        // Documented first+last frame interpolation (model card: "Videos from first and last
-        // frames - Supported"). Stays on image_to_video and tags the two frames directly, so it
-        // needs none of the reference route's "do not treat these as literal frames" hedging.
-        // Verified 2026-08-28 by measurement, not eyeball: a red ball at left as the first
-        // image and at right as the second came back as frame 0 and the final frame.
-        promptText = ('<FIRST_FRAME> ' + getPlainText(promptHtml) + ' <LAST_FRAME>').replace(/\s+/g, ' ').trim();
-      } else if (task === 'image_to_video' && lastFrame) {
-        // Models WITHOUT the documented feature (the Flash preview): interpolation is
-        // doc-unsupported there, so route as reference_to_video with REAL tags (no fake
-        // <LAST_FRAME>). Best-effort only — the UI says so. Unchanged from before 1.1.
-        effTask = 'reference_to_video';
-        promptText = `${getPlainText(promptHtml)} Begin the video on <IMAGE_REF_0> and finish on <IMAGE_REF_1>, transitioning smoothly between them.`.trim();
-      } else if (task === 'image_to_video') {
-        // Single start frame → <FIRST_FRAME> binds image[0] (doc: "<FIRST_FRAME> a woman is walking").
-        promptText = `<FIRST_FRAME> ${getPlainText(promptHtml)}`.trim();
-      } else if (task === 'reference_to_video') {
-        // Bind BOTH mention kinds to <IMAGE_REF_N> in place (N = the image's index in the
-        // input array), so @mentions carry Omni's tag syntax instead of Seedance's [Image N].
-        // Shared counter walks the SAME order the images are appended: panel assets first
-        // (each 1 image), then element images (an element may contribute several).
-        let refN = 0;
-        const mentionTagMap = new Map<string, string>(); // panel-asset id → <IMAGE_REF_N>
-        for (const a of [firstFrame, lastFrame, ...refImgs].filter(Boolean) as any[]) mentionTagMap.set(a.id, `<IMAGE_REF_${refN++}>`);
-        // Video mentions have NO positional tag (Omni tags are image-only) — replace with a
-        // natural-language phrase so an @Video mention never leaks the Seedance "[Video N]" marker.
-        // With more than one clip a single shared phrase can't point at a specific one, so
-        // number them the way the images are numbered (3 reference videos verified working).
-        (refVideos as any[]).forEach((v, i) => mentionTagMap.set(v.id,
-          refVideos.length > 1 ? `reference video clip ${i + 1}` : 'the reference video clip'));
-        const elementTagMap = new Map<string, string>(); // element id → its <IMAGE_REF_N>(s)
-        for (const el of mentionedElements) elementTagMap.set(el.id, el.images.map(() => `<IMAGE_REF_${refN++}>`).join(' '));
-        const body = getPlainText(promptHtml, elementTagMap, mentionTagMap);
-        // The video reference has NO positional tag (doc defines only <IMAGE_REF_N> for images),
-        // and the model IGNORES an attached clip unless the prompt explicitly names it — so when a
-        // reference video is present we call it out in the guiding suffix (verified: without this the
-        // output used only the images).
-        promptText = (refVideos.length
-          ? `${body} Use the given image(s) as style/subject references and the given video ${refVideos.length > 1 ? 'clips' : 'clip'} as the scene and motion reference; do not treat any of them as literal initial frames.`
-          : `${body} Use the given image(s) as references for the video; do not treat them as literal initial frames.`).trim();
-        // Optional reference video → Files API (server uploads by cacheId, appended after images).
-        const vidCap = modelVideoMax(s.model);
-        if (refVideos.length > vidCap) { warn(`Reference to Video의 참조 영상은 ${vidCap}개까지입니다.`); setIsGenerating(false); return; }
-        for (const v of refVideos) {
-          if (!v.cacheId) { warn(`참조 영상(${v.file_name || ''}) 캐시를 찾지 못했습니다. 다시 올려주세요.`); setIsGenerating(false); return; }
-          videoParts.push({ type: 'video', _uploadCacheId: v.cacheId, mime_type: videoMimeOf(v.file_name) });
-        }
-      } else {
-        // text_to_video — no images.
-        promptText = getPlainText(promptHtml);
-      }
-      // Safety net: Omni has no [Video N]/[Audio N] markers (Seedance-only syntax). A stray
-      // media mention must never leak that into the prompt. (Reference already turns @Video
-      // into "the reference video clip"; this catches audio + the other tasks.)
-      promptText = promptText.replace(/\[(?:Video|Audio) \d+\]\s*/g, '').trim();
-
-      const parts = [...imageParts, ...videoParts];
-      const input = parts.length ? [...parts, { type: 'text', text: promptText }] : promptText;
-      const aspect = s.ratio === '9:16' ? '9:16' : '16:9';
-      const dur = Math.max(3, Math.min(10, Math.round(s.duration || 5)));
-      const rf: any = { type: 'video', aspect_ratio: aspect, duration: `${dur}s`, delivery: 'uri' };
-      // `resolution` is sent ONLY by models that declare more than one. The Flash preview
-      // declares ['720p'], so its request stays byte-for-byte what it has always been — it
-      // has never sent this field and this patch must not be the thing that starts.
-      // Measured on 1.1 (2026-08-28): 720p/1080p/4k all return the real pixel dimensions.
-      const rres = omniResolution();
-      if (rres) rf.resolution = rres;
-      payload = {
-        model: s.model,
-        input,
-        response_format: rf,
-        generation_config: { video_config: { task: effTask }, thinking_level: 'high' },
-      };
-      usedImgAssets = [firstFrame, lastFrame, ...refImgs, ...refVideos].filter(Boolean).map((a: any) => ({ ...a, url: a.thumbnailUrl || a.url }));
-      usedElementImages = mentionedElements.flatMap(el => el.images.map(img => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, libId: img.libId, url: img.thumbnailUrl || img.url })));
-    }
-
-    const settingsSnapshot = { ...s };
-    try {
-      const count = Math.min(Math.max(1, Math.floor(Number(s.output_count) || 1)), OUTPUT_COUNT_MAX);   // 위 Seedance 와 같이 1~3
-      const ids: string[] = [];
-      // 과금 프로젝트는 보낼 때 한 번 정한다(handleSend 가 이미 있는지 확인했다). 이름은 NCP 폴더,
-      // id·key 는 이름이 바뀌어도 같은 프로젝트를 가리키는 값.
-      const omniBill = projectBilling(useAppStore.getState(), project.id);
-      const omniStorage = { project: omniBill?.project || '', projectId: omniBill?.id || '', projectKey: omniBill?.key || '' };
-      for (let i = 0; i < count; i++) {
-        const id = crypto.randomUUID(); ids.push(id);
-        addMessage(project.id, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, apiPrompt: typeof payload?.input === 'string' ? payload.input : (payload?.input?.find?.((x: any) => x?.type === 'text')?.text ?? undefined), usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, usedCollection: boundCollectionOf(project.id), videoStorage: omniStorage } as any);
-      }
-      sentIds = ids;
-      setTimeout(() => scrollToBottom(), 150);
-
-      // Fire each generation in the BACKGROUND (no await). Omni's HTTP call is synchronous
-      // (~40–90s), but we must NOT hold the composer locked that whole time — Seedance only
-      // locks it for the ~2s task submit, then the video renders in the background. So we
-      // kick the fetches off unawaited and unlock immediately; each card resolves on its own,
-      // letting the user queue more Omni prompts while one is still rendering. A 4-min timeout
-      // guards against a rare server stall leaving a card spinning "생성 중" forever.
-      ids.forEach((id) => { void (async () => {
-        const ctrl = new AbortController();
-        // 40 minutes. This was 4, which was shorter than the server's own limits — so a slow
-        // job was cut off by US before any answer could arrive, and the card said "생성 시간
-        // 초과 (4분)" with nothing else to act on. Sized from measurement, not taste:
-        // 2026-08-28, same 10s 4K source: +3s returned HTTP 200 after 1311s (21.9 min) and
-        // +10s came back in about 10 — the bigger append was faster, so this tracks load
-        // rather than output length and cannot be predicted from the request. 40 min leaves
-        // room above the slower sample. 360p lands in ~50s and 1080p in ~2min, so this
-        // ceiling only ever matters to 4K. Omni is synchronous, but the
-        // fetch is fired unawaited, so a long wait holds one card open and nothing else.
-        const timer = window.setTimeout(() => ctrl.abort(), 2400000);
-        try {
-          // project·project_id 는 앱 전용 필드다 — 서버가 NCP 보관 폴더(id 가 있으면 id, 없으면 이름)를 정하는 데만 쓰고 구글로 보내기 전에 지운다.
-          const r = await fetch('/api/gemini/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...payload, project: omniStorage.project, project_id: omniStorage.projectId }), signal: ctrl.signal });
-          const t = await r.text();
-          let d: any; try { d = JSON.parse(t); } catch { throw new Error(`서버 응답 오류 (${r.status})`); }
-          if (!r.ok) throw new Error(d.error || `생성 오류 (${r.status})`);
-          if (!d.videoUrl) throw new Error('영상 URL을 받지 못했습니다.');
-          // Omni 는 서버가 항상 .mp4 로 캐시에 쓴다.
-          updateMessage(project.id, id, { status: 'succeeded', videoUrl: d.videoUrl, taskId: d.id, content: 'Omni 완료', videoStorage: { ...omniStorage, ext: '.mp4' }, endTime: Date.now() });
-        } catch (error: any) {
-          const msg = error.name === 'AbortError'
-            ? '응답 없이 40분이 지나 중단했습니다.\n4K 이어붙이기는 20분 이상 걸리는 게 정상이지만 여기까지는 아닙니다 — 요청이 중간에 끊겼거나 앱이 재시작된 경우입니다.'
-            : error.message;
-          updateMessage(project.id, id, { status: 'failed', content: '생성 실패', error: msg, endTime: Date.now() });
-        } finally {
-          window.clearTimeout(timer);
-        }
-      })(); });
-    } finally {
-      // Brief visible spin (~0.8s) like Seedance's task-submit, THEN unlock — not the whole
-      // 40–90s. The delay also un-batches the true→false so the spinner actually renders.
-      // The generation keeps rendering in the background card; the composer is free to queue more.
-      window.setTimeout(() => setIsGenerating(false), 800);
-    }
-    return sentIds;
-  };
-
-  /* ─── 에이전트 작업함: 받아서 보내기 (26.10.302~) ─── */
+  /* ─── 에이전트 작업함: 받아서 보내기 (26.10.302~ · 26.10.2002~ 화면을 바꾸지 않고 지정한 프로젝트로) ─── */
   // 같은 PC 의 에이전트(freewill 커넥터의 send-to-seedance)가 server.ts 작업함에 넣은 요청을, 사람이 전송 버튼을
-  // 누르는 것과 같은 길(attachFiles → handleSend)로 보낸다. 생성 중 카드 · 권한 검사 · 트래커 보고 · NCP 보관 · 폴링이
-  // 전부 평소대로다. 작성 칸(설정 · 레퍼런스 · 프롬프트)을 잠깐 빌려 쓰고, 보낸 뒤 쓰던 그대로 되돌린다 — 재생성이
-  // 작성 칸을 덮어쓰는 것과 같은 방식에 '되돌리기' 를 더한 것.
+  // 누르는 것과 같은 함수(attachFilesTo → sendRequest, src/lib/send-request.ts)로 보낸다. 생성 중 카드 · 권한 검사 ·
+  // 트래커 보고 · NCP 보관 · 폴링이 전부 평소대로다.
+  // 26.10.2002~ 작성 칸을 빌리지 않는다. 요청이 가리킨 프로젝트(projectId 또는 정확한 이름)의 설정 위에 요청의 설정을
+  // 메모리에서 얹고, 레퍼런스도 메모리에 붙여 바로 보낸다 — 사용자의 열린 프로젝트 · 작성 칸 · 설정 · 레퍼런스 칸이 그대로고,
+  // 입력 중 · 생성 중 · 갤러리 화면이어도 받는다. 카드는 그 프로젝트에 생기고(사이드바 스피너 · 완료 배지), 토스트로 알린다.
   // 지키는 것:
-  //   · 지금 열린 프로젝트에만 보낸다. 요청에 적힌 프로젝트 이름과 다르면 보내지 않는다(실패로 알림).
-  //   · 입력 중(4초 안에 타자) · 생성 중 · 갤러리 화면(작성 칸 없음) · 다른 요청을 보내는 중이면 가져가지 않는다.
-  //   · 빌려 쓰는 동안 프롬프트 칸을 잠근다 — 그 사이 친 글자가 되돌릴 때 사라지지 않게.
+  //   · 대상이 애매하면 보내지 않는다 — 같은 이름이 둘이면 후보를, 못 찾으면 이유를 돌려준다(agentResolveProject).
+  //   · 과금은 그 프로젝트의 코드다. 코드가 없으면 서버가 작업을 내주지 않고 기다리게 한다(사람이 고를 때까지, 10분).
+  //     요청에 적힌 코드(billing)와 다르면 보내지 않는다 — 과금은 사람이 정한다. 가져갈 때 본 코드를 sendRequest 가 요청을
+  //     띄우기 직전에 다시 비교한다(그 사이 사람이 바꾸거나 60초 확인이 비우면 보내지 않음).
   //   · 레퍼런스를 하나라도 못 붙이면 보내지 않는다 — 빠진 채로 나가면 다른 영상이 되고 값은 똑같이 낸다.
   //   · 진행은 카드(스토어 메시지)에서 읽어 올린다. /api/byteplus/tasks/:id 를 따로 부르지 않는다(server.ts 주석).
-  const agentReport = (id: string, body: Record<string, unknown>) =>
-    fetch(`/api/agent/jobs/${encodeURIComponent(id)}/report`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    }).then(() => undefined, () => undefined);
-
-  // 카드 상태 → 에이전트에게 보여 줄 모양. 카드를 지웠으면 missing.
-  const agentCards = (projectId: string, ids: string[]) => {
-    const msgs = useAppStore.getState().projects.find(p => p.id === projectId)?.messages || [];
-    return ids.map(id => {
-      const m = msgs.find(x => x.id === id) as any;
-      if (!m) return { id, status: 'missing' };
-      return {
-        id, status: m.status || 'queued',
-        ...(m.taskId ? { taskId: m.taskId } : {}),
-        ...(m.videoUrl ? { videoUrl: m.videoUrl } : {}),
-        ...(m.error ? { error: String(m.error).slice(0, 500) } : {}),
-      };
-    });
+  const agentFail = (job: any, error: string, projectName?: string) => {
+    showToast(`${projectName ? `[${projectName}] ` : ''}에이전트 요청을 보내지 않았어요 — ${error.split('\n')[0]}`, false);
+    return agentReport(job.id, { status: 'failed', error, ...(projectName ? { project: projectName } : {}) });
   };
 
   // 경로의 파일을 화면으로 가져온다. 서버가 디스크에서 읽어 미디어 캐시에 넣고(cache-from-path — 재사용이 쓰는 그 길),
-  // 화면은 그 바이트로 File 을 만든다. 캐시 id 는 내용 md5 라 attachFiles 가 다시 올리지 않고 그대로 쓴다.
+  // 화면은 그 바이트로 File 을 만든다. 캐시 id 는 내용 md5 라 attachFilesTo 가 다시 올리지 않고 그대로 쓴다.
   const agentFileFromPath = async (p: string): Promise<{ file: File; cacheId: string }> => {
-    const cacheId = await cacheFromPath(p);
-    const res = await fetch(`/api/cache/${cacheId}`);
+    const cacheId = await withTimeout(cacheFromPath(p), 180000, '파일 읽기');
+    const res = await withTimeout(fetch(`/api/cache/${cacheId}`), 180000, '캐시 읽기');
     if (!res.ok) throw new Error(`캐시를 읽지 못했습니다 (${res.status})`);
     const name = p.split(/[\\/]/).pop() || 'file';
     const ext = (name.match(/\.([^.]+)$/)?.[1] || '').toLowerCase();
     return { file: new File([await res.blob()], name, { type: AGENT_MIME[ext] || '' }), cacheId };
   };
 
-  // 작성 칸 빌려 쓰기 — 지금 설정 · 레퍼런스 · 프롬프트를 적어 두고 run 을 돌린 뒤(실패해도) 그대로 되돌린다.
-  // 빌려 쓰는 동안 프롬프트 칸을 잠그고, 그 사이 뜬 앱 경고를 모아 돌려준다. 생성 요청과 재생성 명령이 같이 쓴다.
-  const agentBorrow = async <T,>(pid: string, editor: HTMLDivElement, note: string, run: () => Promise<T>): Promise<{ value: T; warnings: string[] }> => {
-    const proj = useAppStore.getState().projects.find(p => p.id === pid);
-    if (!proj) throw new Error('프로젝트가 사라졌습니다');
-    const prevHtml = editor.innerHTML;
-    const prevSettings: Record<string, unknown> = { ...proj.settings };
-    const prevAssets = proj.assets.map(({ id: _id, ...rest }) => rest);
-    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
-    const warnings: string[] = [];
-    agentWarnRef.current = warnings;
-    editor.setAttribute('contenteditable', 'false');
-    if (note) showToast(note, true);
-    try {
-      const value = await run();
-      return { value, warnings };
-    } finally {
-      agentWarnRef.current = null;
-      // 되돌리기. 새로 생긴 설정 키(예: output_format)는 비워야 한다 — updateProjectSettings 는 합치기라서.
-      const now = useAppStore.getState().projects.find(p => p.id === pid)?.settings || {};
-      const restore: Record<string, unknown> = { ...prevSettings };
-      for (const k of Object.keys(now)) if (!(k in prevSettings)) restore[k] = undefined;
-      useAppStore.getState().updateProjectSettings(pid, restore as Partial<GenerationSettings>);
-      useAppStore.getState().replaceAllAssets(pid, prevAssets);
-      const html = rebindMentionPills(prevHtml, getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []));
-      if (paneProjectRef.current === pid && contentEditableRef.current === editor) {
-        editor.innerHTML = html;
-        setHasText(!!editor.innerText.trim());
-        syncMentionCount();
-      }
-      useAppStore.getState().updateDraftPrompt(pid, html);
-      editor.setAttribute('contenteditable', 'true');
-    }
-  };
-
   // 프롬프트의 @{이름} → 그 프로젝트에 연결된 컬렉션의 엘리먼트 알약(화면에서 @ 멘션한 것과 같은 모양).
-  // 보낼 때 앱이 그 엘리먼트 이미지를 레퍼런스로 붙이고 [Image N] 으로 바꾼다(handleSend 의 엘리먼트 멘션).
+  // 보낼 때 앱이 그 엘리먼트 이미지를 레퍼런스로 붙이고 [Image N] 으로 바꾼다(sendRequest 의 엘리먼트 멘션).
   const agentElementPill = (pid: string) => {
     const st = useAppStore.getState();
     const cid = st.projectCollectionId[pid];
@@ -4188,19 +3310,32 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     };
   };
 
-  const agentProcess = async (job: any) => {
+  // 서버 작업함에서 그 프로젝트의 코드를 기다리는 작업 수 — 설정 패널이 그 프로젝트에 알리고, 늘어나면 토스트로 한 번.
+  const agentNoteWaiting = (w: unknown) => {
+    if (w === undefined) return;   // 명령만 준 답(서버가 명령을 먼저 준다)에는 없다 — 지난 값을 그대로 둔다
+    const m: Record<string, number> = {};
+    if (w && typeof w === 'object') for (const [k, v] of Object.entries(w as Record<string, unknown>)) if (typeof v === 'number' && v > 0) m[k] = v;
+    useAppStore.getState().setAgentWaitingBilling(m);
+    const grew = Object.keys(m).filter(k => m[k] > (agentWaitingPrev[k] || 0));
+    agentWaitingPrev = m;
+    if (!grew.length) return;
     const st = useAppStore.getState();
-    // 이 칸의 프로젝트 — 작업은 손대는 칸만 받으므로(agentTick) 받는 순간에는 앱의 지금 프로젝트와 같다.
-    const proj = st.projects.find(p => p.id === paneProjectRef.current);
-    const editor = contentEditableRef.current;
-    const fail = (error: string) => agentReport(job.id, { status: 'failed', error, ...(proj ? { project: proj.name } : {}) });
-    if (!proj || !editor) return fail('앱에 열린 프로젝트가 없습니다. 앱에서 프로젝트를 연 뒤 다시 보내 주세요.');
-    if (proj.id !== currentProjectId) return fail('받는 순간 앱의 프로젝트가 바뀌어 보내지 않았습니다. 다시 보내 주세요.');
-    if (job.project && job.project !== proj.name.trim()) return fail(`앱에 열린 프로젝트는 "${proj.name}" 입니다(요청: "${job.project}"). 그 프로젝트를 연 뒤 다시 보내 주세요.`);
-    // 프로젝트 코드도 확인 카드에서 본 그대로여야 한다 — 그 사이 그 프로젝트의 코드를 바꿨으면 다른 곳에 과금된다.
-    const billNow = projectBilling(st, proj.id)?.project ?? null;
-    if (job.billing && job.billing !== billNow?.trim()) return fail(`그 프로젝트의 프로젝트 코드는 ${billNow ? `"${billNow}"` : '(고르지 않음)'} 입니다(요청: "${job.billing}"). 확인한 뒤 다시 보내 주세요.`);
-    const plan = agentSettings(proj.settings, job.settings && typeof job.settings === 'object' ? job.settings : {});
+    const names = grew.map(k => st.projects.find(p => p.id === k)?.name || '(알 수 없는 프로젝트)');
+    showToast(`[${names.join(', ')}] 에이전트 요청이 프로젝트 코드를 기다려요 — 그 프로젝트의 설정 패널 맨 위 "프로젝트 코드" 를 골라 주세요`, false);
+  };
+
+  const agentProcess = async (job: any) => {
+    let target: ReturnType<typeof agentResolveProject>;
+    try { target = agentResolveProject(job.projectId, job.project); }
+    catch (e: any) { return agentFail(job, e?.message || String(e)); }
+    const fail = (error: string) => agentFail(job, error, target.name);
+    // 과금 — 그 프로젝트의 코드. 없는 프로젝트의 작업은 서버가 내주지 않는다(claim) — 여기 온 건 그 사이 코드가 비워진 경우다.
+    const bill = projectBilling(useAppStore.getState(), target.id);
+    if (!bill) return fail(`"${target.name}" 의 프로젝트 코드가 골라져 있지 않습니다 — 사람에게 앱에서 그 프로젝트의 "프로젝트 코드" 를 골라 달라고 한 뒤 다시 보내 주세요.`);
+    if (job.billing && job.billing !== bill.project.trim()) {
+      return fail(`"${target.name}" 의 프로젝트 코드는 "${bill.project}" 입니다(요청: "${job.billing}"). 과금은 사람이 정합니다 — 이 코드로 보낼지, 앱에서 코드를 바꿀지 사람에게 확인한 뒤 다시 보내 주세요.`);
+    }
+    const plan = agentSettings(target.settings, job.settings && typeof job.settings === 'object' ? job.settings : {});
     if (!plan.next) return fail(plan.error || '설정을 읽지 못했습니다');
     const next = plan.next;
     const omni = modelProvider(next.model) === 'gemini';
@@ -4211,69 +3346,48 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       .sort((a: any, b: any) => rank(a.role) - rank(b.role) || a.i - b.i);
     if (refs.length && !omni && next.mode === 'text_to_video') return fail('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
 
-    // 작성 칸을 빌려 쓰고(agentBorrow) 보낸 뒤 쓰던 그대로 되돌린다.
-    const pid = proj.id;
-    let ids: string[] | undefined;
-    let problem = '';
+    // 레퍼런스는 메모리에 붙인다(attachFilesTo 의 검사 그대로) — 그 프로젝트의 레퍼런스 칸에는 아무것도 생기지 않는다.
+    const sink = memoryAssetSink(next);
     try {
-      const out = await agentBorrow(pid, editor, `에이전트 요청을 보내는 중…${job.name ? ` (${job.name})` : ''}`, async () => {
-        useAppStore.getState().updateProjectSettings(pid, next);
-        useAppStore.getState().replaceAllAssets(pid, []);
-        const files: File[] = [];
-        const given = new Map<File, { path: string; cacheId: string }>();
-        for (const r of refs) {
-          try {
-            const got = await agentFileFromPath(r.path);
-            files.push(got.file);
-            given.set(got.file, { path: r.path, cacheId: got.cacheId });
-          } catch (e: any) { throw new Error(`레퍼런스를 읽지 못했습니다: ${r.path}\n${e?.message || e}`); }
-        }
-        const rejected = await attachFiles(files, f => given.get(f));
-        if (rejected.length) throw new Error(`레퍼런스를 붙이지 못했습니다:\n${rejected.join('\n')}`);
-        // 여기부터 handleSend 가 프롬프트를 읽을 때까지는 await 없이 이어진다 — 그 사이 프로젝트가 바뀔 틈이 없다.
-        if (paneProjectRef.current !== pid || contentEditableRef.current !== editor) throw new Error('보내기 전에 앱의 프로젝트(화면)가 바뀌어 보내지 않았습니다.');
-        const missing: string[] = [];
-        const html = agentPromptHtml(String(job.prompt || ''), getAssetNames(useAppStore.getState().projects.find(p => p.id === pid)?.assets || []), agentElementPill(pid), missing);
-        if (missing.length) {
-          const st2 = useAppStore.getState();
-          const bound = st2.assetCollections.find(c => c.id === st2.projectCollectionId[pid])?.name;
-          throw new Error(`엘리먼트를 찾지 못했습니다: ${missing.join(', ')}\n(이 프로젝트에 연결된 컬렉션: ${bound ? `"${bound}"` : '없음'} — collections.list · collection.bind)`);
-        }
-        editor.innerHTML = html;
-        setHasText(true);
-        syncMentionCount();
-        return await handleSend();
-      });
-      ids = out.value;
-      if (!ids?.length) problem = out.warnings.join('\n') || '앱이 보내지 않았습니다(작성 칸 검사에서 멈춤).';
-    } catch (e: any) {
-      problem = e?.message || String(e);
+      const files: File[] = [];
+      const given = new Map<File, { path: string; cacheId: string }>();
+      for (const r of refs) {
+        try {
+          const got = await agentFileFromPath(r.path);
+          files.push(got.file);
+          given.set(got.file, { path: r.path, cacheId: got.cacheId });
+        } catch (e: any) { throw new Error(`레퍼런스를 읽지 못했습니다: ${r.path}\n${e?.message || e}`); }
+      }
+      const rejected = await attachFilesTo(sink, files, f => given.get(f));
+      if (rejected.length) throw new Error(`레퍼런스를 붙이지 못했습니다:\n${rejected.join('\n')}`);
+    } catch (e: any) { return fail(e?.message || String(e)); }
+    const missing: string[] = [];
+    const html = agentPromptHtml(String(job.prompt || ''), getAssetNames(sink.list), agentElementPill(target.id), missing);
+    if (missing.length) {
+      const st2 = useAppStore.getState();
+      const bound = st2.assetCollections.find(c => c.id === st2.projectCollectionId[target.id])?.name;
+      return fail(`엘리먼트를 찾지 못했습니다: ${missing.join(', ')}\n(이 프로젝트에 연결된 컬렉션: ${bound ? `"${bound}"` : '없음'} — collections.list · collection.bind)`);
     }
-    if (problem) return fail(problem);
-    agentActiveRef.current.set(job.id, { projectId: pid, ids: ids!, last: '' });
-    await agentReport(job.id, { status: 'sent', project: proj.name, messages: agentCards(pid, ids!) });
+    const warnings: string[] = [];
+    let ids: string[] | undefined;
+    try {
+      ids = await sendRequest(
+        { projectId: target.id, promptHtml: html, settings: next, assets: sink.list, expectBillingKey: bill.key },
+        { warn: m => { warnings.push(m); } },
+      );
+    } catch (e: any) { return fail(e?.message || String(e)); }
+    if (!ids?.length) return fail(warnings.join('\n') || '앱이 보내지 않았습니다.');
+    agentActive.set(job.id, { projectId: target.id, ids, last: '' });
+    showToast(`[${target.name}] 에이전트 요청을 보냈어요 — 카드 ${ids.length}개${job.name ? ` (${job.name})` : ''}`, true);
+    await agentReport(job.id, { status: 'sent', project: target.name, projectId: target.id, messages: agentCards(target.id, ids), ...(warnings.length ? { warnings } : {}) });
   };
 
   /* ─── 에이전트 명령 (26.10.305~) ─── */
   // 설명서의 AGENT_COMMANDS(src/lib/agent-inbox.ts)와 짝 — 이름이 같아야 한다. 앱 버튼이 부르는 것과 같은 스토어 함수 ·
   // 화면 함수로 실행한다. 지우기와 과금 프로젝트 고르기는 없다(사용자 결정 2026-10-03 — 사람이 앱에서).
   const agentCmdReport = (id: string, body: Record<string, unknown>) =>
-    fetch(`/api/agent/commands/${encodeURIComponent(id)}/report`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    }).then(() => undefined, () => undefined);
+    agentPost(`/api/agent/commands/${encodeURIComponent(id)}/report`, body, 30000).then(() => undefined, () => undefined);
 
-  const agentFindProject = (ref: unknown) => {
-    const st = useAppStore.getState();
-    const s = ref === undefined || ref === null ? '' : String(ref).trim();
-    if (!s) {
-      const cur = st.projects.find(p => p.id === st.currentProjectId);
-      if (!cur) throw new Error('앱에 열린 프로젝트가 없습니다');
-      return cur;
-    }
-    const p = st.projects.find(x => x.id === s) || st.projects.find(x => x.name.trim() === s) || st.projects.find(x => mentionKey(x.name) === mentionKey(s));
-    if (!p) throw new Error(`프로젝트를 찾지 못했습니다: ${s}\n(있는 프로젝트: ${st.projects.slice(0, 40).map(x => x.name).join(', ')}${st.projects.length > 40 ? ' …' : ''})`);
-    return p;
-  };
   const agentFindCollection = (ref: unknown) => {
     const st = useAppStore.getState();
     const s = String(ref ?? '').trim();
@@ -4323,17 +3437,26 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       const st = useAppStore.getState();
       const groupName = (gid?: string) => st.projectGroups.find(g => g.id === gid)?.name ?? null;
       const collName = (cid?: string) => st.assetCollections.find(c => c.id === cid)?.name ?? null;
+      const shown = new Set(visibleProjectIds(st));
       return {
         current: st.projects.find(p => p.id === st.currentProjectId)?.name ?? null,
-        projects: st.projects.map(p => ({
-          id: p.id, name: p.name, group: groupName(p.groupId),
-          cards: p.messages.filter(m => m.role !== 'user').length,
-          collection: collName(st.projectCollectionId[p.id]), current: p.id === st.currentProjectId,
-        })),
+        features: AGENT_FEATURES,
+        projects: st.projects.map(p => {
+          // 26.10.2002~ 프로젝트 코드(과금)는 프로젝트마다 — 확인 카드가 프로젝트를 열지 않고 코드 · 권한을 보여 줄 수 있게.
+          const b = projectBilling(st, p.id);
+          const bo = billingOf(st, p.id);
+          return {
+            id: p.id, name: p.name, group: groupName(p.groupId),
+            cards: p.messages.filter(m => m.role !== 'user').length,
+            collection: collName(st.projectCollectionId[p.id]), current: p.id === st.currentProjectId, shown: shown.has(p.id),
+            billing: b ? { name: b.project, id: b.id || null } : null,
+            ...(b ? { allowedModels: MODELS.filter(m => isModelAllowed(m.id, bo)).map(m => m.id), fourK: isFourKAllowed(bo) } : {}),
+          };
+        }),
       };
     },
     'project.open': async (a) => {
-      const p = agentFindProject(a.project);
+      const p = agentResolveProject(a.projectId, a.project, '열 프로젝트');
       useAppStore.getState().setCurrentProjectId(p.id);
       return { project: p.name };
     },
@@ -4347,17 +3470,20 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         if (!g) throw new Error(`그룹을 찾지 못했습니다: ${a.group}\n(있는 그룹: ${st.projectGroups.map(x => x.name).join(', ') || '없음'})`);
         gid = g.id;
       }
-      const before = new Set(st.projects.map(p => p.id));
-      st.createProject(gid);
-      const made = useAppStore.getState().projects.find(p => !before.has(p.id));
+      // open:false(26.10.2002~) — 만들기만 하고 열지 않는다(화면 · 접힌 그룹 그대로). 안 주면 예전처럼 연다.
+      const open = a.open !== false;
+      const madeId = st.createProject(gid, { open });
+      const made = useAppStore.getState().projects.find(p => p.id === madeId);
       if (!made) throw new Error('프로젝트를 만들지 못했습니다');
       useAppStore.getState().renameProject(made.id, name);
       const final = useAppStore.getState().projects.find(p => p.id === made.id);
-      return { id: made.id, name: final?.name ?? name, opened: true };
+      return { id: made.id, name: final?.name ?? name, opened: open };
     },
-    'billing.list': async () => {
+    'billing.list': async (a) => {
       const st = useAppStore.getState();
-      const sel = projectBilling(st, st.currentProjectId);   // 앱의 지금 프로젝트(손대는 칸)의 코드
+      // 그 프로젝트의 코드 — project · projectId 를 주면 그 프로젝트, 안 주면 앱의 지금 프로젝트(손대는 칸).
+      const of = a.project || a.projectId ? agentResolveProject(a.projectId, a.project) : st.projects.find(p => p.id === st.currentProjectId);
+      const sel = projectBilling(st, of?.id ?? null);
       // 크레딧 대시보드의 숫자(영상 수 · 토큰)는 트래커가 준다 — 앱 서버가 이미 받아 오는 목록을 그대로 읽는다.
       let usage: any[] = [];
       try {
@@ -4366,6 +3492,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         if (j?.ok && Array.isArray(j.projects)) usage = j.projects;
       } catch { /* 숫자만 빠진다 */ }
       return {
+        project: of?.name ?? null,
         selected: sel?.project ?? null,
         projects: st.billingProjects.map(b => {
           const u = usage.find(x => (b.id && String(x.id || x.project_id || '') === b.id) || x.project === b.project) || {};
@@ -4395,7 +3522,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     },
     'collection.bind': async (a) => {
       const c = agentFindCollection(a.collection);
-      const p = agentFindProject(a.project);
+      const p = agentResolveProject(a.projectId, a.project, '연결할 프로젝트');
       useAppStore.getState().setProjectCollection(p.id, c.id);
       return { project: p.name, collection: c.name };
     },
@@ -4455,7 +3582,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       return { id: e.id, name: now?.name, category: now?.category, images: now?.images.length };
     },
     'cards.list': async (a) => {
-      const p = agentFindProject(a.project);
+      const p = agentResolveProject(a.projectId, a.project, '카드를 볼 프로젝트');
       const limit = Math.max(1, Math.min(100, Number(a.limit) || 20));
       let cards = p.messages.filter(m => m.role !== 'user').slice().reverse() as any[];
       if (a.status) cards = cards.filter(m => (m.status || 'queued') === a.status);
@@ -4508,19 +3635,22 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           return { cards: [id], project: p.name };
         } finally { agentWarnRef.current = null; }
       }
-      if (p.id !== useAppStore.getState().currentProjectId || p.id !== currentProjectId) throw new Error(`그 카드는 "${p.name}" 프로젝트에 있습니다 — project.open 으로 연 뒤 다시`);
-      const editor = contentEditableRef.current;
-      if (!editor) throw new Error('작성 칸이 없는 화면입니다(갤러리) — 채팅 화면에서 다시');
-      if (isGenerating) throw new Error('앱이 다른 생성을 보내는 중입니다 — 잠시 뒤 다시');
-      if (Date.now() - lastTypedAtRef.current < 4000) throw new Error('사용자가 작성 칸에 입력 중입니다 — 잠시 뒤 다시');
-      // 카드의 재생성 버튼과 같은 길(handleReuse → handleSend). 다만 작성 칸은 빌려 쓰고 되돌린다.
-      const out = await agentBorrow(p.id, editor, '에이전트가 카드를 다시 만드는 중…', async () => {
-        const ok = await handleReuse(m);
-        if (!ok) return undefined;
-        return await handleSend();
-      });
-      if (!out.value?.length) throw new Error(out.warnings.join('\n') || '다시 만들지 않았습니다');
-      return { cards: out.value, project: p.name };
+      // 26.10.2002~ 카드의 재생성 버튼과 같은 값(prepareReuse)을 메모리에서 만들어 같은 함수(sendRequest)로 그 프로젝트에
+      // 보낸다 — 작성 칸 · 설정 · 레퍼런스 칸을 건드리지 않고, 그 프로젝트를 열지 않아도 된다.
+      const notes: string[] = [];
+      const r = await prepareReuse(m, p.id, { warn: x => { notes.push(x); } });
+      if (!r.assetsOk) throw new Error(notes.join('\n') || '레퍼런스를 되살리지 못해 다시 만들지 않았습니다');
+      if (r.html === undefined) throw new Error('카드에 프롬프트가 없어 다시 만들 수 없습니다');
+      const now = useAppStore.getState().projects.find(x => x.id === p.id);
+      if (!now) throw new Error('프로젝트가 사라졌습니다');
+      const warnings = [...notes];
+      const ids = await sendRequest(
+        { projectId: p.id, promptHtml: r.html, settings: { ...now.settings, ...r.settings }, assets: r.assets ?? now.assets },
+        { warn: x => { warnings.push(x); } },
+      );
+      if (!ids?.length) throw new Error(warnings.join('\n') || '다시 만들지 않았습니다');
+      showToast(`[${p.name}] 에이전트가 카드를 다시 만들었어요 — 카드 ${ids.length}개`, true);
+      return { cards: ids, project: p.name, ...(warnings.length ? { warnings } : {}) };
     },
     'card.cancel': async (a) => {
       const { project: p, card: m } = agentFindCard(a.id);
@@ -4554,26 +3684,16 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   };
 
   const agentTick = async () => {
-    // 1) 보낸 요청의 카드 상태를 올린다(바뀐 때만). 전부 끝나면(성공 · 실패 · 지워짐) done.
-    for (const [jobId, a] of agentActiveRef.current) {
-      const cards = agentCards(a.projectId, a.ids);
-      const sig = JSON.stringify(cards);
-      if (sig === a.last) continue;
-      a.last = sig;
-      const finished = cards.every(c => c.status === 'succeeded' || c.status === 'failed' || c.status === 'missing');
-      if (finished) agentActiveRef.current.delete(jobId);
-      void agentReport(jobId, { status: finished ? 'done' : 'sent', messages: cards });
-    }
-    // 2) 새 요청 · 명령. 생성 요청은 받을 수 없는 때 peek(화면 상태만 알림) — 입력 중 · 생성 중 · 갤러리 화면.
-    //    명령은 그때도 받는다(작성 칸이 필요한 재생성은 명령 안에서 다시 따진다). 다른 일을 하는 중이면 둘 다 안 받는다.
-    //    ★ 손대는 칸만 받는다(나누기 26.10.2001~). 1) 은 칸마다 한다 — 자기가 보낸 작업의 카드는 손을 뗀 칸도 계속 올린다.
+    // ★ 손대는 칸만 한다(나누기 26.10.2001~) — 에이전트에게 '화면' 은 하나다.
     if (!activeRef.current) return;
+    // 1) 보낸 요청의 카드 상태를 올린다(앱에 하나 — 보낸 칸을 닫았어도).
+    agentReportProgress();
+    // 2) 새 요청 · 명령. 26.10.2002~ 작성 칸을 빌리지 않으므로 입력 중 · 생성 중 · 갤러리 화면이어도 받는다.
+    //    다른 요청을 보내는 중(busy)이면 상태만 알린다(peek).
     const st = useAppStore.getState();
     const proj = st.projects.find(p => p.id === st.currentProjectId);
-    const composer = !!contentEditableRef.current;
     const busy = agentBusyRef.current;
-    const peek = busy || isGenerating || !composer || !proj || proj.id !== currentProjectId
-      || Date.now() - lastTypedAtRef.current < 4000;
+    const peek = busy;
     const takeCommands = !busy;
     if (!busy) agentBusyRef.current = true;   // 응답을 기다리는 사이 다음 틱이 또 가져가지 않게
     let job: any = null;
@@ -4581,15 +3701,20 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     try {
       const res = await fetch('/api/agent/jobs/claim', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(15000),   // 26.10.2002~ 서버가 답을 안 하면 busy 가 안 풀려 줄 전체가 멈췄다
         body: JSON.stringify({
-          screen: agentScreenId, peek, takeCommands, composer,
+          // composer · generating 은 옛 커넥터가 '왜 아직 안 받나' 를 알리는 데 쓴다 — 26.10.2002~ 작성 칸 · 사용자 생성과
+          // 상관없이 받으므로 composer 는 늘 true, generating 은 '다른 에이전트 요청을 보내는 중' 이다.
+          screen: agentScreenId, peek, takeCommands, composer: true,
           project: proj?.name ?? null,
           billing: projectBilling(st, st.currentProjectId)?.project ?? null,
-          generating: isGenerating,
+          generating: busy,
           manual: agentManual().version,
           // 지금 과금 프로젝트로 쓸 수 있는 것 — 에이전트가 권한 없는 모델을 고르지 않게(설명서는 '무엇이 있나', 이건 '지금 되나').
           allowedModels: MODELS.filter(m => isModelAllowed(m.id, billingOf(st, st.currentProjectId))).map(m => m.id),
           fourK: isFourKAllowed(billingOf(st, st.currentProjectId)),
+          // 26.10.2002~ 프로젝트마다 코드가 있는지 — 서버가 '대상 프로젝트에 코드가 없는 작업' 을 내주지 않고 기다리게 한다.
+          ...(peek ? {} : { projects: st.projects.map(p => ({ id: p.id, name: p.name, billing: projectBilling(st, p.id)?.project ?? null })) }),
         }),
       });
       if (res.ok) {
@@ -4597,6 +3722,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         job = data?.job || null;
         commands = Array.isArray(data?.commands) ? data.commands : [];
         agentSyncManual(data?.manualVersion);
+        agentNoteWaiting(data?.waitingBilling);
       }
     } catch { /* 서버가 잠깐 없으면 다음 틱에 */ }
     if (busy) return;

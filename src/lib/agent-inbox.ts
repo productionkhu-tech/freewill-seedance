@@ -19,6 +19,11 @@ import { API_LIMITS } from './utils';
 
 export const AGENT_MODES: GenerationMode[] = GENERATION_MODES.map(m => m.id);
 
+// 이 앱이 하는 일(커넥터가 보고 길을 고른다 — 옛 앱이면 예전 길). 설명서 · projects.list · /api/agent/status 에 나간다.
+//   send-any-project (26.10.2002~): 요청의 projectId(또는 정확한 이름)로 보낸다 — 열린 프로젝트 · 작성 칸이 그대로다.
+//     과금은 그 프로젝트의 코드. 코드가 없으면 앱이 가져가지 않고 기다린다(작업 needsBilling). projects.list 에 프로젝트마다 billing.
+export const AGENT_FEATURES = ['send-any-project'];
+
 // 에이전트가 준 설정을 프로젝트 설정 위에 얹는다. 패널에서 고를 수 있는 값만 받고, 아니면 이유를 돌려준다.
 // 모델·모드가 바뀌면 패널에서 바꿀 때처럼 그 조합의 기본값에서 시작하고(settingsDefaultsFor), 준 값이 그 위에 덮인다.
 // 비율은 일부러 검사하지 않는다 — BytePlus 가 작업을 만들기 전에 검증해 과금 없이 거절한다(HANDOFF '무과금 API 프로브').
@@ -111,32 +116,34 @@ const SETTING_DOCS: Record<string, string> = {
 // ★ 지우기(카드·엘리먼트·컬렉션·프로젝트)와 과금 프로젝트 고르기는 일부러 없다(사용자 결정 2026-10-03 — 되돌리기
 //   어렵거나 돈이 가는 곳을 정하는 일은 사람이 앱에서). costs = 과금되는 명령(확인 카드를 받은 뒤에만).
 export const AGENT_COMMANDS: { name: string; args: string; does: string; costs?: boolean; composer?: boolean }[] = [
-  { name: 'projects.list', args: '{}', does: '프로젝트(사이드바) 목록 — 이름 · 그룹 · 카드 수 · 연결된 컬렉션 · 지금 열린 것' },
-  { name: 'project.open', args: '{ "project": "이름" }', does: '그 프로젝트를 연다(사이드바 클릭과 같음)' },
-  { name: 'project.create', args: '{ "name": "이름", "group"?: "그룹 이름" }', does: '새 프로젝트를 만들고 연다. 같은 이름이 있으면 앱 규칙대로 (1) 이 붙는다' },
-  { name: 'billing.list', args: '{}', does: '과금 프로젝트(프로젝트 코드) 목록과 앱의 지금 프로젝트에 골라 둔 코드 — 코드별 영상 수 · 토큰 · 2.5/4K 권한(크레딧 대시보드의 숫자). 고르는 건 사람이 앱에서' },
+  { name: 'projects.list', args: '{}', does: '프로젝트(사이드바) 목록 — id · 이름 · 그룹 · 카드 수 · 연결된 컬렉션 · 프로젝트 코드(billing: { name, id } — 없으면 null) · 그 코드로 쓸 수 있는 모델(allowedModels) · 4K(fourK) · 화면에 떠 있나(shown) · 지금 손대는 것(current)' },
+  { name: 'project.open', args: '{ "projectId"?: "id", "project"?: "이름" }', does: '그 프로젝트를 연다(사이드바 클릭과 같음) — 보내는 데는 필요 없다. 사람에게 보여 주고 싶을 때만' },
+  { name: 'project.create', args: '{ "name": "이름", "group"?: "그룹 이름", "open"?: false }', does: '새 프로젝트를 만든다. open:false 면 열지 않는다(화면 그대로 — 에이전트는 이걸 쓴다). 같은 이름이 있으면 앱 규칙대로 (1) 이 붙는다. 새 프로젝트는 프로젝트 코드가 비어 있다 — 사람이 골라야 보낼 수 있다' },
+  { name: 'billing.list', args: '{ "projectId"?: "id", "project"?: "이름" }', does: '과금 프로젝트(프로젝트 코드) 목록과 그 프로젝트(안 주면 앱의 지금 프로젝트)에 골라 둔 코드 — 코드별 영상 수 · 토큰 · 2.5/4K 권한(크레딧 대시보드의 숫자). 고르는 건 사람이 앱에서' },
   { name: 'collections.list', args: '{}', does: '어셋 라이브러리 — 컬렉션과 엘리먼트(이름 · 분류 · 설명 · 이미지 수), 연결된 프로젝트' },
   { name: 'collection.create', args: '{ "name": "이름" }', does: '컬렉션을 만든다. 같은 이름이 있으면 그걸 돌려준다(existed)' },
-  { name: 'collection.bind', args: '{ "collection": "이름", "project"?: "이름(없으면 지금 프로젝트)" }', does: '프로젝트에 컬렉션을 연결한다 — 프롬프트의 @{이름} 은 연결된 컬렉션에서 찾는다' },
+  { name: 'collection.bind', args: '{ "collection": "이름", "projectId" 또는 "project": "이름" }', does: '프로젝트에 컬렉션을 연결한다 — 프롬프트의 @{이름} 은 연결된 컬렉션에서 찾는다. 프로젝트는 꼭 적는다' },
   { name: 'elements.add', args: '{ "collection": "이름", "items": [{ "name": "이름", "category": "character|location|prop", "description"?: "설명", "images": ["이미지 경로", …] }] }', does: '엘리먼트를 등록한다(화면 등록과 같은 검사 · 원본 보관). 컬렉션에 같은 이름이 있으면 그 항목은 건너뛰고 알린다' },
   { name: 'element.update', args: '{ "collection": "이름", "name": "이름", "newName"?, "category"?, "description"?, "addImages"?: [경로], "replaceImages"?: [경로] }', does: '엘리먼트를 고친다' },
-  { name: 'cards.list', args: '{ "project"?: "이름", "limit"?: 20, "status"?: "succeeded|failed|running|queued", "starred"?: true }', does: '카드(생성 결과) 목록 — 최신순. 프롬프트 · 설정 · 상태 · 초안 여부 · 채택 · 다운로드 경로' },
+  { name: 'cards.list', args: '{ "projectId" 또는 "project": "이름", "limit"?: 20, "status"?: "succeeded|failed|running|queued", "starred"?: true }', does: '그 프로젝트의 카드(생성 결과) 목록 — 최신순. 프롬프트 · 설정 · 상태 · 초안 여부 · 채택 · 다운로드 경로. 프로젝트는 꼭 적는다' },
   { name: 'card.get', args: '{ "id": "카드 id" }', does: '카드 하나의 지금 상태 — 진행을 지켜볼 때' },
   { name: 'card.star', args: '{ "id": "카드 id", "on": true }', does: '채택(★)을 켜거나 끈다' },
   { name: 'card.download', args: '{ "id": "카드 id" }', does: '영상을 다운로드 폴더에 저장한다(카드의 다운로드 버튼과 같음) — 저장한 경로를 돌려준다' },
   { name: 'card.final', args: '{ "id": "초안 카드 id" }', does: '초안(480p) 카드로 1080p 본편을 만든다(같은 시드 · 구도) — 과금된다', costs: true },
-  { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 다시 만든다 — 과금된다', costs: true, composer: true },
+  { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 다시 만든다 — 그 카드의 프로젝트로(열지 않아도 됨) · 그 프로젝트의 코드로 과금된다', costs: true },
   { name: 'card.cancel', args: '{ "id": "카드 id" }', does: '대기 중(queued) 작업을 취소한다 — 이미 돌기 시작했으면 앱이 거절한다(그때는 과금된다)' },
 ];
 
 const RULES = [
-  '안 준 설정은 앱의 지금 설정을 따른다. 모델·모드를 바꾸면 그 조합의 기본값에서 시작한다.',
+  '보낼 프로젝트는 요청의 projectId(projects.list 의 id — 권장) 또는 project(사이드바 이름 그대로)로 정한다. 앱 화면(열린 프로젝트 · 작성 칸 · 설정 · 레퍼런스 칸)은 바뀌지 않고, 카드는 그 프로젝트에 생긴다. 같은 이름이 둘이면 보내지 않고 후보 id 를 돌려준다 — projectId 로 다시. 프로젝트를 안 적으면 보내지 않는다.',
+  '안 준 설정은 그 프로젝트의 지금 설정을 따른다(이번 요청에만 쓰고 프로젝트에 적지 않는다). 모델·모드를 바꾸면 그 조합의 기본값에서 시작한다.',
   '레퍼런스는 프롬프트에서 [Image N] · [Video N] · [Audio N] 으로 부른다 — 번호는 refs 에 넘긴 순서대로 종류별로 센다. 첫·끝 프레임은 refs 의 role(first_frame / last_frame)로 정한다.',
   '어셋 라이브러리의 엘리먼트는 프롬프트에서 @{이름} 으로 부른다 — 프로젝트에 연결된 컬렉션에서 찾고(collection.bind), 앱이 그 엘리먼트 이미지를 레퍼런스로 붙인다. 못 찾으면 보내지 않는다. 레퍼런스→영상 · 영상 편집 모드에서만 된다.',
   '비율·길이·해상도·개수·오디오는 프롬프트에 쓰지 말고 설정으로 넘긴다.',
   '프롬프트 본문에 소수 길이 지시(예: "4.5초로")를 쓰지 않는다 — BytePlus 가 내부 오류로 실패한다.',
   '오디오 생성과 마지막 프레임 받기는 같이 못 켠다 — 마지막 프레임을 켜면 오디오는 꺼져서 나간다.',
-  '과금 프로젝트(앱에서는 "프로젝트 코드", 비용이 가는 곳)는 앱의 프로젝트마다 따로 정해져 있고 사람이 앱에서 고른다. 권한이 필요한 모델과 4K 는 그 코드에 권한이 있어야 한다 — 지금 쓸 수 있는 것은 앱 상태(allowedModels · fourK — 앱의 지금 프로젝트 기준)에 나온다.',
+  '과금 프로젝트(앱에서는 "프로젝트 코드", 비용이 가는 곳)는 앱의 프로젝트마다 따로 정해져 있고 사람이 앱에서 고른다 — 에이전트는 고르지 않는다. 그 프로젝트에 코드가 없으면 앱은 요청을 가져가지 않고 기다린다(최대 10분, 작업 상태의 needsBilling) — 사람에게 시댄스에서 그 프로젝트의 "프로젝트 코드" 를 골라 달라고 할 것. 요청에 billing(코드 이름)을 적으면 그 프로젝트의 코드와 같을 때만 보낸다(다르면 실패 — 사람에게 확인).',
+  '권한이 필요한 모델과 4K 는 그 프로젝트 코드에 권한이 있어야 한다 — projects.list 의 프로젝트마다 allowedModels · fourK.',
   '비율은 앱이 미리 거르지 않는다 — 틀리면 BytePlus 가 과금 없이 거절한다.',
   '레퍼런스를 하나라도 못 붙이거나 앱이 경고로 멈추면 보내지 않고, 그 이유가 그대로 돌아온다.',
 ];
@@ -196,6 +203,7 @@ export function buildAgentManual(appVersion: string): AgentManual {
       video: { maxMB: v.maxSizeMB, omniMaxMB: OMNI_VIDEO_MAX_MB, minSec: v.minDuration, minPx: v.minPx, maxPx: v.maxPx, ratio: [v.minRatio, v.maxRatio], types: 'MP4·MOV·M4V·WebM' },
       audio: { maxMB: au.maxSizeMB, minSec: au.minDuration, types: 'WAV·MP3' },
     },
+    features: AGENT_FEATURES,
     rules: RULES,
     commands: AGENT_COMMANDS,
     models,
@@ -211,7 +219,8 @@ function manualText(m: any, version: string): string {
   const mb = (n: number) => `${n}MB`;
   L.push(`# 시댄스 사용 설명서 — 앱 ${m.appVersion}`, '');
   L.push(`설명서 버전 **${version}** — 보낼 때 jobs.json 의 "manual" 에 이 값을 그대로 적는다. 앱이 바뀌면 앱이 "업데이트됐으니 설명서를 다시 읽으라" 고 돌려보낸다.`);
-  L.push('이 PC 에 켜진 시댄스가 자기 코드(설정 패널과 같은 목록)에서 만든 것이다. 여기 없는 값은 보내지 않는다.', '');
+  L.push('이 PC 에 켜진 시댄스가 자기 코드(설정 패널과 같은 목록)에서 만든 것이다. 여기 없는 값은 보내지 않는다.');
+  L.push(`기능(features): ${m.features.join(', ')} — send-any-project: 프로젝트를 열지 않고 projectId 로 보낸다.`, '');
   L.push('## 공통', '');
   L.push(`- 한 요청에 ${m.outputCount.min}~${m.outputCount.max}개. 비율 — 시댄스: ${m.ratios.seedance.join(', ')} · Omni: ${m.ratios.omni.join(', ')}`);
   for (const r of m.rules) L.push(`- ${r}`);

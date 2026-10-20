@@ -6,6 +6,7 @@ import { copyImageToClipboard, validateImageFile, validateImageDimensions, valid
 import { HoverZoom } from './HoverZoom';
 import { ElementLibrary } from './ElementLibrary';
 import { sideOf } from '../lib/split';
+import { getAssetNames } from '../lib/send-request';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   // Gemini Omni 1.1 only — no Seedance model lists it, so allowedResolutions() filters it
@@ -175,20 +176,9 @@ function CustomSelect({ value, options, onChange, placeholder }: { value: string
   );
 }
 
-export function getAssetNames(assets: Asset[]) {
-  const counts = { image_url: 0, video_url: 0, audio_url: 0 };
-  return assets.map(asset => {
-    if (asset.role === 'first_frame') return { ...asset, name: 'Start Frame' };
-    if (asset.role === 'last_frame') return { ...asset, name: 'End Frame' };
-
-    counts[asset.type]++;
-    const prefix = asset.type === 'image_url' ? 'Image' : asset.type === 'video_url' ? 'Video' : 'Audio';
-    return { ...asset, name: `${prefix} ${counts[asset.type]}` };
-  });
-}
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjects, setProjectBilling, trackerReachable, split, paneFocus } = useAppStore();
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjects, setProjectBilling, trackerReachable, split, paneFocus, agentWaitingBilling } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
@@ -238,6 +228,8 @@ export function SettingsPanel() {
   const needsBillingSelection = !billingProjectKey; // strict: no code → block generation
   // 골라 둔 코드가 지금 목록에 없다(종료 직후 60초 확인 전 · 목록이 아직 옛것). 보낼 때도 막힌다(handleSend).
   const billingMissing = !!billingProjectKey && billingProjects.length > 0 && !findBillingProject(billingProjects, billingProjectKey);
+  // 이 프로젝트로 보내려는 에이전트 요청이 코드를 기다리는 수(26.10.2002~ — 서버가 코드가 생길 때까지 붙잡아 둔다, 10분).
+  const agentWaiting = agentWaitingBilling[project.id] || 0;
   const isOmni = modelProvider(settings.model) === 'gemini'; // Gemini Omni → different settings surface
   // The task as this model actually understands it. Never read settings.omniTask raw in
   // the render path — a project can hold a task belonging to the other Omni model.
@@ -694,7 +686,7 @@ export function SettingsPanel() {
         {/* 프로젝트 코드(과금 · 시트 연동) — Generation Settings 위. 생성하려면 반드시 골라야 한다(strict: 없으면 생성 불가).
             26.10.2001~ 왼쪽 프로젝트마다 따로 고르고 저장한다(Project.billingKey). 이름도 '프로젝트' 에서 '프로젝트 코드' 로
             바꿨다 — 왼쪽 목록의 프로젝트와 헷갈리지 않게(사용자 2026-10-20). 시트에서 종료되면 자동 해제 후 다시 고르기. */}
-        <div className={`bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection || billingMissing ? 'ring-2 ring-amber-400' : ''}`}>
+        <div className={`bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection || billingMissing || agentWaiting ? 'ring-2 ring-amber-400' : ''}`}>
           <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">프로젝트 코드</label>
           {/* ★ Empty list is not one state, it is three. Conflating them told users to go
               ask their PM about a roster that was sitting in the sheet the whole time —
@@ -719,6 +711,7 @@ export function SettingsPanel() {
               />
               {needsBillingSelection && <p className="text-[11px] text-amber-600">생성하려면 이 프로젝트의 코드를 고르세요.</p>}
               {billingMissing && <p className="text-[11px] text-amber-600">골라 둔 코드가 지금 목록에 없어요(종료됐거나 아직 확인 중) — 다시 골라 주세요.</p>}
+              {agentWaiting > 0 && <p className="text-[11px] text-amber-600">에이전트 요청 {agentWaiting}개가 이 프로젝트의 코드를 기다려요 — 고르면 바로 보내요(10분 지나면 취소).</p>}
             </>
           )}
         </div>
