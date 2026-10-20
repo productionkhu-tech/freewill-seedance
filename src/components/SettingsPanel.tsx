@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
@@ -188,8 +188,7 @@ export function getAssetNames(assets: Asset[]) {
 }
 
 export function SettingsPanel() {
-  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjectKey, billingProjects, setBillingProjectKey, trackerReachable, split, paneFocus } = useAppStore();
-  const needsBillingSelection = !billingProjectKey; // strict: no project → block generation
+  const { projects, currentProjectId, updateProjectSettings, addAsset, removeAsset, replaceAsset, setAssetOrder, assetCollections, projectCollectionId, mentionedElementImages, billingProjects, setProjectBilling, trackerReachable, split, paneFocus } = useAppStore();
   const [assetIdInput, setAssetIdInput] = useState('');
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
@@ -233,6 +232,12 @@ export function SettingsPanel() {
 
   if (!project) return null;
   const { settings, assets } = project;
+  // 이 프로젝트의 프로젝트 코드(과금) — 프로젝트마다 따로 · 저장(26.10.2001~, Project.billingKey). 아래 권한 · 4K ·
+  // 모델 목록은 전부 이 값으로 묻는다(예전 앱 전체 하나짜리와 이름이 같아서 아래 코드는 그대로 둔다).
+  const billingProjectKey = project.billingKey || '';
+  const needsBillingSelection = !billingProjectKey; // strict: no code → block generation
+  // 골라 둔 코드가 지금 목록에 없다(종료 직후 60초 확인 전 · 목록이 아직 옛것). 보낼 때도 막힌다(handleSend).
+  const billingMissing = !!billingProjectKey && billingProjects.length > 0 && !findBillingProject(billingProjects, billingProjectKey);
   const isOmni = modelProvider(settings.model) === 'gemini'; // Gemini Omni → different settings surface
   // The task as this model actually understands it. Never read settings.omniTask raw in
   // the render path — a project can hold a task belonging to the other Omni model.
@@ -316,9 +321,9 @@ export function SettingsPanel() {
   // handleSend applies applyTaskConstraints() to the PAYLOAD. Leave the mode, get your
   // ratio and duration back exactly as you set them.
   // Two very different situations, and calling both "권한 해제" would be wrong. On a fresh
-  // launch billingProjectKey is always empty (session-only), so a saved 4k setting lands here
-  // every single restart — telling the user their access was revoked would be alarming and
-  // false. Picking their project restores 4k immediately.
+  // project with no code yet (new · first open after the 26.10.2001 update) has an empty key, so
+  // a saved 4k setting lands here — telling the user their access was revoked would be alarming
+  // and false. Picking the project's code restores 4k immediately.
   const fourKBlockedReason = !billingProjectKey ? 'no-project' : 'no-permission';
   // Model-level grant (2.5). Derived every render like allow4k, so a sheet flip lands as
   // soon as the 60s poll updates billingProjects — no second copy of the truth to sync.
@@ -328,8 +333,8 @@ export function SettingsPanel() {
   // same treatment 4k gets in allowedResolutions() — a tier you don't have shouldn't be
   // selectable and then refused. Derived every render, so a sheet flip lands with the 60s poll.
   // ★ "No project picked yet" is NOT the same answer as "denied", and the list must not
-  // conflate them. billingProjectKey is session-only, so it is empty on EVERY fresh launch —
-  // filtering on it would mean the app opens claiming 2.5 doesn't exist, before it has any
+  // conflate them. A project with no code yet has an empty key —
+  // filtering on it would mean the panel claims 2.5 doesn't exist, before it has any
   // idea whether you have it. Nothing can be sent without a project anyway (handleSend
   // stops there first), so showing the full list while the answer is unknown gives nothing
   // away and costs nothing. Pick a project and the real answer applies immediately.
@@ -686,11 +691,11 @@ export function SettingsPanel() {
           펴지는 애니메이션(0.15초 + 0.15초)을 타서 패널 높이가 출렁였다 — 새로 그리면 그 자리에서 바로 뜬다(위아래
           AnimatePresence 의 initial={false}). 같은 프로젝트에서 모드를 바꿀 때의 애니메이션은 그대로다. */}
       <div key={project.id} className="p-4 space-y-6">
-        {/* 프로젝트 (시트 연동) — Generation Settings 위. 생성하려면 반드시 선택(strict:
-            없으면 생성 불가). 언제든 변경 가능. 큐 전송/로컬 프로젝트 전환엔 안 바뀌고,
-            진행→종료되면 자동 해제 후 재선택 요구. */}
-        <div className={`bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection ? 'ring-2 ring-amber-400' : ''}`}>
-          <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">프로젝트</label>
+        {/* 프로젝트 코드(과금 · 시트 연동) — Generation Settings 위. 생성하려면 반드시 골라야 한다(strict: 없으면 생성 불가).
+            26.10.2001~ 왼쪽 프로젝트마다 따로 고르고 저장한다(Project.billingKey). 이름도 '프로젝트' 에서 '프로젝트 코드' 로
+            바꿨다 — 왼쪽 목록의 프로젝트와 헷갈리지 않게(사용자 2026-10-20). 시트에서 종료되면 자동 해제 후 다시 고르기. */}
+        <div className={`bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection || billingMissing ? 'ring-2 ring-amber-400' : ''}`}>
+          <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">프로젝트 코드</label>
           {/* ★ Empty list is not one state, it is three. Conflating them told users to go
               ask their PM about a roster that was sitting in the sheet the whole time —
               the tracker just hadn't answered yet. trackerReachable carries the server's
@@ -699,20 +704,21 @@ export function SettingsPanel() {
             trackerReachable === false ? (
               <p className="text-[12px] text-amber-600">크레딧 트래커에 연결하지 못했습니다. 자동으로 다시 시도하는 중입니다.<br />(계속되면 PM에게 알려주세요)</p>
             ) : trackerReachable === null ? (
-              <p className="text-[12px] text-gray-500">프로젝트 목록을 불러오는 중…</p>
+              <p className="text-[12px] text-gray-500">프로젝트 코드 목록을 불러오는 중…</p>
             ) : (
-              <p className="text-[12px] text-amber-600">등록된 프로젝트가 없습니다. PM에게 문의하세요.<br />(프로젝트를 선택하기 전까지 생성할 수 없습니다)</p>
+              <p className="text-[12px] text-amber-600">등록된 프로젝트 코드가 없습니다. PM에게 문의하세요.<br />(코드를 고르기 전까지 생성할 수 없습니다)</p>
             )
           ) : (
             <>
               <CustomSelect
                 value={billingProjectKey}
-                onChange={(key) => setBillingProjectKey(key)}
+                onChange={(key) => setProjectBilling(project.id, key)}
                 // 값은 key(id 또는 'name:이름'), 화면에는 이름만 — id 는 보이지 않게.
                 options={billingProjects.map(p => ({ id: p.key || billingKeyOf(p), name: p.project }))}
-                placeholder="프로젝트 선택…"
+                placeholder="프로젝트 코드 선택…"
               />
-              {needsBillingSelection && <p className="text-[11px] text-amber-600">생성하려면 프로젝트를 선택하세요.</p>}
+              {needsBillingSelection && <p className="text-[11px] text-amber-600">생성하려면 이 프로젝트의 코드를 고르세요.</p>}
+              {billingMissing && <p className="text-[11px] text-amber-600">골라 둔 코드가 지금 목록에 없어요(종료됐거나 아직 확인 중) — 다시 골라 주세요.</p>}
             </>
           )}
         </div>
@@ -806,12 +812,12 @@ export function SettingsPanel() {
           {/* Model permission (tracker sheet column G → allow25). Mirrors the 4k chip:
               never rewrites the stored model, distinguishes "no project picked yet" from
               "this project isn't granted", and refreshes the grant when the user reaches
-              for the control. On a fresh launch billingProjectKey is always empty, so without
-              that distinction every restart would read as "your access was revoked". */}
+              for the control. A project with no code yet has an empty key, so without that
+              distinction it would read as "your access was revoked". */}
           {!modelAllowed && (
             <p className="text-[11px] text-amber-600 leading-snug -mt-1">
               {!billingProjectKey
-                ? `프로젝트를 선택하면 ${modelLabel} 사용 가능 여부가 확인됩니다.`
+                ? `프로젝트 코드를 고르면 ${modelLabel} 사용 가능 여부가 확인됩니다.`
                 : `이 프로젝트는 ${modelLabel} 권한이 없습니다`}
             </p>
           )}
@@ -856,14 +862,14 @@ export function SettingsPanel() {
           {fourKBlocked && (
             <p className="text-[11px] text-amber-600 leading-snug -mt-2">
               {fourKBlockedReason === 'no-project'
-                ? '프로젝트를 선택하면 4K가 복원됩니다.'
+                ? '프로젝트 코드를 고르면 4K가 복원됩니다.'
                 : '이 프로젝트는 4K 권한이 없습니다 · 전송 시 1080p'}
             </p>
           )}
           {fourKHidden && (
             <p className="text-[11px] text-gray-400 leading-snug -mt-2">
               {fourKBlockedReason === 'no-project'
-                ? '프로젝트를 선택하면 4K가 목록에 나옵니다.'
+                ? '프로젝트 코드를 고르면 4K가 목록에 나옵니다.'
                 : '4K는 이 프로젝트에 권한이 없어 목록에 없습니다 (크레딧 시트 · 4K 허용)'}
             </p>
           )}

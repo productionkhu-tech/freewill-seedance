@@ -614,7 +614,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
     // 읽지 못한 기록을 지키는 중이면 아무것도 쓰지 않는다(위 '못 읽음' 주석). 백업 미러도 같이 멈춘다.
     if (persistBlocked) { pendingWrite = null; return; }
     // ★ 저장할 것이 그대로면 아무것도 안 한다(26.10.701~). persist 는 set 이 불릴 때마다 — 저장하지 않는 칸
-    //   (trackerReachable · mentionedElementImages · billingProjectKey 등)만 바뀌어도 — 여기를 부른다. 그때마다 기록
+    //   (trackerReachable · mentionedElementImages · paneFocus 등)만 바뀌어도 — 여기를 부른다. 그때마다 기록
     //   전체(33MB)를 다시 직렬화하고 백업의 '5분 조용한 틈' 을 처음부터 다시 셌다(실측 2026-10-07: 켜 둔 앱이 20초~1분
     //   마다 바이트까지 같은 내용을 다시 썼다). store 는 불변 갱신이라(바꾸면 새 객체 — 저장 칸의 제자리 수정 0건 확인)
     //   최상위 칸의 참조만 비교하면 된다. 어셋 목록은 따로 저장되지만 그 백업은 여기서 예약하므로 같이 본다.
@@ -1029,6 +1029,12 @@ export interface Project {
                        // that finished after this is unseen. Stores the CLIP's time (not
                        // Date.now()) so the comparison is idempotent — re-marking while
                        // nothing new finished is a no-op and never writes.
+  // 프로젝트 코드(과금 프로젝트, 시트 연동)의 key — 이 프로젝트에서 만든 것은 이 코드로 시트에 찍힌다(26.10.2001~).
+  // 예전엔 앱 전체에 하나(세션 전용)였다. 작업창을 두 칸으로 나누자 "프로젝트(과금)는 당연히 왼쪽 프로젝트마다 달라야"
+  // 했다(사용자 2026-10-20). 저장한다(껐다 켜도 그대로), 새 프로젝트는 비어 있다(골라야 생성 가능 — 다른 건의 코드로
+  // 잘못 찍히지 않게). 시트에서 그 코드가 종료되면 App.tsx 60초 확인이 비운다(reconcileBillingSelection).
+  // ★ 이름이 아니라 key(BillingProject.key)다 — 이름은 POS 에서 바뀐다.
+  billingKey?: string;
 }
 
 interface AppState {
@@ -1053,33 +1059,30 @@ interface AppState {
   currentProjectId: string | null;
   autoDownload: boolean; // global toggle — auto-save every video when it succeeds
   setAutoDownload: (v: boolean) => void;
-  // Billing/tracking project (시트 연동). Session-only + app-global: picked once per
-  // launch, survives local-project switches AND queue sends, NOT persisted (restart
-  // → must re-pick). Distinct from the local `projects` sidebar workspaces.
-  // ★ 이름이 아니라 키(BillingProject.key)를 든다. 프로젝트 이름은 PM 프로그램(POS)에서 바뀔 수
-  // 있고, 이름으로 기억하면 이름이 바뀌는 순간 선택이 풀리고 Draft → 본편이 막힌다.
-  // 이름·권한이 필요하면 selectedBillingProject() 로 지금 목록에서 찾는다.
-  billingProjectKey: string;
+  // 프로젝트 코드(과금 프로젝트) 고르기 — 프로젝트마다(Project.billingKey, 26.10.2001~). 예전의 앱 전체 하나짜리
+  // billingProjectKey(세션 전용)는 없앴다 — 남겨 두면 어느 쪽을 읽는지 갈린다. 이름 · 권한은 projectBilling() 로.
+  setProjectBilling: (projectId: string, key: string) => void;
+  // 여러 프로젝트를 한 번에(60초 확인에서 종료된 코드를 비울 때 — set 한 번).
+  setProjectBillingMany: (updates: [string, string][]) => void;
   // allow4k mirrors the tracker sheet's Project_Status F column ("4K 허용"), refreshed
   // by the same 60s poll that carries status. Kept on this list rather than in its own
   // store field so a permission flip costs zero extra writes/renders.
-  // ★ The LIST is persisted; the SELECTION above is not. That split is the whole point.
+  // ★ The LIST is persisted. (The selection used to be session-only and app-global; since 26.10.2001
+  //   it is per project and persisted — Project.billingKey. What made persisting it dangerous was a
+  //   hydration clamp against POLICY wiping a stored '4k'; that clamp is structural now(modelResolutions),
+  //   so a stored key changes nothing at boot. Keep it structural.)
   // This list changes maybe once a week, but it used to be thrown away on every restart,
   // so a cold launch had exactly one way to fill it: a live GAS call. Measured 2026-08-05:
   // a cold Apps Script /exec takes 127s and then returns 404 (warm: 2s). For those minutes
   // the app showed "등록된 프로젝트가 없습니다. PM에게 문의하세요" and no work was possible.
   // Persisting the last known-good list makes a slow tracker invisible — the dropdown is
   // there instantly and the 60s poll corrects it in the background.
-  // Persisting the SELECTION would be a different matter and is still forbidden: see the
-  // hydration-clamp rule (isFourKAllowed returns false whenever billingProjectKey is empty,
-  // which is exactly what keeps a stored '4k' setting from being wiped at boot).
   billingProjects: BillingProject[];
   // Did the last tracker fetch actually land? null = 아직 모름 (boot). The server already
   // distinguishes "couldn't fetch" (ok:false) from "fetched, list is empty" (ok:true, []),
   // and App.tsx already acts on it — but the UI had no way to see it, so a dead tracker
   // was reported to the user as "your PM never registered you". Transient, never persisted.
   trackerReachable: boolean | null;
-  setBillingProjectKey: (key: string) => void;
   setBillingProjects: (list: BillingProject[]) => void;
   setTrackerReachable: (v: boolean) => void;
   // Transient (NOT persisted): # of images from elements currently @mentioned in
@@ -1879,9 +1882,9 @@ export function modelProvider(model: string): 'byteplus' | 'gemini' {
 // The docs also state "4k: Only supported by Seedance 2.0".
 //
 // ★ The hydration clamp MUST use this one, never allowedResolutions. Hydration runs at
-// boot, and billingProjectKey is session-only (starts empty) → the 4k permission is always
-// false at that moment. Clamping against policy there would wipe a saved '4k' setting on
-// every single restart. Structural validity is the right question for stored data; the
+// boot, before the tracker list has been checked (and a project may have no code yet) → the 4k
+// permission can be false at that moment. Clamping against policy there would wipe a saved '4k'
+// setting on restart. Structural validity is the right question for stored data; the
 // live permission gate belongs at render + send time.
 export function modelResolutions(model: string): string[] {
   const o = MODELS.find(m => m.id === model)?.res;
@@ -1959,10 +1962,18 @@ export function findBillingProject(list: BillingProject[], key: string | undefin
   }
   return undefined;
 }
-export function selectedBillingProject(state: {
-  billingProjectKey: string; billingProjects: BillingProject[];
-}): BillingProject | undefined {
-  return findBillingProject(state.billingProjects, state.billingProjectKey);
+// 그 프로젝트의 프로젝트 코드(과금) — 지금 목록에서 key 로 찾는다(26.10.2001~ 프로젝트마다). 없거나 종료면 undefined.
+export function projectBilling(state: {
+  projects: Project[]; billingProjects: BillingProject[];
+}, projectId: string | null | undefined): BillingProject | undefined {
+  const key = projectId ? state.projects.find(p => p.id === projectId)?.billingKey : undefined;
+  return findBillingProject(state.billingProjects, key);
+}
+// 권한 함수(isModelAllowed · isFourKAllowed)에 넘길 모양 — 그 프로젝트의 코드로 묻는다.
+export function billingOf(state: { projects: Project[]; billingProjects: BillingProject[] }, projectId: string | null | undefined):
+  { billingProjectKey: string; billingProjects: BillingProject[] } {
+  const key = projectId ? state.projects.find(p => p.id === projectId)?.billingKey : undefined;
+  return { billingProjectKey: key || '', billingProjects: state.billingProjects };
 }
 // 목록이 새로 들어왔을 때 선택을 어떻게 할지. 순수 함수라 App.tsx 의 60초 폴링과 시험이 같은
 // 답을 낸다.
@@ -1977,15 +1988,15 @@ export function reconcileBillingSelection(
   const same = next.find(p => (p.key || billingKeyOf(p)) === selKey);
   if (same) {
     const renamed = before && before.project !== same.project;
-    return { key: selKey, note: renamed ? `선택한 프로젝트의 이름이 바뀌었습니다: "${before!.project}" → "${same.project}"` : null };
+    return { key: selKey, note: renamed ? `프로젝트 코드의 이름이 바뀌었습니다: "${before!.project}" → "${same.project}"` : null };
   }
   const upgraded = findBillingProject(next, selKey);
   if (upgraded) return { key: upgraded.key, note: null };
   // id 는 화면에 보이지 않는다 — 이름을 모르면 이름 없이 말한다.
   const name = before?.project || (selKey.startsWith('name:') ? selKey.slice(5) : '');
   return { key: '', note: name
-    ? `선택했던 프로젝트 "${name}"가 종료되어 해제되었습니다. 새 프로젝트를 선택해주세요.`
-    : '선택했던 프로젝트가 종료되어 해제되었습니다. 새 프로젝트를 선택해주세요.' };
+    ? `프로젝트 코드 "${name}"가 종료되어 해제되었습니다. 그 프로젝트에서 새 코드를 골라 주세요.`
+    : '프로젝트 코드가 종료되어 해제되었습니다. 그 프로젝트에서 새 코드를 골라 주세요.' };
 }
 
 // Draft 의 과금 프로젝트를 지금 목록에서 찾는다: key → id → 이름(26.9.2306 이전 Draft) 순.
@@ -2004,7 +2015,7 @@ export function billingProjectOfDraft(
   return { hasOrigin, bill };
 }
 
-// Is 4k unlocked for the CURRENTLY selected billing project? Always derived, never
+// Is 4k unlocked for this billing project(프로젝트 코드 — 부르는 쪽이 그 프로젝트의 key 를 넣는다, billingOf)? Always derived, never
 // stored — so a grant/revoke in the sheet takes effect the moment the poll lands, with
 // no second copy of the truth to keep in sync. Fail-closed: no project selected, project
 // missing from the list, or field absent (older tracker) → false.
@@ -2012,7 +2023,7 @@ export function isFourKAllowed(state: {
   billingProjectKey: string;
   billingProjects: BillingProject[];
 }): boolean {
-  return selectedBillingProject(state)?.allow4k === true;
+  return findBillingProject(state.billingProjects, state.billingProjectKey)?.allow4k === true;
 }
 
 // Is this model permitted for the selected billing project? Models without a grant are
@@ -2023,14 +2034,14 @@ export function isFourKAllowed(state: {
 // This is the UI's copy of the answer. server.ts asks the tracker the same question again
 // before it forwards anything, because both inputs here are editable at rest: the roster
 // is persisted in IndexedDB and settings.model is stored per project.
-// state.billingProjectKey 에 선택된 키 대신 다른 키(Draft 의 프로젝트)를 넣어 물어도 된다.
+// billingProjectKey 에는 그 프로젝트의 코드(billingOf)나 다른 키(Draft 의 프로젝트)를 넣어 묻는다.
 export function isModelAllowed(model: string, state: {
   billingProjectKey: string;
   billingProjects: BillingProject[];
 }): boolean {
   const grant = MODEL_GRANTS[model];
   if (!grant) return true;
-  return selectedBillingProject(state)?.[grant] === true;
+  return findBillingProject(state.billingProjects, state.billingProjectKey)?.[grant] === true;
 }
 export function modelGrant(model: string): 'allow25' | undefined {
   return MODEL_GRANTS[model];
@@ -2050,10 +2061,32 @@ export const useAppStore = create<AppState>()(
       currentProjectId: null,
       autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
-      billingProjectKey: '',
       billingProjects: [],
       trackerReachable: null,
-      setBillingProjectKey: (key) => set({ billingProjectKey: key }),
+      // 프로젝트 코드 고르기(26.10.2001~) — 프로젝트에 적는다. 빈 문자열이면 비운다(필드째 지워 저장본에 '' 를 남기지 않음).
+      setProjectBilling: (projectId, key) => {
+        const p = get().projects.find(x => x.id === projectId);
+        if (!p || (p.billingKey || '') === key) return;
+        set((state) => ({
+          projects: state.projects.map(x => {
+            if (x.id !== projectId) return x;
+            const { billingKey: _old, ...rest } = x;
+            return key ? { ...rest, billingKey: key } : rest;
+          }),
+        }));
+      },
+      setProjectBillingMany: (updates) => {
+        const want = new Map(updates.filter(([pid, key]) => (get().projects.find(x => x.id === pid)?.billingKey || '') !== key));
+        if (!want.size) return;
+        set((state) => ({
+          projects: state.projects.map(x => {
+            if (!want.has(x.id)) return x;
+            const key = want.get(x.id)!;
+            const { billingKey: _old, ...rest } = x;
+            return key ? { ...rest, billingKey: key } : rest;
+          }),
+        }));
+      },
       setBillingProjects: (list) => set({ billingProjects: list }),
       // 값이 같으면 set 을 부르지도 않는다. persist 는 set 이 불릴 때마다(값이 그대로여도) 기록 전체를 다시
       // 저장하고 백업을 다시 예약한다 — 1분마다 도는 트래커 확인이 이것으로 1분마다 33MB 를 다시 썼고, 백업이
@@ -2784,8 +2817,8 @@ export const useAppStore = create<AppState>()(
         projectGroups: state.projectGroups,
         projectCollectionId: state.projectCollectionId,
         // Last known-good tracker list. Tiny (17 rows) next to `projects`, and it is what
-        // lets a launch survive a cold/slow/dead Apps Script. NOT billingProjectKey — the
-        // selection stays session-only on purpose (see the field's comment).
+        // lets a launch survive a cold/slow/dead Apps Script. 프로젝트마다 고른 코드는 프로젝트 안에
+        // (Project.billingKey, 26.10.2001~) — projects 와 같이 저장된다.
         billingProjects: state.billingProjects,
         recoveryScanned: state.recoveryScanned,
         deletedProjectIds: state.deletedProjectIds,

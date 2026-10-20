@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo } from 'react';
-import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, selectedBillingProject, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
+import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
-import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, type ChatMessage } from '../store';
+import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage } from '../store';
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
 import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
@@ -1563,7 +1563,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
 export function ChatArea({ projectId, slot = 0, split = false, active = true }: {
   projectId: string; slot?: 0 | 1; split?: boolean; active?: boolean;
 }) {
-  const { projects, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages, billingProjectKey } = useAppStore();
+  const { projects, addMessage, updateMessage, addAsset, removeAsset, elementAssets, projectCollectionId, assetCollections, setMentionedElementImages } = useAppStore();
   const currentProjectId: string | null = projectId;
   const paneProjectRef = useRef<string | null>(projectId);
   paneProjectRef.current = projectId;
@@ -1573,6 +1573,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 카드(MessageCard)가 부르는 화면 함수 — 렌더마다 바꿔 끼운다(아래 Render 바로 위). 카드에는 이 ref 하나만 넘어간다.
   const cardActions = useRef<CardActions>(null as unknown as CardActions);
   const project = projects.find((p) => p.id === currentProjectId);
+  // 이 칸 프로젝트의 프로젝트 코드(과금) — 프로젝트마다 따로 · 저장(26.10.2001~, Project.billingKey).
+  const billingProjectKey = project?.billingKey || '';
   // Block sends (reactive mirror for the button's disabled state) whenever no
   // project is picked — strict: no project ⇒ no generate. handleSend re-checks via
   // getState() so Enter & 재생성 are gated too; this is just the visual disable.
@@ -2643,13 +2645,13 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const m = resolveModelId(raw);
     return MODELS.some(x => x.id === m) ? { model: m } : { model: fallback, unknown: raw };
   };
-  // 지금 고른 과금 프로젝트로 그 모델을 쓸 수 있는가(과금 프로젝트는 사람이 고른다 — 안 골랐으면 보낼 때 묻는다).
+  // 그 프로젝트의 프로젝트 코드로 그 모델을 쓸 수 있는가(코드는 사람이 고른다 — 안 골랐으면 보낼 때 묻는다).
   const checkModelAllowed = (pid: string, sink: ReportSink) => {
     const st = useAppStore.getState();
     const model = st.projects.find(p => p.id === pid)?.settings.model;
-    const bill = selectedBillingProject(st);
+    const bill = projectBilling(st, pid);
     if (model && bill && !isModelAllowed(model, { billingProjectKey: bill.key, billingProjects: st.billingProjects })) {
-      sink.missing.push(`과금 프로젝트 '${bill.project}' 에 ${MODELS.find(m => m.id === model)?.name || model} 권한 없음`);
+      sink.missing.push(`프로젝트 코드 '${bill.project}' 에 ${MODELS.find(m => m.id === model)?.name || model} 권한 없음`);
     }
   };
   // '그때 설정 그대로' — 초기화한 뒤 작성 칸 · 레퍼런스 · 어셋(그때 연결한 컬렉션까지) · 모델 · 파라미터를 그 영상을 만든 그대로.
@@ -3439,26 +3441,25 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     // A project MUST be selected to generate — no exceptions, even if the list is
     // empty / offline (no project → no send). Every send path (Enter / 전송 버튼 /
     // 재생성) funnels through here. Read FRESH from the store (never a stale closure)
-    // → a just-picked project is always honored; the selection is app-global +
-    // session-only and only changes by deliberate dropdown pick, so a queue send /
-    // local-project switch never disturbs it.
+    // → a just-picked code is always honored. 26.10.2001~ 코드는 이 프로젝트의 것(Project.billingKey) —
+    // 작업창을 나눠도 칸마다 자기 프로젝트의 코드로 찍힌다.
     // 선택은 key 로 들고 있다 — 이름·id 는 지금 목록에서 찾는다(이름이 바뀌었으면 새 이름).
-    const bill = selectedBillingProject(useAppStore.getState());
+    const bill = projectBilling(useAppStore.getState(), project.id);
     if (!bill) {
-      warn(useAppStore.getState().billingProjectKey
-        ? '선택한 프로젝트를 목록에서 찾을 수 없습니다.\n프로젝트를 다시 선택해주세요.'
-        : '프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)');
+      warn(project.billingKey
+        ? '이 프로젝트의 프로젝트 코드를 목록에서 찾을 수 없습니다(종료됐을 수 있어요).\n코드를 다시 골라 주세요.'
+        : '이 프로젝트의 프로젝트 코드를 먼저 골라 주세요.\n(설정 패널 맨 위 "프로젝트 코드")');
       return;
     }
     // ★ Model grant (tracker sheet column G → allow25). Blocks rather than downgrading:
     // clamping 4k→1080p is a graceful loss of a knob, but silently swapping 2.5 for 2.0
     // would hand back a different model's output under the user's own settings. And the
-    // stored settings.model is left ALONE — permission is false on every fresh launch
-    // (billingProjectKey is session-only), so rewriting it here would knock every saved 2.5
-    // project back to 2.0 on restart. Same rule as the 4k hydration clamp in §5-2.
-    if (!isModelAllowed(project.settings.model, useAppStore.getState())) {
+    // stored settings.model is left ALONE — permission can be false before the tracker list
+    // lands or while a project has no code yet, so rewriting it here would knock a saved 2.5
+    // project back to 2.0. Same rule as the 4k hydration clamp in §5-2.
+    if (!isModelAllowed(project.settings.model, billingOf(useAppStore.getState(), project.id))) {
       const label = MODELS.find(m => m.id === project.settings.model)?.name || '이 모델';
-      warn(`"${bill.project}" 프로젝트는 ${label} 권한이 없습니다.\n(다른 모델로 바꾸면 바로 생성할 수 있습니다.)`);
+      warn(`프로젝트 코드 "${bill.project}" 는 ${label} 권한이 없습니다.\n(다른 모델로 바꾸면 바로 생성할 수 있습니다.)`);
       return;
     }
 
@@ -3593,7 +3594,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     // would yank the config out from under the user. Instead it shows a locked chip and
     // we clamp here, at the moment the queue is fired, exactly as intended.
     {
-      const allow4k = isFourKAllowed(useAppStore.getState());
+      const allow4k = isFourKAllowed(billingOf(useAppStore.getState(), project.id));
       const clamped = clampResolution(currentSettings.model, currentSettings.resolution, allow4k);
       if (clamped !== currentSettings.resolution) {
         const was4k = currentSettings.resolution === '4k';
@@ -3708,8 +3709,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     for (let i = 0; i < outputCount; i++) {
       const id = crypto.randomUUID();
       systemMessageIds.push(id);
-      // 보낼 때의 프로젝트를 메시지에 굽는다. billingProjectKey 는 세션 전용이라 앱을 껐다
-      // 켜면 비어 있고, 시트에서 이름이 바뀔 수도 있다 — NCP 폴더를 되찾는 힌트다.
+      // 보낼 때의 프로젝트 코드를 메시지에 굽는다. 프로젝트의 코드는 나중에 바뀔 수 있고 시트에서 이름이
+      // 바뀔 수도 있다 — 이 카드가 어디로 찍혔는지 · NCP 폴더를 되찾는 힌트다.
       addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, usedCollection: boundCollectionOf(project.id), videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key } } as any);
     }
     setTimeout(() => scrollToBottom(), 150);
@@ -3819,7 +3820,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const omniResolution = (): string | undefined => {
       if (modelResolutions(s.model).length <= 1) return undefined;
       const st = useAppStore.getState();
-      return clampResolution(s.model, s.resolution, isFourKAllowed(st));
+      return clampResolution(s.model, s.resolution, isFourKAllowed(billingOf(st, project.id)));
     };
     // Element @mentions only mean something for reference_to_video, where they become
     // <IMAGE_REF_N>. Switching the task clears the ASSETS but not the PROMPT, so a pill
@@ -4042,7 +4043,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       const ids: string[] = [];
       // 과금 프로젝트는 보낼 때 한 번 정한다(handleSend 가 이미 있는지 확인했다). 이름은 NCP 폴더,
       // id·key 는 이름이 바뀌어도 같은 프로젝트를 가리키는 값.
-      const omniBill = selectedBillingProject(useAppStore.getState());
+      const omniBill = projectBilling(useAppStore.getState(), project.id);
       const omniStorage = { project: omniBill?.project || '', projectId: omniBill?.id || '', projectKey: omniBill?.key || '' };
       for (let i = 0; i < count; i++) {
         const id = crypto.randomUUID(); ids.push(id);
@@ -4196,9 +4197,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (!proj || !editor) return fail('앱에 열린 프로젝트가 없습니다. 앱에서 프로젝트를 연 뒤 다시 보내 주세요.');
     if (proj.id !== currentProjectId) return fail('받는 순간 앱의 프로젝트가 바뀌어 보내지 않았습니다. 다시 보내 주세요.');
     if (job.project && job.project !== proj.name.trim()) return fail(`앱에 열린 프로젝트는 "${proj.name}" 입니다(요청: "${job.project}"). 그 프로젝트를 연 뒤 다시 보내 주세요.`);
-    // 과금 프로젝트도 확인 카드에서 본 그대로여야 한다 — 그 사이 드롭다운을 바꿨으면 다른 프로젝트에 과금된다.
-    const billNow = selectedBillingProject(st)?.project ?? null;
-    if (job.billing && job.billing !== billNow?.trim()) return fail(`앱에서 고른 과금 프로젝트는 ${billNow ? `"${billNow}"` : '(선택 없음)'} 입니다(요청: "${job.billing}"). 확인한 뒤 다시 보내 주세요.`);
+    // 프로젝트 코드도 확인 카드에서 본 그대로여야 한다 — 그 사이 그 프로젝트의 코드를 바꿨으면 다른 곳에 과금된다.
+    const billNow = projectBilling(st, proj.id)?.project ?? null;
+    if (job.billing && job.billing !== billNow?.trim()) return fail(`그 프로젝트의 프로젝트 코드는 ${billNow ? `"${billNow}"` : '(고르지 않음)'} 입니다(요청: "${job.billing}"). 확인한 뒤 다시 보내 주세요.`);
     const plan = agentSettings(proj.settings, job.settings && typeof job.settings === 'object' ? job.settings : {});
     if (!plan.next) return fail(plan.error || '설정을 읽지 못했습니다');
     const next = plan.next;
@@ -4356,7 +4357,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     },
     'billing.list': async () => {
       const st = useAppStore.getState();
-      const sel = selectedBillingProject(st);
+      const sel = projectBilling(st, st.currentProjectId);   // 앱의 지금 프로젝트(손대는 칸)의 코드
       // 크레딧 대시보드의 숫자(영상 수 · 토큰)는 트래커가 준다 — 앱 서버가 이미 받아 오는 목록을 그대로 읽는다.
       let usage: any[] = [];
       try {
@@ -4371,7 +4372,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           return { name: b.project, status: b.status, videos: u.videoCount ?? null, tokens: u.tokens ?? null,
             allow25: !!b.allow25, allow4k: !!b.allow4k, selected: !!sel && sel.key === b.key };
         }),
-        note: '과금 프로젝트를 고르는 건 사람이 앱 설정 패널 맨 위 "프로젝트" 에서 한다',
+        note: '프로젝트 코드(과금)는 프로젝트마다 다르고, 고르는 건 사람이 앱 설정 패널 맨 위 "프로젝트 코드" 에서 한다',
       };
     },
     'collections.list': async () => {
@@ -4583,12 +4584,12 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         body: JSON.stringify({
           screen: agentScreenId, peek, takeCommands, composer,
           project: proj?.name ?? null,
-          billing: selectedBillingProject(st)?.project ?? null,
+          billing: projectBilling(st, st.currentProjectId)?.project ?? null,
           generating: isGenerating,
           manual: agentManual().version,
           // 지금 과금 프로젝트로 쓸 수 있는 것 — 에이전트가 권한 없는 모델을 고르지 않게(설명서는 '무엇이 있나', 이건 '지금 되나').
-          allowedModels: MODELS.filter(m => isModelAllowed(m.id, st)).map(m => m.id),
-          fourK: isFourKAllowed(st),
+          allowedModels: MODELS.filter(m => isModelAllowed(m.id, billingOf(st, st.currentProjectId))).map(m => m.id),
+          fourK: isFourKAllowed(billingOf(st, st.currentProjectId)),
         }),
       });
       if (res.ok) {
@@ -4645,20 +4646,20 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     // ★ 이름이 아니라 key 로 찾는다. Draft 를 만든 뒤 프로젝트 이름이 바뀌어도(POS) 같은 프로젝트를
     //   찾고, 보낼 때는 '지금 이름' 을 쓴다. 이름으로 찾던 때는 이름이 바뀌는 순간 "권한 없음" 으로
     //   영구히 막혔다. key 가 없는 Draft(26.9.2306 이전)는 이름으로 찾는다. Draft 에 프로젝트 기록이
-    //   아예 없으면 지금 선택된 프로젝트를 쓴다.
+    //   아예 없으면 그 초안이 있는 프로젝트의 코드를 쓴다(26.10.2001~ 코드는 프로젝트마다).
     const vs = base.videoStorage || {};
     const origin = billingProjectOfDraft(st.billingProjects, vs);
     const hasOrigin = origin.hasOrigin;
-    const bill = hasOrigin ? origin.bill : selectedBillingProject(st);
+    const bill = hasOrigin ? origin.bill : projectBilling(st, owner.id);
     if (!bill) {
       // '권한 없음' 이 아니라 실제 이유를 말한다 — 목록(진행 중인 프로젝트)에 없는 것이다.
       warn(hasOrigin
         ? `이 Draft 의 프로젝트(${vs.project || '알 수 없음'})가 종료되었거나 목록에 없어 본편을 만들 수 없습니다.`
-        : '프로젝트를 먼저 선택해주세요.\n(설정 패널 맨 위 "프로젝트" 드롭다운)');
+        : '이 프로젝트의 프로젝트 코드를 먼저 골라 주세요.\n(설정 패널 맨 위 "프로젝트 코드")');
       return;
     }
     if (!isModelAllowed(model, { billingProjectKey: bill.key, billingProjects: st.billingProjects })) {
-      warn(`"${bill.project}" 프로젝트는 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 없습니다.`);
+      warn(`프로젝트 코드 "${bill.project}" 는 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 없습니다.`);
       return;
     }
 

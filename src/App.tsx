@@ -196,10 +196,22 @@ export default function App() {
         if (changed) useAppStore.getState().setBillingProjects(active);
         // 선택은 이름이 아니라 key 로 유지한다. 이름만 바뀐 프로젝트는 선택된 채로 남고(알림만),
         // 목록에서 정말 사라졌을 때(종료)만 풀린다. 규칙은 store.ts / reconcileBillingSelection.
-        const selKey = useAppStore.getState().billingProjectKey;
-        const { key, note } = reconcileBillingSelection(prev, active, selKey);
-        if (key !== selKey) useAppStore.getState().setBillingProjectKey(key);
-        if (note) setProjectEndedNote(note);
+        // 26.10.2001~ 코드는 프로젝트마다(Project.billingKey) — 프로젝트마다 같은 규칙을 돌리고 한 번에 쓴다.
+        // ★ 받은 목록이 비었으면 아무것도 풀지 않는다. 코드가 저장되므로(예전엔 세션 전용) 트래커가 잠깐 빈 목록을
+        //   주면 모든 프로젝트의 코드가 한꺼번에 풀려 다시 골라야 했다. 진짜로 다 종료됐으면 보낼 때 서버가 막는다.
+        if (active.length > 0) {
+          const updates: [string, string][] = [];
+          const notes = new Map<string, string[]>();   // 안내 문구 → 그 코드를 쓰던 프로젝트들
+          for (const p of useAppStore.getState().projects) {
+            if (!p.billingKey) continue;
+            const { key, note } = reconcileBillingSelection(prev, active, p.billingKey);
+            if (key !== p.billingKey) updates.push([p.id, key]);
+            if (note) notes.set(note, [...(notes.get(note) || []), p.name]);
+          }
+          if (updates.length) useAppStore.getState().setProjectBillingMany(updates);
+          if (notes.size) setProjectEndedNote([...notes].map(([n, names]) =>
+            `${n}${names.length ? ` (${names.slice(0, 3).join(', ')}${names.length > 3 ? ` 외 ${names.length - 3}개` : ''})` : ''}`).join('\n'));
+        }
       } catch {
         // network / abort / parse fail → keep current selection + list, retry sooner
         useAppStore.getState().setTrackerReachable(false);
@@ -247,7 +259,7 @@ export default function App() {
       <SettingsPanel />
       {projectEndedNote && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[80] w-[min(92%,30rem)] flex items-start gap-2.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl shadow-lg px-3.5 py-2.5">
-          <span className="text-[13px] leading-snug flex-1">{projectEndedNote}</span>
+          <span className="text-[13px] leading-snug flex-1 whitespace-pre-line">{projectEndedNote}</span>
           <button onClick={() => setProjectEndedNote(null)} className="shrink-0 text-amber-500 hover:text-amber-800 text-sm font-bold leading-none mt-0.5">✕</button>
         </div>
       )}
