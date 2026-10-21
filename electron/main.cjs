@@ -74,7 +74,7 @@ const COMPANY_ENV = [
 function preparePersonal() {
   for (const k of COMPANY_ENV) delete process.env[k];
   // 주소를 바꾸는 시험용 스위치도 설치본에서는 받지 않는다(진짜 BytePlus · 진짜 게이트웨이 키 확인으로만).
-  if (app.isPackaged) for (const k of ['SEEDANCE_BP_BASE', 'SEEDANCE_GATEWAY_URL', 'SEEDANCE_GATEWAY']) delete process.env[k];
+  if (app.isPackaged) for (const k of ['SEEDANCE_BP_BASE', 'SEEDANCE_GATEWAY_URL', 'SEEDANCE_GATEWAY', 'SEEDANCE_GEMINI_BASE']) delete process.env[k];
   if (!process.env.SEEDANCE_PERSONAL_KEYS_FILE || app.isPackaged) {
     process.env.SEEDANCE_PERSONAL_KEYS_FILE = path.join(app.getPath('userData'), 'personal-keys.bin');
   }
