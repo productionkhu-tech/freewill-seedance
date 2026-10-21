@@ -112,6 +112,10 @@ npx electron-builder --win --publish always
 태그가 가리킬 커밋은 그 저장소의 커밋이다(소스는 이 저장소 하나라 소스 커밋이 거기엔 없다). 초안 → 업로드 → 다시 받아 바이트 비교
 → 공개는 회사판과 같다(scratchpad 의 `release-gh-personal.mjs` 모양). asar 확인 때 package.json 에 `seedanceEdition: personal` ·
 `name: freewill-seedance-personal` 이 들어 있는지도 본다.
+**사람이 받는 링크는 고정** — 릴리스마다 설치 파일을 버전 없는 이름 `Freewill-Seedance-Personal-Setup.exe` 로 한 벌 더 올린다(같은 바이트).
+`https://github.com/productionkhu-tech/freewill-seedance-personal/releases/latest/download/Freewill-Seedance-Personal-Setup.exe` 가
+늘 최신을 바로 내려준다(사용자 2026-10-21: "링크 입력하면 EXE 받아지는 게"). 업데이터는 latest.yml 의 버전 이름만 보니 영향 없다.
+빠뜨리면 그 링크는 지난 판을 준다. 설치 파일은 서명이 없어 첫 실행에 'Windows의 PC 보호' → 추가 정보 → 실행(회사판도 같다).
 
 **`npx electron-builder` 를 파이프/체이닝에 물리지 마라.** 실행이 통째로 누락된다(에러도 안
 남는다). 단독 실행하고 릴리스 존재를 API 로 검증할 것.
