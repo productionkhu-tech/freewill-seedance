@@ -142,9 +142,11 @@ function personalStorageKind(): 'encrypted' | 'dev-plain' | 'none' {
 // ok:false = 키 파일은 있는데 지금 못 열었다(암호화가 아직 준비 안 됨 등). 그때 빈 키로 확정하면 그 실행 내내 키가 없는 것처럼 보이고,
 // 그 상태로 새 키를 저장하면 남은 키(R2 · Gemini)까지 지운다 — 업데이트 직후 자동으로 다시 켜진 실행에서 실제로 그랬다(26.10.2006 시험:
 // 키 파일 · 암호 열쇠는 그대로인데 그 한 번만 '없음'). 그래서 못 열면 확정하지 않고 다시 연다(ensurePersonalKeys · startServer).
+// 마지막으로 읽은 모양(값 없이) — 켤 때 기록(personal-boot.log)에 같이 남긴다. '파일이 있는데 없음' 같은 일을 밖에서 볼 수 있게.
+let personalReadInfo = '';
 function readPersonalKeysResult(): { ok: true; keys: PersonalKeys } | { ok: false; error: string } {
   const file = personalKeysFile();
-  if (!fs.existsSync(file)) return { ok: true, keys: {} };
+  if (!fs.existsSync(file)) { personalReadInfo = `파일 없음(${file})`; return { ok: true, keys: {} }; }
   const kind = personalStorageKind();
   if (kind === 'none') return { ok: false, error: '암호화가 아직 준비되지 않음' };
   try {
@@ -152,8 +154,9 @@ function readPersonalKeysResult(): { ok: true; keys: PersonalKeys } | { ok: fals
     const text = kind === 'encrypted' ? personalSafeStorage().decryptString(raw) : raw.toString('utf8');
     // ★ 빈 글자는 '못 읽음' 이다. 우리가 쓴 파일은 늘 JSON 객체('{}' 이상)로 풀린다. 업데이트 직후 자동으로 다시 켜진 실행에서
     //   safeStorage 가 오류 없이 빈 글자를 돌려줬다(26.10.2007 시험 — 암호화 '준비됨' · 파일 그대로인데 '없음'). 빈 키로 확정하지 않고 다시 연다.
-    if (!text) return { ok: false, error: `복호화 결과가 비어 있음(${raw.length}B)` };
+    if (!text) { personalReadInfo = `${raw.length}B → 빈 글자`; return { ok: false, error: `복호화 결과가 비어 있음(${raw.length}B)` }; }
     const j = JSON.parse(text);
+    personalReadInfo = `${raw.length}B → ${text.length}자 · ${j && typeof j === 'object' ? `칸 ${Object.keys(j).join(',') || '없음'}` : typeof j}`;
     return { ok: true, keys: j && typeof j === 'object' ? j : {} };
   } catch (e: any) { return { ok: false, error: String(e?.message || e).slice(0, 160) }; }
 }
@@ -420,7 +423,7 @@ async function startServer() {
     const t0 = Date.now();
     const loaded = () => {
       const k = readPersonalKeys();
-      const line = `내 키: BytePlus ${k.byteplus ? '있음' : '없음'} · R2 ${k.r2 ? '있음' : '없음'} · Gemini ${k.gemini ? '있음' : '없음'} (${personalStorageKind()}${Date.now() - t0 > 50 ? ` · ${Date.now() - t0}ms 기다림` : ''})`;
+      const line = `내 키: BytePlus ${k.byteplus ? '있음' : '없음'} · R2 ${k.r2 ? '있음' : '없음'} · Gemini ${k.gemini ? '있음' : '없음'} (${personalStorageKind()}${Date.now() - t0 > 50 ? ` · ${Date.now() - t0}ms 기다림` : ''} · ${personalReadInfo})`;
       console.log(`[Personal] 개인판 — ${line}`);
       personalBootLog(line);
       checkCompanyKeyOnBoot(k);
