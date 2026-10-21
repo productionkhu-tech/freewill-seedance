@@ -1,6 +1,11 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// 판(회사판 · 개인판, 26.10.2005~) — main.cjs 가 설치본의 package.json 을 읽어 창을 만들 때 넘긴다(additionalArguments).
+// 화면은 이 값만 믿는다(src/lib/edition.ts).
+const edition = (process.argv.find((a) => a.startsWith('--seedance-edition=')) || '').split('=')[1] === 'personal' ? 'personal' : 'company';
+
 contextBridge.exposeInMainWorld('electronAPI', {
+  edition,
   download: (payload) => ipcRenderer.invoke('download', payload),
   clearCache: () => ipcRenderer.invoke('clear-cache'),
   getCacheSize: () => ipcRenderer.invoke('get-cache-size'),

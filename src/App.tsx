@@ -4,6 +4,8 @@ import { Workspace } from './components/Workspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useAppStore, billingKeyOf, reconcileBillingSelection } from './store';
 import { visibleProjectIds } from './lib/split';
+import { PERSONAL } from './lib/edition';
+import { PersonalKeysDialog, PersonalKeyBanner } from './components/PersonalKeys';
 
 export default function App() {
   const { projects, createProject, currentProjectId, _hasHydrated } = useAppStore();
@@ -78,7 +80,7 @@ export default function App() {
   // 팀 판별 결과를 한 번 확인한다. 실패는 조용히 넘어간다 — 확인 자체가 안 되는 것을
   // 팀을 모른다고 단정하면, 서버가 잠깐 늦게 뜬 것만으로 거짓 경고가 뜬다.
   useEffect(() => {
-    if (!_hasHydrated) return;
+    if (!_hasHydrated || PERSONAL) return;   // 개인판엔 팀이 없다
     fetch('/api/team')
       .then(r => r.ok ? r.json() : null)
       .then(j => { if (j && j.known === false) setTeamWarn('이 PC 의 API 키가 등록된 팀 목록에 없습니다.'); })
@@ -128,7 +130,8 @@ export default function App() {
   // fetch genuinely succeeded (ok:true) and the project is absent, so a network
   // blip / offline never wipes a valid in-session selection.
   useEffect(() => {
-    if (!_hasHydrated) return;
+    // 개인판은 시트를 쓰지 않는다 — 코드는 개인 한 줄로 고정(store.ts · edition.ts).
+    if (!_hasHydrated || PERSONAL) return;
     // ★ Three things this loop has to survive, all measured against the real tracker
     // on 2026-08-05: a cold Apps Script /exec takes 127s and answers 404; warm it is 2s.
     //   1) inFlight — the 60s interval used to fire regardless of whether the previous
@@ -276,6 +279,8 @@ export default function App() {
       )}
       {/* 작업 기록을 읽지 못해 이번 실행에서 저장을 멈췄다(store.ts '못 읽음' 주석). 닫기 버튼이 없다 —
           이 상태로 작업하면 저장되지 않으니, 보이는 동안은 계속 보여야 한다. */}
+      {PERSONAL && <PersonalKeyBanner />}
+      {PERSONAL && <PersonalKeysDialog />}
       {persistTrouble && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[95] w-[min(92%,36rem)] flex items-start gap-2.5 bg-red-50 border border-red-300 text-red-900 rounded-xl shadow-lg px-3.5 py-2.5">
           <span className="text-[13px] leading-snug flex-1">
@@ -285,7 +290,7 @@ export default function App() {
         </div>
       )}
       <div className="fixed bottom-1 right-2 text-[10px] text-gray-400 font-mono pointer-events-none select-none z-[999]">
-        v{__APP_VERSION__}
+        v{__APP_VERSION__}{PERSONAL ? ' · 개인판' : ''}
       </div>
     </div>
   );

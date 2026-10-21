@@ -16,6 +16,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // Shared with the client store — see src/lib/model-access.ts for why these two facts
 // live outside both files.
 import { MODEL_GRANTS, brandOf } from './src/lib/model-access';
+import { PERSONAL_BILLING } from './src/lib/edition';
 // 생성 결과물의 장기 보관소. R2(입력 임시 저장)와 역할이 겹치지 않는다 — ncp.ts 참고.
 import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
@@ -25,10 +26,20 @@ import {
   putPoster, presignPoster, hasPoster,
   presignPreview, previewState,
   lastNcpError, resetNcpBackoff,
-  initC2paIndex, taskIdForC2pa,
+  initC2paIndex, taskIdForC2pa, localPreviewPath,
 } from './ncp';
 
 dotenv.config();
+
+// ── 판(26.10.2005~) ── main.cjs 가 설치본의 package.json 을 보고 정해 둔다(개발 실행은 환경변수 — 격리 시험). 개인판은 회사 것을
+// 쓰지 않는다: 시트 보고 · 프로젝트 코드 확인 · 게이트웨이 키 · NCP · 회사 R2. 키는 사용자가 넣은 것(personal-keys.bin)만.
+const PERSONAL = process.env.SEEDANCE_EDITION === 'personal';
+// 회사 키 · 주소가 이 프로세스에 들어와 있으면 지운다 — main.cjs 가 이미 지우지만, 개발 실행의 .env(dotenv) 처럼 뒤에 들어오는 길이 있다.
+if (PERSONAL) {
+  for (const k of ['SEEDANCE_API_KEY', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET', 'NANOBANANA_STUDIO_KEY', 'SEEDANCE_GEMINI_KEY',
+    'SEEDANCE_TRACKER_URL', 'SEEDANCE_TRACKER_SECRET', 'SEEDANCE_TEAM', 'SEEDANCE_TEAM_LABEL',
+    'SEEDANCE_NCP_ACCESS_KEY_ID', 'SEEDANCE_NCP_SECRET_ACCESS_KEY', 'SEEDANCE_NCP_ENDPOINT', 'SEEDANCE_NCP_BUCKET']) delete process.env[k];
+}
 
 // 키 · 주소는 쓸 때마다 process.env 에서 읽는다(26.10.802~). 설치본은 앱을 켤 때 게이트웨이(electron/gateway.cjs)에서
 // 묶음을 받아 process.env 에 올리고, 켠 뒤 새 묶음이 오면 같은 실행 안에서 값이 바뀐다 — 상수로 잡아 두면 그 실행 내내 옛 키를 쓴다.
@@ -60,6 +71,8 @@ const r2Endpoint = () => process.env.R2_ENDPOINT || '';
 const r2KeyId = () => process.env.R2_ACCESS_KEY_ID || '';
 const r2Secret = () => process.env.R2_SECRET_ACCESS_KEY || '';
 const r2Bucket = () => process.env.R2_BUCKET || '';
+// 네 값이 다 있나 — 회사판은 없으면 켜지지 않고(아래 startServer), 개인판은 R2 가 선택이라 레퍼런스를 보낼 때만 필요하다.
+const r2Ready = () => !!(r2Endpoint() && r2KeyId() && r2Secret() && r2Bucket());
 
 // Credit tracker integration — POSTs token usage to a Google Apps Script endpoint
 // when a task succeeds. The team name is derived from the SEEDANCE_API_KEY env var
@@ -109,6 +122,143 @@ function teamName(): string {
   return TEAM_KEY_HASHES[crypto.createHash('sha256').update(k).digest('hex')] || 'UNKNOWN';
 }
 const reportedTasks = new Set<string>();
+
+// ── 개인판의 키(26.10.2005~) ─────────────────────────────────────────────────────────────────────────────
+// 사용자가 설정 › 내 키 에서 넣는다. 확인(무료 호출)을 거친 것만 저장하고, 저장은 이 PC · 이 Windows 계정만 여는 암호 파일
+// (safeStorage = DPAPI, main.cjs 가 넘겨준다). 화면은 값을 다시 받지 않는다 — 있는지 · 끝 네 글자만.
+// 서버는 다른 키처럼 process.env 에서 읽는다(아래 apiKey · r2* · 옴니) — 넣는 순간 다음 요청부터 그 키다.
+type PersonalKeys = { byteplus?: string; gemini?: string; r2?: { endpoint: string; bucket: string; keyId: string; secret: string } };
+const personalKeysFile = () => process.env.SEEDANCE_PERSONAL_KEYS_FILE
+  || path.join(path.dirname(process.env.MEDIA_CACHE_DIR || path.join(process.cwd(), 'media-cache')), 'personal-keys.bin');
+function personalSafeStorage(): any {
+  const ss = (globalThis as any).__seedanceSafeStorage;
+  try { return ss && typeof ss.isEncryptionAvailable === 'function' && ss.isEncryptionAvailable() ? ss : null; } catch { return null; }
+}
+// 설치본은 암호화만 — 못 하면 저장하지 않는다. 개발 실행(서버가 따로 뜬 node)은 safeStorage 가 없어 평문 파일(시험용).
+function personalStorageKind(): 'encrypted' | 'dev-plain' | 'none' {
+  if (personalSafeStorage()) return 'encrypted';
+  return process.env.NODE_ENV === 'production' ? 'none' : 'dev-plain';
+}
+function readPersonalKeys(): PersonalKeys {
+  try {
+    const raw = fs.readFileSync(personalKeysFile());
+    const ss = personalSafeStorage();
+    const text = ss ? ss.decryptString(raw) : (personalStorageKind() === 'dev-plain' ? raw.toString('utf8') : '');
+    const j = text ? JSON.parse(text) : {};
+    return j && typeof j === 'object' ? j : {};
+  } catch { return {}; }
+}
+function writePersonalKeys(k: PersonalKeys) {
+  const kind = personalStorageKind();
+  if (kind === 'none') throw new Error('이 PC 에서 키를 암호화할 수 없어 저장하지 않았어요.');
+  const file = personalKeysFile();
+  const text = JSON.stringify(k);
+  const ss = personalSafeStorage();
+  const buf: Buffer = ss ? ss.encryptString(text) : Buffer.from(text, 'utf8');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, buf);
+  // 다시 열어 한 글자도 안 다른지 본 뒤에만 바꿔 끼운다(secrets.cjs 와 같은 순서).
+  const back = ss ? ss.decryptString(fs.readFileSync(tmp)) : fs.readFileSync(tmp, 'utf8');
+  if (back !== text) { fs.rmSync(tmp, { force: true }); throw new Error('키 파일을 다시 읽어 보니 달라서 저장하지 않았어요.'); }
+  fs.renameSync(tmp, file);
+}
+function applyPersonalKeys(k: PersonalKeys) {
+  const put = (name: string, v?: string) => { if (v) process.env[name] = v; else delete process.env[name]; };
+  put('SEEDANCE_API_KEY', k.byteplus);
+  put('SEEDANCE_GEMINI_KEY', k.gemini);
+  put('R2_ENDPOINT', k.r2?.endpoint); put('R2_BUCKET', k.r2?.bucket);
+  put('R2_ACCESS_KEY_ID', k.r2?.keyId); put('R2_SECRET_ACCESS_KEY', k.r2?.secret);
+}
+let personalRefused: string | undefined;   // 켤 때 저장된 키를 지운 이유(화면 띠에 한 번)
+const tail4 = (v?: string) => (v || '').slice(-4);
+function personalStatus() {
+  const r2Set = !!(process.env.R2_ENDPOINT && process.env.R2_BUCKET && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY);
+  let host = '';
+  try { host = r2Set ? new URL(String(process.env.R2_ENDPOINT)).hostname : ''; } catch { /* */ }
+  return {
+    byteplus: { set: !!process.env.SEEDANCE_API_KEY, tail: tail4(process.env.SEEDANCE_API_KEY) },
+    gemini: { set: !!process.env.SEEDANCE_GEMINI_KEY, tail: tail4(process.env.SEEDANCE_GEMINI_KEY) },
+    r2: { set: r2Set, bucket: r2Set ? String(process.env.R2_BUCKET) : '', host },
+    ...(personalRefused ? { refused: personalRefused } : {}),
+    storage: personalStorageKind(),
+  };
+}
+// 회사 팀 키인가 — 앱에 박힌 해시 표(오프라인) + 게이트웨이(/v1/ticket — 새로 발급한 키 · 다시 발급한 옛 키까지 안다).
+// 키 원문은 보내지 않는다 — 입장권(HMAC)만(electron/gateway.cjs ticketOf 와 같은 식). true = 회사 키 · false = 아님 · null = 못 물어봄.
+const GATEWAY_DEFAULT = 'https://seedance-gateway.production-khu.workers.dev';
+async function isCompanyKey(key: string): Promise<boolean | null> {
+  if (TEAM_KEY_HASHES[crypto.createHash('sha256').update(key).digest('hex')]) return true;
+  const g = (process.env.SEEDANCE_GATEWAY_URL || '').trim().replace(/\/+$/, '');
+  const base = trustedUrl(g) ? g : GATEWAY_DEFAULT;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8000);
+  try {
+    const ticket = crypto.createHmac('sha256', key).update('seedance-ticket-v1').digest('hex');
+    const r = await fetch(`${base}/v1/ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket }), signal: ac.signal });
+    const j: any = await r.json().catch(() => ({}));
+    if (r.status === 200 && j?.ok) return true;
+    if (r.status === 404) return false;
+    return null;
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+// 무료 확인들 — 'ok' · 'invalid'(분명히 틀림) · 그 밖의 문자열(확인 못 함 — 이유).
+async function verifyBytePlus(key: string): Promise<string> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 15000);
+  try {
+    // 작업 목록 한 줄 — 만들지 않으니 과금 0.
+    const r = await fetch(`${bpTasks()}?page_num=1&page_size=1`, { headers: { Authorization: `Bearer ${key}` }, signal: ac.signal });
+    if (r.ok) return 'ok';
+    if (r.status === 401 || r.status === 403) return 'invalid';
+    return `HTTP ${r.status}`;
+  } catch (e: any) { return e?.name === 'AbortError' ? '응답 없음' : '인터넷 연결'; } finally { clearTimeout(timer); }
+}
+async function verifyGemini(key: string): Promise<string> {
+  const b = (process.env.SEEDANCE_GEMINI_BASE || '').trim().replace(/\/+$/, '');
+  const base = trustedUrl(b) ? b : 'https://generativelanguage.googleapis.com/v1beta';
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 15000);
+  try {
+    const r = await fetch(`${base}/models?pageSize=1`, { headers: { 'x-goog-api-key': key }, signal: ac.signal });
+    if (r.ok) return 'ok';
+    if (r.status === 400 || r.status === 401 || r.status === 403) return 'invalid';
+    return `HTTP ${r.status}`;
+  } catch (e: any) { return e?.name === 'AbortError' ? '응답 없음' : '인터넷 연결'; } finally { clearTimeout(timer); }
+}
+// R2 — 작은 파일을 올리고, 서명 주소로 받아 보고(BytePlus 가 가져가는 길), 지운다. 셋 다 돼야 쓸 수 있다.
+async function verifyR2(c: { endpoint: string; bucket: string; keyId: string; secret: string }): Promise<{ ok: boolean; message: string }> {
+  const client = new S3Client({ region: 'auto', endpoint: c.endpoint, credentials: { accessKeyId: c.keyId, secretAccessKey: c.secret }, forcePathStyle: true });
+  const Key = `seedance-key-check-${Date.now()}.txt`;
+  const why = (e: any) => {
+    const n = String(e?.name || e?.Code || '');
+    if (/InvalidAccessKeyId/.test(n)) return '액세스 키 ID 가 맞지 않아요.';
+    if (/SignatureDoesNotMatch/.test(n)) return '비밀 액세스 키가 맞지 않아요.';
+    if (/NoSuchBucket/.test(n)) return `버킷 "${c.bucket}" 이 없어요 — 이름을 확인해 주세요.`;
+    if (/AccessDenied/.test(n) || e?.$metadata?.httpStatusCode === 403) return '권한이 없어요 — 토큰 권한이 "객체 읽기 및 쓰기" 이고 이 버킷이 범위에 들어 있는지 확인해 주세요.';
+    if (/ENOTFOUND|ECONNREFUSED|EAI_AGAIN|fetch failed/i.test(String(e?.message || '') + ' ' + String(e?.code || ''))) return '엔드포인트에 닿지 않아요 — 주소를 확인해 주세요.';
+    return `확인하지 못했어요(${n || e?.message || e}).`;
+  };
+  try {
+    await client.send(new PutObjectCommand({ Bucket: c.bucket, Key, Body: Buffer.from('ok'), ContentType: 'text/plain' }));
+  } catch (e) { return { ok: false, message: '올려 보기 실패 — ' + why(e) }; }
+  try {
+    const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: c.bucket, Key }), { expiresIn: 120 });
+    const r = await fetch(url);
+    if (!r.ok || (await r.text()) !== 'ok') return { ok: false, message: `서명 주소로 받아 보기 실패(HTTP ${r.status}) — BytePlus 가 파일을 못 가져가요.` };
+  } catch (e) { return { ok: false, message: '서명 주소로 받아 보기 실패 — ' + why(e) }; }
+  try { await client.send(new DeleteObjectCommand({ Bucket: c.bucket, Key })); }
+  catch (e) { return { ok: false, message: '지워 보기 실패 — ' + why(e) + ' (생성이 끝난 레퍼런스를 못 지워 쌓여요)' }; }
+  return { ok: true, message: '올리기 · 받기 · 지우기 모두 확인했어요 — 저장했어요.' };
+}
+// 엔드포인트는 주소의 앞부분만 — 콘솔에서 버킷 경로까지 붙여 복사해 와도 받는다.
+function normalizeR2Endpoint(raw: string): string {
+  try {
+    const u = new URL(raw.trim());
+    const origin = `${u.protocol}//${u.host}`;
+    return trustedUrl(origin) ? origin : '';
+  } catch { return ''; }
+}
 
 // 트래커에 "우리 앱이 맞다" 고 증명하는 서명.
 //
@@ -235,18 +385,34 @@ const KEY_HELP = process.platform === 'win32'
   : '  프로젝트 폴더의 .env 파일에 값을 채우세요. (맥_실행_가이드.md 참고)';
 
 async function startServer() {
-  if (!apiKey()) {
+  if (PERSONAL) {
+    const k = readPersonalKeys();
+    applyPersonalKeys(k);
+    console.log(`[Personal] 개인판 — 내 키: BytePlus ${k.byteplus ? '있음' : '없음'} · R2 ${k.r2 ? '있음' : '없음'} · Gemini ${k.gemini ? '있음' : '없음'} (${personalStorageKind()})`);
+    // 저장된 키가 회사 팀 키면 지운다 — 넣을 때 게이트웨이에 못 물어봤거나(인터넷), 그 뒤 회사 키로 등록된 경우.
+    if (k.byteplus) void isCompanyKey(k.byteplus).then((company) => {
+      if (company !== true) return;
+      const cur = readPersonalKeys();
+      if (cur.byteplus !== k.byteplus) return;
+      delete cur.byteplus;
+      try { writePersonalKeys(cur); } catch { /* 지우지 못해도 이번 실행에서는 안 쓴다 */ }
+      applyPersonalKeys(cur);
+      personalRefused = '저장돼 있던 BytePlus 키가 회사 팀 키여서 지웠어요.\n개인판에는 본인 BytePlus 계정에서 만든 키만 넣을 수 있어요.';
+      console.warn('[Personal] 저장된 BytePlus 키가 회사 팀 키 — 지움');
+    });
+  }
+  if (!PERSONAL && !apiKey()) {
     console.error('\n  [ERROR] SEEDANCE_API_KEY 가 설정되지 않았습니다.');
     console.error(KEY_HELP + '\n');
     process.exit(1);
   }
-  if (!r2Endpoint() || !r2KeyId() || !r2Secret() || !r2Bucket()) {
+  if (!PERSONAL && !r2Ready()) {
     console.error('\n  [ERROR] R2_* 환경변수가 설정되지 않았습니다.');
     console.error(KEY_HELP);
     console.error('  필요한 변수: R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET\n');
     process.exit(1);
   }
-  console.log(`[Tracker] Resolved team: ${teamName()}`);
+  if (!PERSONAL) console.log(`[Tracker] Resolved team: ${teamName()}`);
 
   // R2 (S3-compatible) client. forcePathStyle: true so presigned URLs come out as
   // https://{account}.r2.cloudflarestorage.com/{bucket}/{key}?... — predictable for
@@ -444,7 +610,7 @@ async function startServer() {
   //
   // 대신 한 번 실패로 막지는 않는다. R2 검사와 달리 이건 네트워크를 타므로 순간적인
   // 실패가 있을 수 있어, 3초 간격으로 세 번 더 시도한 뒤에 포기한다.
-  {
+  if (!PERSONAL) {
     let ncpOk = await ensureNcp();
     for (let i = 1; i <= 3 && !ncpOk; i++) {
       console.log(`  [NCP] 보관소 연결 재시도 ${i}/3...`);
@@ -460,7 +626,7 @@ async function startServer() {
       process.exit(1);
     }
     void drainArchive();
-  }
+  } else void drainArchive();
   // 실패한 보관은 큐에 남는다. 다음 생성이 없어도 스스로 다시 시도하도록 주기적으로 깨운다.
   // 로컬 사본이 이미 있으면 원본 URL 이 죽은 뒤에도 성공할 수 있으므로 포기시키지 않는다.
   setInterval(() => { void drainArchive(); }, 10 * 60 * 1000).unref?.();
@@ -468,7 +634,7 @@ async function startServer() {
   // 이미 보관된 것들의 썸네일을 로컬로 확보한다. 영상이 NCP 에서 사라진 뒤에도
   // 무엇이었는지는 남아야 하는데, 사라진 뒤에는 받아올 곳이 없기 때문이다.
   // 기동을 막지 않도록 조금 늦춰 시작하고, 실패해도 조용히 넘어간다.
-  setTimeout(() => { void backfillPosters().catch(() => {}); }, 20000).unref?.();
+  if (!PERSONAL) setTimeout(() => { void backfillPosters().catch(() => {}); }, 20000).unref?.();
 
   // Cleanup files older than 30 days — mtime-based. Every cache READ/dedup-hit
   // refreshes mtime (touchCache below), so actively reused references never
@@ -532,6 +698,7 @@ async function startServer() {
   // Key is unique-per-upload: same source video reused across tasks gets fresh keys,
   // so deleting task A's object never breaks task B that hasn't fetched yet.
   async function uploadToR2(fileBuffer: Buffer, filename: string, opts?: { expiresIn?: number; contentType?: string; contentDisposition?: string }): Promise<string> {
+    if (!r2Ready()) throw new Error(PERSONAL ? 'R2 가 없어요 — 설정 패널 › 내 키 › R2 를 넣어 주세요.' : 'R2 설정이 없습니다.');
     const ext = path.extname(filename) || '.mp4';
     const safeBase = path
       .basename(filename, ext)
@@ -579,6 +746,7 @@ async function startServer() {
     try { fs.writeFileSync(PACK_INDEX, JSON.stringify(list)); } catch (e: any) { console.warn('[element-pack] index save failed:', e?.message); }
   };
   async function sweepExpiredPacks() {
+    if (!r2Ready()) return;
     const list = loadPackIndex();
     if (list.length === 0) return;
     const now = Date.now();
@@ -1372,10 +1540,84 @@ async function startServer() {
   // 더 나쁘다 — 집계는 나중에 고칠 수 있어도 멈춘 작업은 못 되돌린다.
   // 키가 아예 없는 경우는 여기까지 오지 않는다 — startServer() 첫 줄에서 이미
   // process.exit(1) 이다. 그래서 known:false 는 '키는 있는데 모르는 키' 하나뿐이다.
-  app.get('/api/team', (_req, res) => res.json({
+  app.get('/api/team', (_req, res) => PERSONAL ? res.json({ team: '개인', known: true }) : res.json({
     team: teamName(),
     known: teamName() !== 'UNKNOWN',
   }));
+
+  // ── 개인판 내 키(26.10.2005~) ── 회사판에서는 없다. 값은 받기만 하고 돌려주지 않는다(끝 네 글자만).
+  app.get('/api/personal/status', (_req, res) => {
+    if (!PERSONAL) return res.status(404).json({ error: 'not personal edition' });
+    res.json(personalStatus());
+  });
+  let personalSaving = false;
+  app.post('/api/personal/keys', async (req, res) => {
+    if (!PERSONAL) return res.status(404).json({ error: 'not personal edition' });
+    if (personalSaving) return res.status(409).json({ error: '앞의 저장이 아직 끝나지 않았어요.' });
+    personalSaving = true;
+    try {
+      const b = (req.body && typeof req.body === 'object') ? req.body : {};
+      const cur = readPersonalKeys();
+      const results: Record<string, { saved: boolean; ok: boolean; message: string }> = {};
+      let changed = false;
+      const looksLikeKey = (v: string) => /^[\x21-\x7e]{8,512}$/.test(v);
+      for (const w of Array.isArray(b.clear) ? b.clear : []) {
+        if (w !== 'byteplus' && w !== 'gemini' && w !== 'r2') continue;
+        if ((cur as any)[w]) { delete (cur as any)[w]; changed = true; }
+        results[w] = { saved: true, ok: true, message: '지웠어요.' };
+      }
+      if (typeof b.byteplus === 'string' && b.byteplus.trim()) {
+        const k = b.byteplus.trim();
+        if (!looksLikeKey(k)) results.byteplus = { saved: false, ok: false, message: '키 모양이 아니에요 — 공백 · 한글이 섞이지 않았는지 확인해 주세요.' };
+        else {
+          const company = await isCompanyKey(k);
+          if (company === true) {
+            results.byteplus = { saved: false, ok: false, message: '회사 팀 키는 개인판에 넣을 수 없어요.\n본인 BytePlus 계정에서 만든 키를 넣어 주세요.' };
+          } else {
+            const v = await verifyBytePlus(k);
+            if (v === 'invalid') results.byteplus = { saved: false, ok: false, message: 'BytePlus 가 이 키를 받지 않아요(401). 키를 다시 복사해 주세요.' };
+            else {
+              cur.byteplus = k; changed = true; personalRefused = undefined;
+              results.byteplus = { saved: true, ok: true, message: (v === 'ok' ? '확인했어요 — 저장했어요.' : `지금 확인하지 못했지만(${v}) 저장했어요. 생성할 때 BytePlus 가 다시 확인해요.`)
+                + (company === null ? '\n(회사 키인지 확인하지 못했어요 — 다음에 켤 때 다시 확인해요.)' : '') };
+            }
+          }
+        }
+      }
+      if (typeof b.gemini === 'string' && b.gemini.trim()) {
+        const k = b.gemini.trim();
+        if (!looksLikeKey(k)) results.gemini = { saved: false, ok: false, message: '키 모양이 아니에요 — 공백 · 한글이 섞이지 않았는지 확인해 주세요.' };
+        else {
+          const v = await verifyGemini(k);
+          if (v === 'invalid') results.gemini = { saved: false, ok: false, message: 'Google 이 이 키를 받지 않아요. 키를 다시 복사해 주세요.' };
+          else { cur.gemini = k; changed = true; results.gemini = { saved: true, ok: true, message: v === 'ok' ? '확인했어요 — 저장했어요.' : `지금 확인하지 못했지만(${v}) 저장했어요.` }; }
+        }
+      }
+      if (b.r2 && typeof b.r2 === 'object') {
+        const raw = b.r2 as Record<string, unknown>;
+        const c = {
+          endpoint: normalizeR2Endpoint(String(raw.endpoint || '')),
+          bucket: String(raw.bucket || '').trim(),
+          keyId: String(raw.keyId || '').trim(),
+          secret: String(raw.secret || '').trim(),
+        };
+        if (!c.endpoint) results.r2 = { saved: false, ok: false, message: '엔드포인트를 https:// 로 시작하는 주소로 넣어 주세요.' };
+        else if (!c.bucket || !c.keyId || !c.secret) results.r2 = { saved: false, ok: false, message: '네 칸(엔드포인트 · 버킷 · 키 ID · 비밀 키)을 모두 넣어 주세요.' };
+        else {
+          const v = await verifyR2(c);
+          if (v.ok) { cur.r2 = c; changed = true; }
+          results.r2 = { saved: v.ok, ok: v.ok, message: v.message };
+        }
+      }
+      if (changed) {
+        try { writePersonalKeys(cur); }
+        catch (e: any) { return res.status(500).json({ error: e?.message || '저장하지 못했어요.', results }); }
+        applyPersonalKeys(cur);
+      }
+      console.log(`[Personal] 내 키 ${Object.entries(results).map(([k, r]) => `${k}:${r.saved ? '저장' : '안 함'}`).join(' · ') || '변경 없음'}`);
+      res.json({ ok: true, results, status: personalStatus() });
+    } finally { personalSaving = false; }
+  });
 
   // ── 에이전트 작업함 (26.10.302~) ─────────────────────────────────────────────
   // 같은 PC 의 에이전트(Claude Code·Codex 의 freewill 커넥터)가 생성 요청을 넣는 곳. 서버는 받아 두기만
@@ -1795,6 +2037,11 @@ async function startServer() {
   app.get('/api/media/:taskId/preview', async (req, res) => {
     const taskId = String(req.params.taskId).replace(/[^A-Za-z0-9._-]/g, '');
     if (!taskId) return res.status(400).end();
+    if (PERSONAL) {   // 개인판 — PC 에 만들어 둔 것(ncp.ts keepLocal). 없으면 404 → 화면이 원본으로 넘어간다
+      const lp = localPreviewPath(taskId);
+      if (lp && previewState(taskId) === true && fs.existsSync(lp)) { touchCache(lp); return res.sendFile(lp); }
+      return res.status(404).json({ error: 'no preview', state: previewState(taskId) ?? null });
+    }
     const url = await presignPreview(taskId);
     if (!url) return res.status(404).json({ error: 'no preview', state: previewState(taskId) ?? null });
     try {
@@ -2068,6 +2315,7 @@ async function startServer() {
   }
 
   app.get('/api/projects', async (_req, res) => {
+    if (PERSONAL) return res.json({ ok: true, projects: [PERSONAL_BILLING] });   // 개인판엔 시트가 없다
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 25000);
     try {
@@ -2199,7 +2447,8 @@ async function startServer() {
 
   app.post('/api/gemini/generate', async (req, res) => {
     const shared = (process.env.NANOBANANA_STUDIO_KEY || '').trim();
-    const KEY = process.env.SEEDANCE_GEMINI_KEY || (shared && shared !== 'managed-by-gateway' ? shared : '');
+    const KEY = PERSONAL ? (process.env.SEEDANCE_GEMINI_KEY || '') : (process.env.SEEDANCE_GEMINI_KEY || (shared && shared !== 'managed-by-gateway' ? shared : ''));
+    if (!KEY && PERSONAL) return res.status(400).json({ error: '옴니는 Gemini 키가 있어야 해요 — 설정 패널 › 내 키 › Gemini 를 넣어 주세요.' });
     if (!KEY) { console.error('[Gemini] NANOBANANA_STUDIO_KEY not set'); return res.status(500).json({ error: 'NANOBANANA_STUDIO_KEY가 설정되지 않았습니다.' }); }
     console.log('[Gemini] Omni generate...');
     try {
@@ -2344,9 +2593,16 @@ async function startServer() {
     // receive them (unknown top-level fields can 400). The rest is forwarded as-is.
     const { project: billingProject, project_id: rawProjectId, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
     const billingProjectId = typeof rawProjectId === 'string' ? rawProjectId.trim() : '';
+    if (PERSONAL && !apiKey()) {
+      return res.status(400).json({ error: { message: '본인 BytePlus 키를 먼저 넣어 주세요 — 설정 패널 맨 위 "내 키".' } });
+    }
+    // 회사판: 개인판의 코드 자리(edition.ts PERSONAL_BILLING)는 시트에 없는 이름이다 — 시트 목록을 못 받은 순간(아래 fail-open)에도 받지 않는다.
+    if (!PERSONAL && billingProjectId === PERSONAL_BILLING.id) {
+      return res.status(400).json({ error: { message: '개인판의 코드로는 회사판에서 보낼 수 없습니다. 설정 패널 맨 위 "프로젝트 코드" 를 골라 주세요.' } });
+    }
     // 프로젝트 코드(과금) 없이는 만들지 않는다(26.10.2001~). 화면은 이미 막지만(handleSend · 본편), 어느 길로든 코드 없이
     // 만들어지면 시트에 주인 없는 줄이 남는다 — 조용히 틀리느니 여기서 분명히 거절한다. 태스크가 만들어지기 전이라 과금 0.
-    if (!(typeof billingProject === 'string' && billingProject.trim()) && !billingProjectId) {
+    if (!PERSONAL && !(typeof billingProject === 'string' && billingProject.trim()) && !billingProjectId) {
       console.warn('[Tracker] 프로젝트 코드 없는 생성 요청 — 거절');
       return res.status(400).json({ error: { message: '프로젝트 코드(과금)가 없어 보내지 않았습니다. 설정 패널 맨 위 "프로젝트 코드" 를 골라 주세요.' } });
     }
@@ -2354,7 +2610,7 @@ async function startServer() {
     // 그 코드가 지금 시트에서 '진행' 인지 · 4K 면 4K 권한이 있는지(26.10.2004~). 화면도 막지만(보낼 때 · 요청 직전) 화면의 목록은
     // 저장본이라, 앱이 꺼진 사이 종료된 코드는 켠 직후 첫 목록 확인 전까지 보낼 수 있었다. 서버가 가진 시트 목록으로 한 번 더.
     // 목록을 아직 못 받았으면(트래커가 죽었거나 콜드) 예전처럼 보낸다 — 시트가 늦다고 일을 멈추지 않는다(권한 모델은 아래가 막음).
-    {
+    if (!PERSONAL) {
       const roster = await getRosterFast();
       if (roster) {
         const row = (billingProjectId && roster.find((p: any) => String(p?.id || p?.project_id || '').trim() === billingProjectId))
@@ -2377,7 +2633,7 @@ async function startServer() {
     //   이름이 바뀐 직후(앱 목록이 아직 옛 이름) 권한 없음으로 막혔다. id 가 없거나(트래커 전용
     //   프로젝트) 로스터에 아직 없으면 이름으로 찾는다.
     const grant = MODEL_GRANTS[byteplusBody.model as string];
-    if (grant) {
+    if (grant && !PERSONAL) {   // 개인판은 본인 계정 — 모델 권한은 BytePlus 가 정한다
       const roster = await getRoster();
       if (!roster) {
         return res.status(503).json({ error: { message: '크레딧 시트를 확인할 수 없어 이 모델을 사용할 수 없습니다. 잠시 후 다시 시도해주세요.' } });
@@ -2436,7 +2692,7 @@ async function startServer() {
 
       // Remember which billing project this task belongs to (read at report time).
       const projName = typeof billingProject === 'string' ? billingProject : '';
-      if (response.ok && data?.id && (projName || billingProjectId)) {
+      if (!PERSONAL && response.ok && data?.id && (projName || billingProjectId)) {   // 개인판은 시트에 보고하지 않으니 기록할 것도 없다
         taskToProject.set(data.id, { project: projName, projectId: billingProjectId, sweep: true });
         taskProjectAt.set(data.id, Date.now());
         saveTaskProjects();   // 재시작을 넘겨야 하므로 만든 즉시 디스크에 남긴다
@@ -2466,7 +2722,7 @@ async function startServer() {
     // (reportedTasks dedupes), only on success with valid usage data, and any
     // failure here is swallowed so the polling response to the frontend is
     // never delayed or corrupted.
-    if (data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(taskId)) {
+    if (!PERSONAL && data?.status === 'succeeded' && data?.usage?.total_tokens && !reportedTasks.has(taskId)) {
       reportedTasks.add(taskId);
       markTask(taskId, { reported: true });   // 디스크에 — 다시 켜도 두 번 보고하지 않게
       // 26.10.2004~ 결과를 본다(예전엔 .catch(() => {}) 로 버려, GAS 가 콜드로 404 를 주거나 잠금 대기에 밀리면 그 줄이 시트에
@@ -2587,7 +2843,7 @@ async function startServer() {
   const SWEEP_MIN_AGE_MS = 120_000; // 막 만든 작업은 화면이 곧 묻는다
   let sweeping = false;
   async function sweepTasks() {
-    if (sweeping) return;
+    if (sweeping || PERSONAL) return;   // 개인판은 시트에 보고하지 않는다 — 챙길 것이 없다
     sweeping = true;
     try {
       const now = Date.now();
@@ -2650,7 +2906,7 @@ async function startServer() {
   //   (창 주소 · 메인 프로세스의 확인 요청 · start.bat/start.command) — 0.0.0.0 도 IPv4 라 localhost 동작은 같다.
   //   바깥 서비스(BytePlus · Gemini · NCP · 트래커)는 이 서버로 들어오지 않는다 — R2 링크 · 나가는 요청뿐.
   app.listen(PORT, '127.0.0.1', () => {
-    console.log(`\n  Freewill Seedance 2.0`);
+    console.log(`\n  ${PERSONAL ? 'Freewill Seedance Personal' : 'Freewill Seedance 2.0'}`);
     console.log(`  ========================`);
     console.log(`  http://localhost:${PORT}`);
     console.log(`  Press Ctrl+C to stop\n`);

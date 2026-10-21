@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
+import { PERSONAL } from '../lib/edition';
+import { PersonalKeysCard } from './PersonalKeys';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
@@ -686,6 +688,8 @@ export function SettingsPanel() {
         {/* 프로젝트 코드(과금 · 시트 연동) — Generation Settings 위. 생성하려면 반드시 골라야 한다(strict: 없으면 생성 불가).
             앱 전체에 하나(공동 코드, 26.10.2004~ — 작업창을 나눠도 하나, 저장). 2001~2003 은 프로젝트마다였다. 이름은 '프로젝트' 에서
             '프로젝트 코드' 로 바꿨다 — 왼쪽 목록의 프로젝트와 헷갈리지 않게(사용자 2026-10-20). 시트에서 종료되면 자동 해제 후 다시 고르기. */}
+        {/* 개인판(26.10.2005~)은 이 자리에 '내 키' — 코드는 개인 한 줄로 고정이라 고를 것이 없다(edition.ts). */}
+        {PERSONAL ? <PersonalKeysCard /> : (
         <div className={`bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-2 ${needsBillingSelection || billingMissing || agentWaiting ? 'ring-2 ring-amber-400' : ''}`}>
           <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">프로젝트 코드</label>
           {/* ★ Empty list is not one state, it is three. Conflating them told users to go
@@ -716,6 +720,7 @@ export function SettingsPanel() {
             </>
           )}
         </div>
+        )}
 
         {/* Generation Mode */}
         <div className="bg-white dark:bg-[#1c1c1e] p-4 rounded-[12px] shadow-[0_3px_15px_rgba(0,0,0,0.03)] space-y-4">

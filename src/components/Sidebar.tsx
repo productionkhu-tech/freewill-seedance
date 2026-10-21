@@ -8,6 +8,7 @@ import { cn, getBlobCacheStats, clearBlobCache } from '../lib/utils';
 import { GlobalGallery } from './GlobalGallery';
 import { sideOf, visibleProjectIds, type PaneSide } from '../lib/split';
 import { paneDragMove, paneDragEnd, paneDrop, paneSideAt } from '../lib/pane-drag';
+import { PERSONAL } from '../lib/edition';
 
 // ─── Project icon ────────────────────────────────────────────────────────────
 // Emoji are just characters — the OS font draws them (Apple emoji on macOS, Segoe UI
@@ -1360,11 +1361,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           title={`다운로드 폴더 열기\n${downloadDir}`}>
           <FolderOpen size={18} />
         </button>
-        <button onClick={openDashboard}
+        {!PERSONAL && <button onClick={openDashboard}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
           title="크레딧 대시보드 열기">
           <BarChart3 size={18} />
-        </button>
+        </button>}
         <button onClick={handleClearCache}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors mb-2"
           title={`캐시 정리 (${formatBytes(totalCacheBytes)})`}>
@@ -1484,12 +1485,13 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           </div>
           <span className="text-[10px] text-white/40">{theme === 'dark' ? 'ON' : 'OFF'}</span>
         </button>
-        <button onClick={openDashboard}
+        {/* 개인판엔 없다 — 회사 시트의 대시보드라서(사용량은 본인 BytePlus 콘솔에서 본다). */}
+        {!PERSONAL && <button onClick={openDashboard}
           className="w-full flex items-center gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
           title="크레딧 사용량 대시보드 열기 (외부 브라우저)">
           <BarChart3 size={14} />
           <span className="font-medium">📊 크레딧 대시보드</span>
-        </button>
+        </button>}
         <button onClick={handleClearCache}
           className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
           title="영상 미리보기 캐시 정리 (다운로드된 mp4는 영향 없음)">

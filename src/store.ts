@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { get, set, del, keys } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail, makeJpegPreview } from './lib/utils';
 import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
+import { PERSONAL, PERSONAL_BILLING } from './lib/edition';
 import { createBackupClock } from './lib/backup-clock';
 import { buildSettingsPayload, type SettingsPayload } from './lib/settings-box';
 import { pointAt, openAt, focusSlot, swapSides, closeSlot, afterRemoval, sanitizeSplit, repairSplit, splitValid, visibleProjectIds, type SplitLayout, type PaneSide, type PaneSlot, type PaneState } from './lib/split';
@@ -2159,13 +2160,15 @@ export const useAppStore = create<AppState>()(
       deletedProjectIds: [],
       projects: [],
       currentProjectId: null,
-      autoDownload: false,
+      // 개인판은 기본으로 켠다 — 회사판처럼 NCP 가 받쳐 주지 않아, BytePlus 영상 주소(24시간)가 죽기 전에 PC 에 남겨야 한다.
+      autoDownload: PERSONAL,
       setAutoDownload: (v) => set({ autoDownload: v }),
-      billingProjects: [],
-      billingProjectKey: '',
+      // 개인판은 코드 한 줄(PERSONAL_BILLING)을 늘 고른 상태다 — 보내기 · 권한 · 에이전트가 손대지 않고 그대로 돈다(edition.ts).
+      billingProjects: PERSONAL ? [{ ...PERSONAL_BILLING }] : [],
+      billingProjectKey: PERSONAL ? PERSONAL_BILLING.key : '',
       billingNote: null,
       setBillingNote: (v) => set({ billingNote: v }),
-      trackerReachable: null,
+      trackerReachable: PERSONAL ? true : null,
       agentWaitingBilling: {},
       sendingProjects: {},
       beginSending: (pid) => set((st) => ({ sendingProjects: { ...st.sendingProjects, [pid]: (st.sendingProjects[pid] || 0) + 1 } })),
@@ -2976,7 +2979,9 @@ export const useAppStore = create<AppState>()(
             }
             projectsOut = patched.map(p => { if (!p.billingKey) return p; const { billingKey: _old, ...rest } = p; return rest; });
           }
-          useAppStore.setState({ projects: projectsOut, theme, billingProjects, billingProjectKey, billingNote, ...panes, _hasHydrated: true });
+          // 개인판: 저장본이 무엇이든 코드는 개인 한 줄이다(시트가 없으니 바뀔 일도 없다).
+          if (PERSONAL) useAppStore.setState({ projects: projectsOut, theme, billingProjects: [{ ...PERSONAL_BILLING }], billingProjectKey: PERSONAL_BILLING.key, billingNote: null, ...panes, _hasHydrated: true });
+          else useAppStore.setState({ projects: projectsOut, theme, billingProjects, billingProjectKey, billingNote, ...panes, _hasHydrated: true });
           if (persistTroubleMsg) useAppStore.setState({ persistTrouble: persistTroubleMsg });
 
           // Element library loads from its own key (and migrates out of the legacy

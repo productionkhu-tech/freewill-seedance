@@ -6,6 +6,8 @@
 // ★ 이 함수는 프로젝트의 작성 칸 · 설정 · 레퍼런스에 쓰지 않는다(화면이 부탁한 4K 되쓰기만 예외). 카드는 그 프로젝트에 붙는다.
 // ★ 과금(프로젝트 코드)은 처음에 한 번 읽고, 요청을 띄우기 직전에 다시 확인한다 — 그 사이 프로젝트가 지워졌거나 코드가
 //   바뀌었으면 보내지 않는다(recheckBeforePost). 확인과 요청 사이에는 await 가 없다.
+import { PERSONAL } from './edition';
+import { personalR2Ready, R2_NEEDED_MSG } from './personal-keys';
 import {
   useAppStore, Asset, ElementImage, GenerationSettings,
   clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec,
@@ -563,6 +565,14 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   const totalMB = totalPayloadBytes / (1024 * 1024);
   if (totalMB > 60) {
     warn(`전체 에셋 크기 초과: ${totalMB.toFixed(1)}MB\n이미지를 다시 첨부해주세요.`);
+    return;
+  }
+
+  // 개인판(26.10.2005~): 레퍼런스는 사용자의 R2 로 올린다. R2 를 안 넣었으면 아래 실패 문구('원본이 지워졌을 수 있다')
+  // 대신 R2 가 필요하다고 말한다 — 레퍼런스 없는 텍스트 → 영상은 R2 없이 그대로 간다.
+  if (PERSONAL && (currentAssets.some(a => a.cacheId || a.originalPath) || mentionedElements.some(el => el.images.length > 0))
+      && !(await personalR2Ready())) {
+    warn(R2_NEEDED_MSG);
     return;
   }
 

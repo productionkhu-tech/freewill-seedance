@@ -32,6 +32,9 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { makePoster, makePreview, ffmpegPath } from './transcode';
 
 const GATEWAY_URL = process.env.SEEDANCE_GATEWAY_URL || 'https://seedance-gateway.production-khu.workers.dev';
+// 개인판(26.10.2005~)은 NCP 를 쓰지 않는다 — 회사 보관소다. 대신 완성 영상을 이 PC 에만 남긴다(keepLocal: 사본 · 썸네일 ·
+// 재생용 H.264). 판은 main.cjs 가 서버를 띄우기 전에 정해 둔다(src/lib/edition.ts).
+const PERSONAL = process.env.SEEDANCE_EDITION === 'personal';
 
 export type NcpReady = {
   client: S3Client;
@@ -87,6 +90,7 @@ function ncpFromBundle(): NcpReady | null {
 }
 
 export async function ensureNcp(): Promise<NcpReady | null> {
+  if (PERSONAL) { lastError = '개인판은 NCP 를 쓰지 않습니다.'; return null; }
   const bundled = ncpFromBundle();
   if (bundled) return bundled;
   if (ready) return ready;
@@ -478,16 +482,9 @@ function stallGuard(ms: number, what: string) {
 }
 const STALL_MS = 60 * 1000;
 
-async function archiveOne(job: Job) {
-  const ncp = await ensureNcp();
-  if (!ncp) return; // 다음 기회에. 큐에 그대로 남는다.
-
-  const key = objectKeyFor(job.provider, archiveFolder(job.project, job.projectId), job.taskId, job.ext);
-  const t0 = Date.now();
-
-  try {
-    // 1. 로컬 사본을 확보한다. 이게 있어야 (a) 프리뷰가 즉시 뜨고 (b) 업로드가
-    //    실패해도 원본 URL 이 죽은 뒤에 재시도할 수 있다.
+// 1. 로컬 사본을 확보한다. 이게 있어야 (a) 프리뷰가 즉시 뜨고 (b) 업로드가 실패해도 원본 URL 이 죽은 뒤에 재시도할 수 있다.
+//    개인판은 이것이 보관의 전부다(keepLocal).
+async function ensureLocalCopy(job: Job): Promise<string> {
     let local = job.localPath && fs.existsSync(job.localPath) ? job.localPath : '';
     if (!local) {
       if (!job.sourceUrl) throw new Error('소스가 없습니다 (URL 도 로컬 파일도 없음)');
@@ -517,6 +514,71 @@ async function archiveOne(job: Job) {
     }
     // 영상 안 고유번호를 적어 둔다 — 이름을 바꾼 옛 영상을 앱에 끌어다 놓았을 때 카드를 찾는 단서(위 'C2PA 고유번호').
     noteC2pa(job.taskId, local);
+    return local;
+}
+
+// 실패 처리 — 회사판(NCP 업로드) · 개인판(로컬 사본) 같은 규칙.
+function failArchive(job: Job, label: string, e: any) {
+    job.tries++;
+    console.warn(`[NCP] 보관 실패 ${label} (${job.tries}회): ${e?.message || e}`);
+    // 로컬 사본이 있으면 원본 URL 이 죽은 뒤에도 언젠가 성공할 수 있으므로 포기시키지
+    // 않는다. 반대로 소스가 URL 뿐인데 세 번 실패했다면 그 링크는 이미 만료된 것이고
+    // 더 해볼 수 있는 게 없다 — 큐에 남겨두면 10분마다 죽은 링크를 영원히 두드린다.
+    // (앱 실행 시 소급 보관에서 24시간 지난 옛 영상들이 여기로 들어온다.)
+    if (job.tries >= 3 && !(job.localPath && fs.existsSync(job.localPath))) {
+      queue.delete(job.taskId);
+      gaveUp.add(job.taskId);
+      saveDead();
+      console.warn(`[NCP] 포기 ${label} — 원본 링크가 만료된 것으로 보입니다`);
+    }
+    saveQueue();
+}
+
+/** 개인판의 재생용 H.264 사본 자리 — 원본 옆(media-cache/{taskId}.preview.mp4). */
+export function localPreviewPath(taskId: string): string {
+  const row = mediaIndex.get(taskId);
+  return row?.local ? row.local.replace(/.[A-Za-z0-9]+$/, '.preview.mp4') : '';
+}
+
+// 개인판(26.10.2005~): 원본을 PC 에 받아 두고 썸네일 · 재생용 H.264 를 옆에 만든다 — NCP 가 하던 일 중 이 PC 몫만.
+// 색인의 key 는 'local:' 로 시작한다(빈 key 는 색인을 다시 읽을 때 버려진다 — initNcpIndex). 30일 정리 · 캐시 비우기는
+// 회사판의 로컬 사본과 같다 — 오래 둘 것은 '생성 시 자동 다운로드'(개인판 기본 켬)가 다운로드 폴더에 남긴다.
+async function keepLocal(job: Job) {
+  try {
+    const local = await ensureLocalCopy(job);
+    const size = fs.statSync(local).size;
+    const pid = String(job.projectId || '').trim();
+    mediaIndex.set(job.taskId, { key: `local:${path.basename(local)}`, bucket: '', size, at: Date.now(), project: job.project, ...(pid ? { projectId: pid } : {}), local });
+    saveIndex();
+    queue.delete(job.taskId);
+    saveQueue();
+    console.log(`[Local] 보관 ${path.basename(local)} — ${(size / 1048576).toFixed(1)}MB (개인판 — 이 PC 에만)`);
+    const base = local.replace(/.[A-Za-z0-9]+$/, '');
+    const row = mediaIndex.get(job.taskId)!;
+    const posterOut = `${base}.poster.webp`;
+    try {
+      if (await makePoster(local, posterOut)) { savePosterLocal(job.taskId, fs.readFileSync(posterOut)); row.poster = true; }
+    } catch (e: any) { console.warn('[Local] 썸네일 실패:', e?.message); }
+    finally { try { fs.rmSync(posterOut, { force: true }); } catch {} }
+    try {
+      const r0 = await makePreview(local, `${base}.preview.mp4`);
+      if (r0 === 'skipped') row.preview = 'skipped';
+      else if (r0 === 'made') row.preview = true;
+    } catch (e: any) { console.warn('[Local] 재생용 사본 실패:', e?.message); }
+    saveIndex();
+  } catch (e: any) { failArchive(job, job.taskId, e); }
+}
+
+async function archiveOne(job: Job) {
+  if (PERSONAL) return keepLocal(job);
+  const ncp = await ensureNcp();
+  if (!ncp) return; // 다음 기회에. 큐에 그대로 남는다.
+
+  const key = objectKeyFor(job.provider, archiveFolder(job.project, job.projectId), job.taskId, job.ext);
+  const t0 = Date.now();
+
+  try {
+    const local = await ensureLocalCopy(job);
 
     // 2. 올린다.
     //
@@ -582,19 +644,7 @@ async function archiveOne(job: Job) {
     // 파생물은 마스터가 안전해진 뒤에 만든다. 실패해도 원본은 이미 올라가 있다.
     await makeDerivatives(job.taskId, local, key);
   } catch (e: any) {
-    job.tries++;
-    console.warn(`[NCP] 보관 실패 ${key} (${job.tries}회): ${e?.message || e}`);
-    // 로컬 사본이 있으면 원본 URL 이 죽은 뒤에도 언젠가 성공할 수 있으므로 포기시키지
-    // 않는다. 반대로 소스가 URL 뿐인데 세 번 실패했다면 그 링크는 이미 만료된 것이고
-    // 더 해볼 수 있는 게 없다 — 큐에 남겨두면 10분마다 죽은 링크를 영원히 두드린다.
-    // (앱 실행 시 소급 보관에서 24시간 지난 옛 영상들이 여기로 들어온다.)
-    if (job.tries >= 3 && !(job.localPath && fs.existsSync(job.localPath))) {
-      queue.delete(job.taskId);
-      gaveUp.add(job.taskId);
-      saveDead();
-      console.warn(`[NCP] 포기 ${key} — 원본 링크가 만료된 것으로 보입니다`);
-    }
-    saveQueue();
+    failArchive(job, key, e);
   }
 }
 

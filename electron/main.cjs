@@ -5,6 +5,19 @@ const { createUpdater, BACKGROUND_EVERY_MS } = require('./updater.cjs');
 const path = require('path');
 const fs = require('fs');
 
+// ─── 판(회사판 · 개인판, 26.10.2005~) ───
+// 설치본은 package.json 의 seedanceEdition 이 정한다(electron-builder.personal.yml 의 extraMetadata — 이름도 freewill-seedance-personal
+// 이라 userData · 한 번만 켜기 잠금이 회사판과 갈린다). 설치본은 환경변수로 못 바꾼다 — 회사판 PC 에 누가 SEEDANCE_EDITION 을
+// 심어도 회사판 그대로다. 개발 실행만 환경변수로 개인판을 띄운다(격리 시험). 서버 · 화면에는 아래에서 알린다(src/lib/edition.ts).
+const PERSONAL = (() => {
+  if (app.isPackaged) {
+    try { return require('../package.json').seedanceEdition === 'personal'; } catch { return false; }
+  }
+  return process.env.SEEDANCE_EDITION === 'personal';
+})();
+process.env.SEEDANCE_EDITION = PERSONAL ? 'personal' : 'company';
+const APP_TITLE = PERSONAL ? 'Freewill Seedance Personal' : 'Freewill Seedance 2.0';
+
 // ─── Single Instance Lock ───
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) { app.quit(); return; }
@@ -14,7 +27,8 @@ let tray = null;
 let hiddenToTrayOnce = false;
 // 3000 고정. SEEDANCE_PORT 는 격리 시험용(진짜 앱이 3000 을 쓰는 중에 같은 PC 에서 띄울 때)이다.
 // 서버에는 아래 startServer 가 PORT 로 넘긴다 — PC 에 다른 프로그램용 PORT 환경변수가 있어도 창과 서버가 갈리지 않게.
-const PORT = Number(process.env.SEEDANCE_PORT) || 3000;
+// 개인판은 3100 — 회사판과 한 PC 에 같이 깔려 동시에 켜도 안 부딪힌다(창 주소가 달라 화면 저장소 · 출처도 갈린다).
+const PORT = Number(process.env.SEEDANCE_PORT) || (PERSONAL ? 3100 : 3000);
 const isDev = !app.isPackaged;
 
 function getIconPath() {
@@ -45,7 +59,30 @@ function writeKeyStatus(r) {
     fs.writeFileSync(path.join(app.getPath('userData'), 'key-status.json'), JSON.stringify(st, null, 1));
   } catch {}
 }
+// 개인판(26.10.2005~): 팀 bat 이 이 PC 에 남긴 회사 키 · 주소를 쓰지 않는다. 서버는 process.env 에서 읽으므로 메모리에서만 지운다 —
+// 레지스트리(환경변수 원본)는 안 건드린다(같은 PC 의 회사판이 쓴다). 개인 키는 서버가 personal-keys.bin 에서 올린다
+// (server.ts readPersonalKeys — 설치본은 서버가 이 프로세스 안에서 돌아 safeStorage 를 넘겨줄 수 있다).
+const COMPANY_ENV = [
+  'SEEDANCE_API_KEY', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET',
+  'NANOBANANA_STUDIO_KEY', 'SEEDANCE_GEMINI_KEY',
+  'SEEDANCE_TRACKER_URL', 'SEEDANCE_TRACKER_SECRET', 'SEEDANCE_TEAM', 'SEEDANCE_TEAM_LABEL',
+  'SEEDANCE_NCP_ACCESS_KEY_ID', 'SEEDANCE_NCP_SECRET_ACCESS_KEY', 'SEEDANCE_NCP_ENDPOINT', 'SEEDANCE_NCP_BUCKET',
+  'SEEDANCE_NCP_REGION', 'SEEDANCE_NCP_PRESIGN_EXPIRES_SECONDS', 'SEEDANCE_25_DEMO_KEY', 'SEEDANCE_25_DEMO_ENDPOINT',
+];
+function preparePersonal() {
+  for (const k of COMPANY_ENV) delete process.env[k];
+  // 주소를 바꾸는 시험용 스위치도 설치본에서는 받지 않는다(진짜 BytePlus · 진짜 게이트웨이 키 확인으로만).
+  if (app.isPackaged) for (const k of ['SEEDANCE_BP_BASE', 'SEEDANCE_GATEWAY_URL', 'SEEDANCE_GATEWAY']) delete process.env[k];
+  if (!process.env.SEEDANCE_PERSONAL_KEYS_FILE || app.isPackaged) {
+    process.env.SEEDANCE_PERSONAL_KEYS_FILE = path.join(app.getPath('userData'), 'personal-keys.bin');
+  }
+  try { globalThis.__seedanceSafeStorage = require('electron').safeStorage; } catch {}
+  console.log('[Personal] 개인판 — 회사 키 · 게이트웨이 · 시트 · NCP 를 쓰지 않음');
+  return { mode: 'personal' };
+}
+
 async function prepareKeys() {
+  if (PERSONAL) return preparePersonal();
   const { safeStorage } = require('electron');
   const secrets = require('./secrets.cjs');
   try {
@@ -110,18 +147,18 @@ function keysProblem(g) {
 function notifyCut() {
   const msg = '이 PC 의 시댄스 출입증을 관리자가 끊었어요. 새 생성은 보낼 수 없습니다. 관리자에게 문의해 주세요.';
   try {
-    if (mainWindow && !mainWindow.isDestroyed()) dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Freewill Seedance 2.0', message: msg });
-    else new Notification({ title: 'Freewill Seedance 2.0', body: msg }).show();
+    if (mainWindow && !mainWindow.isDestroyed()) dialog.showMessageBox(mainWindow, { type: 'warning', title: APP_TITLE, message: msg });
+    else new Notification({ title: APP_TITLE, body: msg }).show();
   } catch {}
 }
 
 // ─── Server (runs inside Electron process, no external Node.js needed) ───
 async function startServer() {
   const g = await prepareKeys();
-  if (!isDev) {
+  if (!isDev && !PERSONAL) {
     const problem = keysProblem(g);
     if (problem) {
-      dialog.showErrorBox('Freewill Seedance 2.0', problem);
+      dialog.showErrorBox(APP_TITLE, problem);
       app.isQuitting = true;
       app.quit();
       return;
@@ -172,13 +209,15 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    title: 'Freewill Seedance 2.0',
+    title: APP_TITLE,
     icon: getIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.cjs'),
+      // 판을 화면에 알린다(preload → window.electronAPI.edition, 26.10.2005~).
+      additionalArguments: [`--seedance-edition=${PERSONAL ? 'personal' : 'company'}`],
       // 창을 최소화하거나 트레이로 숨겨도 화면의 타이머가 제 속도로 돈다(26.10.305~). 크롬은 숨은 창의
       // 타이머를 1분에 한 번까지 늦추는데, 그러면 에이전트 작업함(2초마다 들름)이 "화면 응답 없음" 이 되고
       // (2026-10-03 실제), 카드 폴링(10초)도 늦어져 트래커 보고 · NCP 보관이 밀린다.
@@ -188,6 +227,8 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
+  // 개인판: 화면(index.html)의 <title> 이 창 · 작업표시줄 이름을 회사판 이름으로 덮지 않게(setTitle 은 그대로 된다).
+  if (PERSONAL) mainWindow.on('page-title-updated', (e) => e.preventDefault());
 
   // Auto-save downloads. Target folder = session-only override (sessionDownloadDir)
   // or the OS Downloads folder by default. The override resets to default every
@@ -227,7 +268,7 @@ function createWindow() {
       e.preventDefault();
       mainWindow.hide();
       tray?.displayBalloon({
-        title: 'Freewill Seedance 2.0',
+        title: APP_TITLE,
         content: 'Running in system tray. Double-click to reopen.',
         iconType: 'info',
       });
@@ -334,7 +375,7 @@ function createTray() {
   }
 
   tray = new Tray(trayIcon);
-  tray.setToolTip('Freewill Seedance 2.0');
+  tray.setToolTip(APP_TITLE);
   refreshTrayMenu();
   tray.on('double-click', () => showOrCreateWindow());
 }
@@ -345,7 +386,7 @@ function refreshTrayMenu() {
   if (!tray || tray.isDestroyed()) return;
   try {
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: `Freewill Seedance 2.0 · v${app.getVersion()}`, enabled: false },
+      { label: `${APP_TITLE} · v${app.getVersion()}`, enabled: false },
       { type: 'separator' },
       { label: 'Open', click: () => showOrCreateWindow() },
       ...(updater ? [updater.menuItem()] : []),
@@ -437,7 +478,7 @@ function setupAutoUpdater() {
       console.log(`[Updater] ${pct}%`);
       try {
         mainWindow?.setProgressBar(Math.max(0, Math.min(1, percent / 100)));
-        mainWindow?.setTitle(`업데이트 내려받는 중 ${pct}% — Freewill Seedance 2.0`);
+        mainWindow?.setTitle(`업데이트 내려받는 중 ${pct}% — ${APP_TITLE}`);
       } catch { /* 창이 이미 닫혔으면 표시할 곳도 없다 */ }
     },
     // ★ 설치는 updater.cjs 가 quitAndInstall(true, true) 로 한다 — 조용히 설치하고 끝나면 다시 띄운다.
@@ -633,7 +674,8 @@ ipcMain.handle('get-cache-size', async () => {
 // ★ Do NOT rename this to match the new app name. Every existing user already has a
 // backup sitting in this exact folder; renaming would point the restore path at an empty
 // directory and quietly orphan the only copy of their data that lives outside userData.
-const BACKUP_DIR = path.join(app.getPath('documents'), 'Freewill Seedance Backup');
+// 개인판은 따로 둔다 — 같은 폴더면 개인판의 빈 기록이 회사 기록을 '백업 되살리기' 로 가져오고, 두 판이 서로의 백업을 덮는다.
+const BACKUP_DIR = path.join(app.getPath('documents'), PERSONAL ? 'Freewill Seedance Personal Backup' : 'Freewill Seedance Backup');
 const BACKUP_PATH = path.join(BACKUP_DIR, 'seedance-backup.json');
 // ★ The library is backed up SEPARATELY, and that split is not cosmetic — it is the fix
 // for a silent, total backup failure.

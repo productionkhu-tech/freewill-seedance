@@ -1,6 +1,6 @@
 # Freewill Seedance 2.0 — 인수인계
 
-> 최종 정리: **2026-10-21** / 버전 **26.10.2004**
+> 최종 정리: **2026-10-21** / 버전 **26.10.2005** (개인판 추가 — §6 개인판)
 > 이 문서 하나로 인수받을 수 있게 쓴다. 시간순 기록이 아니라 **주제별**이다.
 > 여기 적힌 숫자는 전부 실측이다. 확인 못 한 것은 "미확인"이라고 명시한다.
 >
@@ -19,6 +19,7 @@ BytePlus Seedance + Gemini Omni Flash 로 영상을 만드는 사내 도구.
 | **맥** | EXE 없음. **소스에서 로컬 웹앱**으로 실행 (`start.command` → `npm run dev` → `localhost:3000`) |
 | 저장소 | https://github.com/productionkhu-tech/freewill-seedance (**Public**) |
 | 데이터 | IndexedDB + `~/Documents/Freewill Seedance Backup/` 파일 미러 |
+| **개인판** (26.10.2005~) | 같은 소스로 설치 파일을 하나 더 — 본인 키 · 프로젝트 코드 없음 · 시트 안 보냄 · 받는 곳 `freewill-seedance-personal` (§6 개인판) |
 
 **공개 저장소다.** 키·토큰·2.5 데모 엔드포인트 ID 를 코드나 문서에 절대 넣지 마라.
 (2026-05-18 GitHub secret scanning 에 막힌 적 있음. 그 뒤로 평문 금지가 정책.)
@@ -57,6 +58,9 @@ BytePlus Seedance + Gemini Omni Flash 로 영상을 만드는 사내 도구.
 | `src/lib/settings-box.ts` | 받은 영상 속 생성 설정의 모양 · 만들기 · 읽기(AES-GCM 풀기) · 걸러 넣기(26.10.801~, §6). 붙이는(암호화) 일은 `main.cjs` `embedSettings` |
 | `electron/main.cjs` | 윈도우 전용. 서버 기동, 다운로드, 트레이, 자동 업데이트, 백업 IPC |
 | `scripts/build.cjs` | Vite 빌드 + esbuild 로 `server.ts` → `dist-server/server.cjs` |
+| `src/lib/edition.ts` | 판(회사판 · 개인판, 26.10.2005~) — `PERSONAL` · 개인판의 코드 자리 `PERSONAL_BILLING`. 서버도 읽는다(React 금지) |
+| `src/lib/personal-keys.ts` · `src/components/PersonalKeys.tsx` | 개인판 '내 키' — 상태(있는지 · 끝 네 글자) · 설정 패널 카드 · 안내 띠 · 키 창(R2 만드는 법) |
+| `electron-builder.personal.yml` | 개인판 패키징(`extends: electron-builder.yml`) — appId · 이름 · `extraMetadata.seedanceEdition` · 받는 곳 · `release-personal/` |
 
 ---
 
@@ -72,6 +76,10 @@ BytePlus Seedance + Gemini Omni Flash 로 영상을 만드는 사내 도구.
 | `artifactName` | electron-builder.yml | GitHub 자산 이름. 공백·비ASCII 가 들어가면 업데이터 다운로드가 깨진다 |
 
 `productName`(표시 이름)은 바꿔도 된다. **위 넷과 독립**이라 그러라고 분리해 둔 것이다.
+
+**개인판도 같다**(electron-builder.personal.yml, 26.10.2005~): `appId: com.freewill.seedance.personal` · `executableName: Freewill Seedance Personal` ·
+`extraMetadata.name: freewill-seedance-personal`(= userData — 내 키 · 작업 기록) · `artifactName: Freewill-Seedance-Personal-Setup-${version}.${ext}` 은
+첫 배포 뒤로 고정. `extraMetadata.seedanceEdition: personal` 을 빼면 개인판 설치본이 회사판으로 켜진다(키 없어 안 켜짐).
 
 ### 2-2. 버전 체계 — 앞자리 0 금지
 
@@ -97,6 +105,13 @@ export GH_TOKEN="<사용자에게 받기 — 문서에 적지 말 것>"
 SEEDANCE_API_KEY=test node scripts/build.cjs
 npx electron-builder --win --publish always
 ```
+
+**개인판**(26.10.2005~): 빌드(`scripts/build.cjs`)는 **한 번** — dist · dist-server 는 두 판이 같은 파일이다(판은 설치본의 package.json 이
+정한다, §6 개인판). 회사판을 싼 뒤 `npx electron-builder --win --config electron-builder.personal.yml --publish never`(단독 실행) →
+`release-personal/`. 받는 곳은 배포 파일만 두는 저장소 `productionkhu-tech/freewill-seedance-personal`(README 만 있는 공개 저장소) —
+태그가 가리킬 커밋은 그 저장소의 커밋이다(소스는 이 저장소 하나라 소스 커밋이 거기엔 없다). 초안 → 업로드 → 다시 받아 바이트 비교
+→ 공개는 회사판과 같다(scratchpad 의 `release-gh-personal.mjs` 모양). asar 확인 때 package.json 에 `seedanceEdition: personal` ·
+`name: freewill-seedance-personal` 이 들어 있는지도 본다.
 
 **`npx electron-builder` 를 파이프/체이닝에 물리지 마라.** 실행이 통째로 누락된다(에러도 안
 남는다). 단독 실행하고 릴리스 존재를 API 로 검증할 것.
@@ -542,6 +557,36 @@ BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 
 ---
 
 ## 6. 기능 지도
+
+- **개인판** (26.10.2005~, 사용자 2026-10-21: "깃허브 분리해서 개인용으로 … 프로젝트 코드 빼고 시트 안 보내는 버전 · 키가 있어야 프로그램
+  열리는 그것도 빼고 · 개인키 넣어서 저장할 수 있는 옵션") — 회사 밖 사람이 **본인 키 · 본인 돈**으로 쓰는 판.
+  - **소스는 하나, 설치 파일이 둘**: 저장소를 복사하지 않았다(매 배포마다 충돌 · 한쪽만 고치는 사고). 판은 **설치본 package.json 의
+    `seedanceEdition`** 하나가 정한다(electron-builder.personal.yml `extraMetadata`) → `main.cjs` 가 읽어 서버(`process.env.SEEDANCE_EDITION`)와
+    화면(preload `additionalArguments` → `window.electronAPI.edition` → `src/lib/edition.ts` `PERSONAL`)에 알린다. 설치본은 환경변수로 판을
+    못 바꾼다(회사 PC 에 누가 심어도 회사판). 개발 실행만 `SEEDANCE_EDITION=personal` 로 개인판(격리 시험).
+  - **다른 앱이다**: appId · 이름(`freewill-seedance-personal` → userData · 한 번만 켜기 잠금) · 포트 **3100**(화면 저장소 출처도 갈린다) ·
+    백업 폴더 `문서\Freewill Seedance Personal Backup`(★ 같은 폴더면 개인판의 빈 기록이 회사 기록을 '백업 되살리기' 로 가져온다) ·
+    받는 곳(자동 업데이트) 이 전부 따로라, 한 PC 에 둘 다 깔고 동시에 켜도 안 섞인다.
+  - **회사 것을 안 쓴다**: 게이트웨이 · 팀 bat 키(시작할 때 `main.cjs` `preparePersonal` 이 메모리에서 지운다 — 레지스트리는 안 건드림,
+    같은 PC 의 회사판이 쓴다; 서버도 dotenv 뒤 한 번 더) · 시트(보고 · 프로젝트 코드 목록 · 서버 확인 sweep) · NCP · 회사 R2 · 이 PC 의
+    나노바나나 Gemini 키. 프로젝트 코드는 **`PERSONAL_BILLING` 한 줄을 늘 고른 상태**라 보내기 · 권한 · 에이전트 코드는 그대로 돈다
+    (모델 · 4K 는 본인 계정이라 BytePlus 가 정한다). 회사판 서버는 그 코드 id(`__personal__`)를 받지 않는다(시트 목록을 못 받은 순간에도).
+  - **키 없이 켜진다** — 위쪽 띠 '개인판이에요 … 키 넣기', 설정 패널 맨 위 '내 키' 카드(회사판의 프로젝트 코드 자리). 키 창
+    (`PersonalKeys.tsx`): BytePlus(필수) · Cloudflare R2(선택 — 레퍼런스용, 만드는 법 4단계) · Gemini(선택 — 옴니). 서버
+    `POST /api/personal/keys` 가 **무료로 확인한 것만** 저장: BytePlus = 작업 목록 한 줄(GET, 만들지 않음) · Gemini = 모델 목록 · R2 = 작은 파일
+    올리기 → 서명 주소로 받기 → 지우기. 401 · 403 은 저장 안 함, 인터넷 문제면 저장하고 알린다. 저장은 `userData\personal-keys.bin` —
+    safeStorage(DPAPI, `main.cjs` 가 `globalThis.__seedanceSafeStorage` 로 서버에 넘김). 암호화를 못 하면 설치본은 저장하지 않는다(개발
+    실행만 평문 `dev-plain`). 화면은 값을 다시 받지 않는다(끝 네 글자만, `GET /api/personal/status`). 회사판에선 두 길 다 404.
+  - **회사 팀 키는 거절**: 넣을 때 앱에 박힌 해시 표(`TEAM_KEY_HASHES`) + 게이트웨이 `/v1/ticket`(입장권 = HMAC 만 보낸다, 원문 아님 —
+    새로 발급 · 다시 발급한 키까지 안다). 그때 못 물어봤으면 저장하고 **켤 때마다 다시 물어** 회사 키면 지우고 띠로 알린다.
+  - **레퍼런스**: 본인 R2 로 올린다(`uploadToR2` 는 같은 함수, 값만 사용자 것). R2 가 없으면 보내기 직전에 'R2 가 필요해요' 안내
+    (`send-request.ts` — '원본이 지워졌을 수 있다' 같은 엉뚱한 말 대신). 옴니는 R2 가 필요 없다(Google Files API).
+  - **영상 보관 = 이 PC**: NCP 대신 `ncp.ts` `keepLocal` — 원본을 media-cache 에 받고 썸네일 · 재생용 H.264(HEVC 면) 를 옆에 만든다.
+    색인 key 는 `local:…`(빈 key 는 다시 읽을 때 버려진다). `/api/media/:id/preview` 는 PC 의 사본. 30일 정리는 회사판 사본과 같아서
+    오래 둘 것은 **'생성 시 자동 다운로드'(개인판 기본 켬)** 가 다운로드 폴더에 남긴다.
+  - 시험: scratchpad `personal/personal-test.mjs` 53건(격리 하네스 3940 · 가짜 바깥 3945 — 직원 PC 흉내로 회사 키 · 주소 · 나노바나나 키를
+    환경변수에 넣어 둔 채: 하나도 안 나감, 시트 · NCP 0건, 회사 키 거절 · 켤 때 지움, 틀린 키 · R2 이유, 키 없이 보내면 BytePlus 0건,
+    성공 → PC 보관 · 썸네일 · H.264, 다시 켜도 키 · 기록 유지).
 
 - **프로젝트 그룹 / 하위그룹** — 딱 1단계. `groupTree()` 가 **읽을 때** 판정한다:
   "부모가 존재하고 그 부모가 스스로 최상위일 때만 하위그룹". dangling·3단·순환이 전부
@@ -1084,6 +1129,12 @@ R2 에 올린다. 미리보기 JPG 는 화면에만 — 크기·품질을 바꾸
 44. **서버는 만들기 전에 그 코드가 시트에서 '진행' 인지 · 4K 면 4K 권한이 있는지 본다**(26.10.2004, `getRosterFast` — 가진 목록을
     바로 쓰고 낡았으면 뒤에서 새로, 없을 때만 기다린다). 목록을 아직 못 받았으면(트래커 죽음 · 콜드) 예전처럼 보낸다 — 시트가
     늦다고 일을 멈추지 않는다. 권한 모델(2.5)은 예전처럼 목록이 없으면 503.
+45. **개인판 분기는 `PERSONAL` 하나로, 회사판 동작은 그대로**(26.10.2005). 화면은 `src/lib/edition.ts` `PERSONAL`(preload 가 준 값만),
+    서버 · ncp.ts 는 `process.env.SEEDANCE_EDITION`(켤 때 한 번). 새 기능이 회사 것(시트 · 게이트웨이 · NCP · 회사 R2 · 팀 bat 키)을
+    부르면 개인판에서 빠지는지 같이 볼 것 — 개인판 시험(`personal-test.mjs`)의 '회사 것 0건' 이 잡는다. 판을 빌드 두 번으로 가르지 마라
+    (dist · server.cjs 가 엇갈리면 개인판 화면이 회사 서버로 '개인' 코드를 보낸다 — 지금은 설치본 package.json 한 곳).
+46. **개인판에 회사 키가 들어가는 길을 막아 둔다** — 환경변수(팀 bat)는 메모리에서 지우고, 사용자가 넣은 키는 회사 키면 거절하고,
+    켤 때 다시 확인한다. 회사 키로 개인판을 쓰면 시트에 안 남는 생성(회사 돈)이 된다.
 
 ---
 
@@ -1145,6 +1196,9 @@ R2 에 올린다. 미리보기 JPG 는 화면에만 — 크기·품질을 바꾸
     고치기 전까지만**. Vite 가 HMR 로 store.ts 를 갈아 끼우면 앱은 `?t=` 붙은 새 모듈을 쓰고 import 는 옛 인스턴스를 줘서,
     읽기 · 쓰기가 화면과 따로 논다(새로고침해도 그대로). 고친 뒤에는 하네스를 다시 띄울 것. 사이드바 강조 줄과
     `currentProjectId` 를 맞대 보면 어긋났는지 안다.
+- **개인판**(26.10.2005~): 하네스에서 `SEEDANCE_EDITION=personal` 로 진짜 main.cjs 를 격리로 — 개발 실행이라 판을 환경변수로 받는다.
+  `SEEDANCE_BP_BASE` · `SEEDANCE_GATEWAY_URL` · `SEEDANCE_GEMINI_BASE`(개인판 Gemini 키 확인 주소) 를 가짜로, 키 파일은
+  `SEEDANCE_PERSONAL_KEYS_FILE`. 설치본은 이 주소 스위치들을 지운다(진짜로만 나간다).
 - **작업창 나누기 규칙**: `npx tsx scripts/split_check.ts` — split.ts 를 무작위 조작 10만 걸음으로(§6 작업창 나누기)
 - **백업 시계**: `npx tsx scripts/backup_clock_check.ts` — 가짜 시계로 백업 시점 규칙 8가지(§7 저장/백업)
 - **영상 속 설정·C2PA**: 받은 영상은 c2patool(contentauth/c2pa-rs 공식 배포, `c2patool <파일>`)로 `validation_state: Valid` ·

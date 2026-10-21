@@ -1,0 +1,36 @@
+# 개인판(26.10.2005~) — 회사판과 같은 빌드(dist · dist-server)를 다른 이름으로 하나 더 싼다.
+#   npx electron-builder --win --config electron-builder.personal.yml --publish never
+# 판은 아래 extraMetadata.seedanceEdition 이 정한다 — main.cjs 가 설치본의 package.json 에서 읽어 서버 · 화면에 알린다
+# (src/lib/edition.ts). 회사판 설정(electron-builder.yml)을 이어받고, 사람과 자동 업데이트가 두 앱을 갈라 보는 값만 바꾼다.
+# ★ 회사판의 appId · name · executableName · artifactName 은 고정이다(그쪽 주석). 여기 값도 첫 배포 뒤로는 고정 —
+#   appId 를 바꾸면 깔린 개인판이 제자리 업데이트되지 않고, name 을 바꾸면 userData(내 키 · 작업 기록)가 갈린다.
+extends: electron-builder.yml
+
+appId: com.freewill.seedance.personal
+productName: Freewill Seedance Personal
+executableName: Freewill Seedance Personal
+
+# 설치본의 package.json — name 이 userData 폴더(%APPDATA%\freewill-seedance-personal)와 한 번만 켜기 잠금을 회사판과 가른다.
+extraMetadata:
+  name: freewill-seedance-personal
+  seedanceEdition: personal
+
+directories:
+  # 회사판(release/)과 섞이지 않게 — 배포 스크립트가 폴더째 올린다.
+  output: release-personal
+  buildResources: electron
+
+artifactName: Freewill-Seedance-Personal-Setup-${version}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Freewill Seedance Personal
+
+publish:
+  provider: github
+  owner: productionkhu-tech
+  repo: freewill-seedance-personal
+  releaseType: release
