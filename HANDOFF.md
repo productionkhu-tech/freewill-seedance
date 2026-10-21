@@ -60,7 +60,7 @@ BytePlus Seedance + Gemini Omni Flash 로 영상을 만드는 사내 도구.
 | `scripts/build.cjs` | Vite 빌드 + esbuild 로 `server.ts` → `dist-server/server.cjs` |
 | `src/lib/edition.ts` | 판(회사판 · 개인판, 26.10.2005~) — `PERSONAL` · 개인판의 코드 자리 `PERSONAL_BILLING`. 서버도 읽는다(React 금지) |
 | `src/lib/personal-keys.ts` · `src/components/PersonalKeys.tsx` | 개인판 '내 키' — 상태(있는지 · 끝 네 글자) · 설정 패널 카드 · 안내 띠 · 키 창(R2 만드는 법) |
-| `electron-builder.personal.yml` | 개인판 패키징(`extends: electron-builder.yml`) — appId · 이름 · `extraMetadata.seedanceEdition` · 받는 곳 · `release-personal/` |
+| `electron-builder.personal.yml` | 개인판 패키징(`extends: electron-builder.yml`) — appId · 이름 · `extraMetadata.seedanceEdition` · 주황 아이콘 · 받는 곳 · `release-personal/` |
 
 ---
 
@@ -564,13 +564,17 @@ BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 
     `seedanceEdition`** 하나가 정한다(electron-builder.personal.yml `extraMetadata`) → `main.cjs` 가 읽어 서버(`process.env.SEEDANCE_EDITION`)와
     화면(preload `additionalArguments` → `window.electronAPI.edition` → `src/lib/edition.ts` `PERSONAL`)에 알린다. 설치본은 환경변수로 판을
     못 바꾼다(회사 PC 에 누가 심어도 회사판). 개발 실행만 `SEEDANCE_EDITION=personal` 로 개인판(격리 시험).
-  - **다른 앱이다**: appId · 이름(`freewill-seedance-personal` → userData · 한 번만 켜기 잠금) · 포트 **3100**(화면 저장소 출처도 갈린다) ·
+  - **다른 앱이다**: appId · 이름(`freewill-seedance-personal` → userData · 한 번만 켜기 잠금) · **주황 아이콘**(`electron/icon-personal.png` —
+    설치 파일 · exe 는 personal.yml `win.icon`, 창 · 트레이는 main.cjs `getIconPath`) · 창 제목(화면 `<title>` 이 덮지 않게 `page-title-updated` 막음) ·
+    포트 **3100**(화면 저장소 출처도 갈린다) ·
     백업 폴더 `문서\Freewill Seedance Personal Backup`(★ 같은 폴더면 개인판의 빈 기록이 회사 기록을 '백업 되살리기' 로 가져온다) ·
     받는 곳(자동 업데이트) 이 전부 따로라, 한 PC 에 둘 다 깔고 동시에 켜도 안 섞인다.
   - **회사 것을 안 쓴다**: 게이트웨이 · 팀 bat 키(시작할 때 `main.cjs` `preparePersonal` 이 메모리에서 지운다 — 레지스트리는 안 건드림,
     같은 PC 의 회사판이 쓴다; 서버도 dotenv 뒤 한 번 더) · 시트(보고 · 프로젝트 코드 목록 · 서버 확인 sweep) · NCP · 회사 R2 · 이 PC 의
     나노바나나 Gemini 키. 프로젝트 코드는 **`PERSONAL_BILLING` 한 줄을 늘 고른 상태**라 보내기 · 권한 · 에이전트 코드는 그대로 돈다
     (모델 · 4K 는 본인 계정이라 BytePlus 가 정한다). 회사판 서버는 그 코드 id(`__personal__`)를 받지 않는다(시트 목록을 못 받은 순간에도).
+  - **키는 한 번만** — `userData\personal-keys.bin` 이라 업데이트(프로그램 폴더만 바뀜) · 다시 켜기 · 앱 지우기(NSIS 는 userData 를 안 지움)에도
+    남는다. 이 Windows 계정에 묶인 암호화라 다른 PC · 계정으로는 다시 넣는다.
   - **키 없이 켜진다** — 위쪽 띠 '개인판이에요 … 키 넣기', 설정 패널 맨 위 '내 키' 카드(회사판의 프로젝트 코드 자리). 키 창
     (`PersonalKeys.tsx`): BytePlus(필수) · Cloudflare R2(선택 — 레퍼런스용, 만드는 법 4단계) · Gemini(선택 — 옴니). 서버
     `POST /api/personal/keys` 가 **무료로 확인한 것만** 저장: BytePlus = 작업 목록 한 줄(GET, 만들지 않음) · Gemini = 모델 목록 · R2 = 작은 파일

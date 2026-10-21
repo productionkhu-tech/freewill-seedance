@@ -28,6 +28,8 @@ files:
   - "electron/gateway.cjs"
   - "electron/preload.cjs"
   - "electron/icon.png"
+  # 개인판 아이콘(주황, 26.10.2005~) — 회사판 asar 에도 들어가지만 쓰지 않는다(main.cjs getIconPath).
+  - "electron/icon-personal.png"
   - "public/**/*"
   - "node_modules/electron-updater/**/*"
   - "node_modules/lazy-val/**/*"

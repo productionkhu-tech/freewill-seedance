@@ -31,10 +31,12 @@ let hiddenToTrayOnce = false;
 const PORT = Number(process.env.SEEDANCE_PORT) || (PERSONAL ? 3100 : 3000);
 const isDev = !app.isPackaged;
 
+// 개인판은 주황 아이콘(26.10.2005~) — 설치 파일 · exe 아이콘은 electron-builder.personal.yml 의 win.icon.
 function getIconPath() {
+  const name = PERSONAL ? 'icon-personal.png' : 'icon.png';
   return isDev
-    ? path.join(__dirname, 'icon.png')
-    : path.join(process.resourcesPath, 'app.asar', 'electron', 'icon.png');
+    ? path.join(__dirname, name)
+    : path.join(process.resourcesPath, 'app.asar', 'electron', name);
 }
 
 // ─── 키 (26.10.802~) ───

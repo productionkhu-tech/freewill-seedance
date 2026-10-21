@@ -28,5 +28,8 @@ export function isPersonalEdition(): boolean {
 }
 export const PERSONAL = isPersonalEdition();
 
+/** 문서 폴더의 백업 폴더 이름(main.cjs BACKUP_DIR 과 같은 규칙) — 화면 안내 문구용. */
+export const BACKUP_FOLDER = PERSONAL ? 'Freewill Seedance Personal Backup' : 'Freewill Seedance Backup';
+
 /** 설치본 이름 — 화면 문구용. */
 export const APP_NAME = PERSONAL ? 'Freewill Seedance Personal' : 'Freewill Seedance 2.0';

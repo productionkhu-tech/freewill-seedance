@@ -22,6 +22,13 @@ directories:
 
 artifactName: Freewill-Seedance-Personal-Setup-${version}.${ext}
 
+# 주황 아이콘 — 회사판(파랑)과 작업표시줄 · 시작 메뉴에서 바로 구분된다(사용자 2026-10-21). 창 · 트레이는 main.cjs getIconPath.
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: electron/icon-personal.png
+
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

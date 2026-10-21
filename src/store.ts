@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { get, set, del, keys } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail, makeJpegPreview } from './lib/utils';
 import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
-import { PERSONAL, PERSONAL_BILLING } from './lib/edition';
+import { PERSONAL, PERSONAL_BILLING, BACKUP_FOLDER } from './lib/edition';
 import { createBackupClock } from './lib/backup-clock';
 import { buildSettingsPayload, type SettingsPayload } from './lib/settings-box';
 import { pointAt, openAt, focusSlot, swapSides, closeSlot, afterRemoval, sanitizeSplit, repairSplit, splitValid, visibleProjectIds, type SplitLayout, type PaneSide, type PaneSlot, type PaneState } from './lib/split';
@@ -688,7 +688,7 @@ const idbPersistStorage: PersistStorage<unknown> = {
     // 못한 원본을 파일로 남겼을 때만(저장이 시작되면 IDB 의 원본은 덮인다).
     if (unreadable && !(restoreSkippedThisLaunch && keptUnreadable)) {
       blockPersist(keptUnreadable
-        ? '작업 기록이 손상돼 읽지 못했고 백업에서도 되살리지 못했어요. 기록을 지키려고 저장을 멈췄어요 — 읽지 못한 원본은 문서\\Freewill Seedance Backup 에 UNREADABLE 파일로 남겼어요. 개발 담당에게 알려 주세요.'
+        ? `작업 기록이 손상돼 읽지 못했고 백업에서도 되살리지 못했어요. 기록을 지키려고 저장을 멈췄어요 — 읽지 못한 원본은 문서\\${BACKUP_FOLDER} 에 UNREADABLE 파일로 남겼어요. 개발 담당에게 알려 주세요.`
         : '작업 기록이 손상돼 읽지 못했고 백업에서도 되살리지 못했어요. 기록을 지키려고 저장을 멈췄어요 — 읽지 못한 원본은 앱 안에 그대로 두었어요. 개발 담당에게 알려 주세요.');
     }
     return null;
@@ -803,7 +803,7 @@ if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('seedance:toast', {
       detail: {
         ok: false,
-        msg: `문서 폴더 백업이 ${Math.round(lag / 60000)}분째 저장되지 않고 있어요${lastBackupError ? ` (${lastBackupError})` : ''}. 작업 기록은 앱 안에 계속 저장되고 있어요 — 디스크 공간과 문서\\Freewill Seedance Backup 폴더를 확인해 주세요.`,
+        msg: `문서 폴더 백업이 ${Math.round(lag / 60000)}분째 저장되지 않고 있어요${lastBackupError ? ` (${lastBackupError})` : ''}. 작업 기록은 앱 안에 계속 저장되고 있어요 — 디스크 공간과 문서\\${BACKUP_FOLDER} 폴더를 확인해 주세요.`,
       },
     }));
   }, 60 * 1000);
