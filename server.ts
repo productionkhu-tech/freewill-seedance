@@ -139,14 +139,41 @@ function personalStorageKind(): 'encrypted' | 'dev-plain' | 'none' {
   if (personalSafeStorage()) return 'encrypted';
   return process.env.NODE_ENV === 'production' ? 'none' : 'dev-plain';
 }
-function readPersonalKeys(): PersonalKeys {
+// ok:false = 키 파일은 있는데 지금 못 열었다(암호화가 아직 준비 안 됨 등). 그때 빈 키로 확정하면 그 실행 내내 키가 없는 것처럼 보이고,
+// 그 상태로 새 키를 저장하면 남은 키(R2 · Gemini)까지 지운다 — 업데이트 직후 자동으로 다시 켜진 실행에서 실제로 그랬다(26.10.2006 시험:
+// 키 파일 · 암호 열쇠는 그대로인데 그 한 번만 '없음'). 그래서 못 열면 확정하지 않고 다시 연다(ensurePersonalKeys · startServer).
+function readPersonalKeysResult(): { ok: true; keys: PersonalKeys } | { ok: false; error: string } {
+  const file = personalKeysFile();
+  if (!fs.existsSync(file)) return { ok: true, keys: {} };
+  const kind = personalStorageKind();
+  if (kind === 'none') return { ok: false, error: '암호화가 아직 준비되지 않음' };
   try {
-    const raw = fs.readFileSync(personalKeysFile());
-    const ss = personalSafeStorage();
-    const text = ss ? ss.decryptString(raw) : (personalStorageKind() === 'dev-plain' ? raw.toString('utf8') : '');
+    const raw = fs.readFileSync(file);
+    const text = kind === 'encrypted' ? personalSafeStorage().decryptString(raw) : raw.toString('utf8');
     const j = text ? JSON.parse(text) : {};
-    return j && typeof j === 'object' ? j : {};
-  } catch { return {}; }
+    return { ok: true, keys: j && typeof j === 'object' ? j : {} };
+  } catch (e: any) { return { ok: false, error: String(e?.message || e).slice(0, 160) }; }
+}
+function readPersonalKeys(): PersonalKeys { const r = readPersonalKeysResult(); return r.ok === true ? (r as { keys: PersonalKeys }).keys : {}; }
+let personalLoaded = false;
+let personalLoadError = '';
+// 켤 때 키를 어떻게 읽었는지 한 줄씩 — 사용자가 "키가 없어졌다" 고 할 때 볼 곳(userData/personal-boot.log, 64KB 넘으면 새로).
+function personalBootLog(line: string) {
+  try {
+    const f = path.join(path.dirname(personalKeysFile()), 'personal-boot.log');
+    try { if (fs.statSync(f).size > 64 * 1024) fs.unlinkSync(f); } catch { /* 없음 */ }
+    fs.appendFileSync(f, `[${new Date().toISOString()}] ${line}\n`);
+  } catch { /* 기록 실패는 넘어간다 */ }
+}
+// 아직 못 읽었으면 지금 다시 읽어 올린다. 읽었으면 true.
+function ensurePersonalKeys(): boolean {
+  if (personalLoaded) return true;
+  const r = readPersonalKeysResult();
+  if (r.ok === false) { personalLoadError = (r as { error: string }).error; return false; }
+  applyPersonalKeys((r as { keys: PersonalKeys }).keys);
+  personalLoaded = true;
+  personalLoadError = '';
+  return true;
 }
 function writePersonalKeys(k: PersonalKeys) {
   const kind = personalStorageKind();
@@ -181,6 +208,7 @@ function personalStatus() {
     gemini: { set: !!process.env.SEEDANCE_GEMINI_KEY, tail: tail4(process.env.SEEDANCE_GEMINI_KEY) },
     r2: { set: r2Set, bucket: r2Set ? String(process.env.R2_BUCKET) : '', host },
     ...(personalRefused ? { refused: personalRefused } : {}),
+    ...(personalLoaded ? {} : { pending: true }),   // 저장된 키를 아직 여는 중 — 화면은 '키 넣기' 띠를 띄우지 않는다
     storage: personalStorageKind(),
   };
 }
@@ -386,10 +414,35 @@ const KEY_HELP = process.platform === 'win32'
 
 async function startServer() {
   if (PERSONAL) {
-    const k = readPersonalKeys();
-    applyPersonalKeys(k);
-    console.log(`[Personal] 개인판 — 내 키: BytePlus ${k.byteplus ? '있음' : '없음'} · R2 ${k.r2 ? '있음' : '없음'} · Gemini ${k.gemini ? '있음' : '없음'} (${personalStorageKind()})`);
-    // 저장된 키가 회사 팀 키면 지운다 — 넣을 때 게이트웨이에 못 물어봤거나(인터넷), 그 뒤 회사 키로 등록된 경우.
+    const t0 = Date.now();
+    const loaded = () => {
+      const k = readPersonalKeys();
+      const line = `내 키: BytePlus ${k.byteplus ? '있음' : '없음'} · R2 ${k.r2 ? '있음' : '없음'} · Gemini ${k.gemini ? '있음' : '없음'} (${personalStorageKind()}${Date.now() - t0 > 50 ? ` · ${Date.now() - t0}ms 기다림` : ''})`;
+      console.log(`[Personal] 개인판 — ${line}`);
+      personalBootLog(line);
+      checkCompanyKeyOnBoot(k);
+    };
+    if (ensurePersonalKeys()) loaded();
+    else {
+      // 키 파일을 아직 못 열었다 — 빈 키로 확정하지 않고 0.5초마다 다시(최대 30초). 그 사이 화면은 '불러오는 중'(status.pending).
+      console.warn(`[Personal] 키 파일을 아직 못 엶(${personalLoadError}) — 다시 시도`);
+      personalBootLog(`키 파일을 아직 못 엶(${personalLoadError}) — 다시 시도`);
+      const timer = setInterval(() => {
+        if (ensurePersonalKeys()) { clearInterval(timer); loaded(); return; }
+        if (Date.now() - t0 > 30000) {
+          clearInterval(timer);
+          // 끝내 못 열었다(다른 PC · 다른 Windows 계정에서 옮겨 온 파일 등) — 빈 키로 두고 다시 넣게 한다. 다시 넣으면 그 파일을 갈아 끼운다.
+          personalLoaded = true;
+          applyPersonalKeys({});
+          personalRefused = '저장된 키를 이 PC 에서 열지 못했어요(다른 PC · 다른 Windows 계정에서 옮겨 온 파일일 수 있어요).\n설정 › 내 키 에서 다시 넣어 주세요.';
+          console.warn(`[Personal] 키 파일을 30초 동안 못 엶 — 다시 넣게 함 (${personalLoadError})`);
+          personalBootLog(`30초 동안 못 엶 — 다시 넣게 함 (${personalLoadError})`);
+        }
+      }, 500);
+    }
+  }
+  // 저장된 키가 회사 팀 키면 지운다 — 넣을 때 게이트웨이에 못 물어봤거나(인터넷), 그 뒤 회사 키로 등록된 경우.
+  function checkCompanyKeyOnBoot(k: PersonalKeys) {
     if (k.byteplus) void isCompanyKey(k.byteplus).then((company) => {
       if (company !== true) return;
       const cur = readPersonalKeys();
@@ -1548,12 +1601,15 @@ async function startServer() {
   // ── 개인판 내 키(26.10.2005~) ── 회사판에서는 없다. 값은 받기만 하고 돌려주지 않는다(끝 네 글자만).
   app.get('/api/personal/status', (_req, res) => {
     if (!PERSONAL) return res.status(404).json({ error: 'not personal edition' });
+    ensurePersonalKeys();
     res.json(personalStatus());
   });
   let personalSaving = false;
   app.post('/api/personal/keys', async (req, res) => {
     if (!PERSONAL) return res.status(404).json({ error: 'not personal edition' });
     if (personalSaving) return res.status(409).json({ error: '앞의 저장이 아직 끝나지 않았어요.' });
+    // 저장된 키를 아직 못 열었으면 저장하지 않는다 — 빈 키에 새 키만 얹어 쓰면 남은 키(R2 · Gemini)가 지워진다.
+    if (!ensurePersonalKeys()) return res.status(503).json({ error: '저장된 키를 아직 여는 중이에요. 잠시 뒤 다시 해 주세요.' });
     personalSaving = true;
     try {
       const b = (req.body && typeof req.body === 'object') ? req.body : {};
@@ -2590,6 +2646,9 @@ async function startServer() {
     // receive them (unknown top-level fields can 400). The rest is forwarded as-is.
     const { project: billingProject, project_id: rawProjectId, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
     const billingProjectId = typeof rawProjectId === 'string' ? rawProjectId.trim() : '';
+    if (PERSONAL && !ensurePersonalKeys()) {
+      return res.status(503).json({ error: { message: '저장된 키를 아직 여는 중이에요. 잠시 뒤 다시 보내 주세요.' } });
+    }
     if (PERSONAL && !apiKey()) {
       return res.status(400).json({ error: { message: '본인 BytePlus 키를 먼저 넣어 주세요 — 설정 패널 맨 위 "내 키".' } });
     }

@@ -8,6 +8,8 @@ export type PersonalKeyStatus = {
   r2: { set: boolean; bucket: string; host: string };
   /** 켤 때 확인해 보니 쓸 수 없는 키여서 지웠다(회사 팀 키 등) — 사용자에게 한 번 알린다. */
   refused?: string;
+  /** 저장된 키를 서버가 아직 여는 중(켠 직후 암호화 준비 전) — 이때는 '키 없음' 으로 보지 않는다. */
+  pending?: boolean;
   /** encrypted = Windows 계정 암호화(DPAPI) · dev-plain = 개발 실행(평문 파일) · none = 저장할 수 없음 */
   storage: 'encrypted' | 'dev-plain' | 'none';
 };
@@ -19,7 +21,11 @@ const listeners = new Set<(s: PersonalKeyStatus | null) => void>();
 export async function refreshPersonalKeyStatus(): Promise<PersonalKeyStatus | null> {
   try {
     const r = await fetch('/api/personal/status');
-    if (r.ok) { cache = await r.json(); for (const f of listeners) f(cache); }
+    if (r.ok) {
+      cache = await r.json();
+      for (const f of listeners) f(cache);
+      if (cache?.pending) setTimeout(() => { void refreshPersonalKeyStatus(); }, 1000);   // 다 열 때까지 다시 묻는다
+    }
   } catch { /* 서버가 아직 안 떴다 — 다음에 */ }
   return cache;
 }

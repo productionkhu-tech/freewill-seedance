@@ -21,7 +21,7 @@ function Chip({ on, label, detail }: { on: boolean; label: string; detail: strin
 /** 설정 패널 맨 위 — 회사판의 '프로젝트 코드' 자리. */
 export function PersonalKeysCard() {
   const s = usePersonalKeyStatus();
-  const missing = !!s && !s.byteplus.set;
+  const missing = !!s && !s.pending && !s.byteplus.set;
   return (
     <div className={`${card} ${missing ? 'ring-2 ring-amber-400' : ''}`} data-personal-keys-card>
       <div className="flex items-center justify-between">
@@ -30,8 +30,8 @@ export function PersonalKeysCard() {
           {missing ? '키 넣기' : '관리'}
         </button>
       </div>
-      {!s ? (
-        <p className="text-[12px] text-gray-500">키 상태를 확인하는 중…</p>
+      {!s || s.pending ? (
+        <p className="text-[12px] text-gray-500">저장된 키를 불러오는 중…</p>
       ) : (
         <>
           <div className="flex flex-wrap gap-1.5">
@@ -51,7 +51,7 @@ export function PersonalKeysCard() {
 export function PersonalKeyBanner() {
   const s = usePersonalKeyStatus();
   const [hideRefused, setHideRefused] = useState(false);
-  if (!s) return null;
+  if (!s || s.pending) return null;
   if (s.refused && !hideRefused) {
     return (
       <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[85] w-[min(92%,34rem)] flex items-start gap-2.5 bg-red-50 border border-red-300 text-red-900 rounded-xl shadow-lg px-3.5 py-2.5">
