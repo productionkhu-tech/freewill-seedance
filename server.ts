@@ -150,7 +150,10 @@ function readPersonalKeysResult(): { ok: true; keys: PersonalKeys } | { ok: fals
   try {
     const raw = fs.readFileSync(file);
     const text = kind === 'encrypted' ? personalSafeStorage().decryptString(raw) : raw.toString('utf8');
-    const j = text ? JSON.parse(text) : {};
+    // ★ 빈 글자는 '못 읽음' 이다. 우리가 쓴 파일은 늘 JSON 객체('{}' 이상)로 풀린다. 업데이트 직후 자동으로 다시 켜진 실행에서
+    //   safeStorage 가 오류 없이 빈 글자를 돌려줬다(26.10.2007 시험 — 암호화 '준비됨' · 파일 그대로인데 '없음'). 빈 키로 확정하지 않고 다시 연다.
+    if (!text) return { ok: false, error: `복호화 결과가 비어 있음(${raw.length}B)` };
+    const j = JSON.parse(text);
     return { ok: true, keys: j && typeof j === 'object' ? j : {} };
   } catch (e: any) { return { ok: false, error: String(e?.message || e).slice(0, 160) }; }
 }
@@ -427,8 +430,10 @@ async function startServer() {
       // 키 파일을 아직 못 열었다 — 빈 키로 확정하지 않고 0.5초마다 다시(최대 30초). 그 사이 화면은 '불러오는 중'(status.pending).
       console.warn(`[Personal] 키 파일을 아직 못 엶(${personalLoadError}) — 다시 시도`);
       personalBootLog(`키 파일을 아직 못 엶(${personalLoadError}) — 다시 시도`);
+      let tries = 0;
       const timer = setInterval(() => {
-        if (ensurePersonalKeys()) { clearInterval(timer); loaded(); return; }
+        tries++;
+        if (ensurePersonalKeys()) { clearInterval(timer); personalBootLog(`${tries}번째에 열림`); loaded(); return; }
         if (Date.now() - t0 > 30000) {
           clearInterval(timer);
           // 끝내 못 열었다(다른 PC · 다른 Windows 계정에서 옮겨 온 파일 등) — 빈 키로 두고 다시 넣게 한다. 다시 넣으면 그 파일을 갈아 끼운다.
