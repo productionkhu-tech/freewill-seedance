@@ -9,6 +9,7 @@ import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as I
 import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink } from '../lib/send-request';
 import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from '../lib/agent-inbox';
 import { visibleProjectIds } from '../lib/split';
+import { PERSONAL } from '../lib/edition';
 import { CATEGORY_META, fileToElementImage, MAX_ELEMENT_IMAGES } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
 import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
@@ -422,7 +423,7 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
           <div className="absolute inset-x-0 bottom-0 px-3 pt-6 pb-2 flex items-end gap-2 bg-gradient-to-t from-black/90 via-black/55 to-transparent">
             <span className="text-[11px] text-white/90 leading-snug flex-1 text-left">
               {masterGone
-                ? '원본 영상은 보관 기간이 지나 남아 있지 않습니다. 이 이미지는 받아두실 수 있습니다.'
+                ? (PERSONAL ? '24시간 링크가 지나 영상은 남아 있지 않아요. 첫 장면 이미지는 받아 둘 수 있어요.' : '원본 영상은 보관 기간이 지나 남아 있지 않습니다. 이 이미지는 받아두실 수 있습니다.')
                 : '지금 영상을 불러오지 못했습니다. 보관본은 남아 있습니다.'}
             </span>
             {masterGone ? (
@@ -998,7 +999,14 @@ export async function downloadClip(msgId: string, videoUrl: string, taskId: stri
     // 파일을 앱에 끌어다 놓으면 작성 칸이 되살아난다.
     if (msg) pinMessageReferences(msg);
     const meta = msg ? await downloadMetaFor(msg) : undefined;
-    const savedPath = await downloadViaProxy(masterSrc || videoUrl, filename, meta);
+    // 개인판(26.10.2006~)은 보관본이 없다 — 24시간 링크(옴니는 앱 안 파일)로 받는다. 링크가 지났으면 받을 것이 없다고 말한다.
+    const src = PERSONAL ? (videoUrl.startsWith('/') || (msg && originMaybeAlive(msg)) ? videoUrl : '') : (masterSrc || videoUrl);
+    if (!src) {
+      window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { msg: '이 영상은 24시간 링크가 지나 받을 수 없어요 — 남은 것은 첫 장면 이미지예요.', ok: false } }));
+      pendingReveal.delete(filename);
+      return;
+    }
+    const savedPath = await downloadViaProxy(src, filename, meta);
     useAppStore.getState().updateMessage(owner.id, msgId, {
       downloadedAt: Date.now(),
       // Blob fast path knows the path immediately; otherwise the done-listener fills it.

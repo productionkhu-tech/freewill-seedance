@@ -2160,8 +2160,8 @@ export const useAppStore = create<AppState>()(
       deletedProjectIds: [],
       projects: [],
       currentProjectId: null,
-      // 개인판은 기본으로 켠다 — 회사판처럼 NCP 가 받쳐 주지 않아, BytePlus 영상 주소(24시간)가 죽기 전에 PC 에 남겨야 한다.
-      autoDownload: PERSONAL,
+      // 개인판도 끈다(26.10.2006 — 2005 는 켰다): 사용자 2026-10-21 "PC 가 그걸 다 다운받으면 안 될 것 같은데". 받을 것은 다운로드 버튼으로.
+      autoDownload: false,
       setAutoDownload: (v) => set({ autoDownload: v }),
       // 개인판은 코드 한 줄(PERSONAL_BILLING)을 늘 고른 상태다 — 보내기 · 권한 · 에이전트가 손대지 않고 그대로 돈다(edition.ts).
       billingProjects: PERSONAL ? [{ ...PERSONAL_BILLING }] : [],

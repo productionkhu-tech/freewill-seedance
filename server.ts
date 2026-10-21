@@ -26,7 +26,7 @@ import {
   putPoster, presignPoster, hasPoster,
   presignPreview, previewState,
   lastNcpError, resetNcpBackoff,
-  initC2paIndex, taskIdForC2pa, localPreviewPath,
+  initC2paIndex, taskIdForC2pa,
 } from './ncp';
 
 dotenv.config();
@@ -2037,11 +2037,8 @@ async function startServer() {
   app.get('/api/media/:taskId/preview', async (req, res) => {
     const taskId = String(req.params.taskId).replace(/[^A-Za-z0-9._-]/g, '');
     if (!taskId) return res.status(400).end();
-    if (PERSONAL) {   // 개인판 — PC 에 만들어 둔 것(ncp.ts keepLocal). 없으면 404 → 화면이 원본으로 넘어간다
-      const lp = localPreviewPath(taskId);
-      if (lp && previewState(taskId) === true && fs.existsSync(lp)) { touchCache(lp); return res.sendFile(lp); }
-      return res.status(404).json({ error: 'no preview', state: previewState(taskId) ?? null });
-    }
+    // 개인판(26.10.2006~)은 재생용 사본을 만들지 않는다(영상을 PC 에 받지 않으니) — 화면은 24시간 링크로 넘어간다.
+    if (PERSONAL) return res.status(404).json({ error: 'no preview', state: null });
     const url = await presignPreview(taskId);
     if (!url) return res.status(404).json({ error: 'no preview', state: previewState(taskId) ?? null });
     try {

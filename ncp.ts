@@ -32,8 +32,8 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { makePoster, makePreview, ffmpegPath } from './transcode';
 
 const GATEWAY_URL = process.env.SEEDANCE_GATEWAY_URL || 'https://seedance-gateway.production-khu.workers.dev';
-// 개인판(26.10.2005~)은 NCP 를 쓰지 않는다 — 회사 보관소다. 대신 완성 영상을 이 PC 에만 남긴다(keepLocal: 사본 · 썸네일 ·
-// 재생용 H.264). 판은 main.cjs 가 서버를 띄우기 전에 정해 둔다(src/lib/edition.ts).
+// 개인판(26.10.2005~)은 NCP 를 쓰지 않는다 — 회사 보관소다. 영상도 PC 에 받지 않고 썸네일 한 장만 남긴다(keepPosterOnly, 26.10.2006~).
+// 판은 main.cjs 가 서버를 띄우기 전에 정해 둔다(src/lib/edition.ts).
 const PERSONAL = process.env.SEEDANCE_EDITION === 'personal';
 
 export type NcpReady = {
@@ -483,7 +483,7 @@ function stallGuard(ms: number, what: string) {
 const STALL_MS = 60 * 1000;
 
 // 1. 로컬 사본을 확보한다. 이게 있어야 (a) 프리뷰가 즉시 뜨고 (b) 업로드가 실패해도 원본 URL 이 죽은 뒤에 재시도할 수 있다.
-//    개인판은 이것이 보관의 전부다(keepLocal).
+//    (개인판은 쓰지 않는다 — keepPosterOnly.)
 async function ensureLocalCopy(job: Job): Promise<string> {
     let local = job.localPath && fs.existsSync(job.localPath) ? job.localPath : '';
     if (!local) {
@@ -534,43 +534,29 @@ function failArchive(job: Job, label: string, e: any) {
     saveQueue();
 }
 
-/** 개인판의 재생용 H.264 사본 자리 — 원본 옆(media-cache/{taskId}.preview.mp4). */
-export function localPreviewPath(taskId: string): string {
-  const row = mediaIndex.get(taskId);
-  return row?.local ? row.local.replace(/.[A-Za-z0-9]+$/, '.preview.mp4') : '';
-}
-
-// 개인판(26.10.2005~): 원본을 PC 에 받아 두고 썸네일 · 재생용 H.264 를 옆에 만든다 — NCP 가 하던 일 중 이 PC 몫만.
-// 색인의 key 는 'local:' 로 시작한다(빈 key 는 색인을 다시 읽을 때 버려진다 — initNcpIndex). 30일 정리 · 캐시 비우기는
-// 회사판의 로컬 사본과 같다 — 오래 둘 것은 '생성 시 자동 다운로드'(개인판 기본 켬)가 다운로드 폴더에 남긴다.
-async function keepLocal(job: Job) {
+// 개인판(26.10.2006~): 영상은 PC 에 받지 않는다(사용자 2026-10-21 "PC 가 그걸 다 다운받으면 안 될 것 같은데 · 24시간 링크로 하되
+// 사라지면 첫 썸네일만 남게"). 카드는 BytePlus 링크로 바로 재생하고(ChatArea playbackChain 의 마지막 단 — 20시간 안쪽만 시도),
+// 여기서는 그 링크에서 **썸네일 한 장만** 만든다 — ffmpeg 가 링크의 필요한 부분만 읽는다(영상 전체를 받지 않는다, 시험이 잰다).
+// 링크가 죽은 뒤에는 이 썸네일만 남는다(posters/ — 30일 정리 · 캐시 비우기에서 빠지는 폴더). 받아 둘 것은 사용자가 다운로드 버튼으로.
+// 옴니는 다르다 — 서버가 생성하면서 이미 media-cache 에 받은 파일이 유일한 사본이라(24시간 링크가 없다) 지우지 않고 거기서 만든다.
+// (26.10.2005 는 원본을 받아 두고 재생용 H.264 까지 만들었다 — 이 판에서 뺐다.)
+async function keepPosterOnly(job: Job) {
+  const src = job.localPath && fs.existsSync(job.localPath) ? job.localPath : (job.sourceUrl || '');
+  if (!src) { queue.delete(job.taskId); saveQueue(); return; }
+  const safeName = String(job.taskId).replace(/[^A-Za-z0-9._-]/g, '') || 'unknown';
+  const out = path.join(CACHE_DIR, `${safeName}.poster.webp`);
   try {
-    const local = await ensureLocalCopy(job);
-    const size = fs.statSync(local).size;
-    const pid = String(job.projectId || '').trim();
-    mediaIndex.set(job.taskId, { key: `local:${path.basename(local)}`, bucket: '', size, at: Date.now(), project: job.project, ...(pid ? { projectId: pid } : {}), local });
-    saveIndex();
+    if (!(await makePoster(src, out))) throw new Error('썸네일을 만들지 못했습니다');
+    savePosterLocal(job.taskId, fs.readFileSync(out));
     queue.delete(job.taskId);
     saveQueue();
-    console.log(`[Local] 보관 ${path.basename(local)} — ${(size / 1048576).toFixed(1)}MB (개인판 — 이 PC 에만)`);
-    const base = local.replace(/.[A-Za-z0-9]+$/, '');
-    const row = mediaIndex.get(job.taskId)!;
-    const posterOut = `${base}.poster.webp`;
-    try {
-      if (await makePoster(local, posterOut)) { savePosterLocal(job.taskId, fs.readFileSync(posterOut)); row.poster = true; }
-    } catch (e: any) { console.warn('[Local] 썸네일 실패:', e?.message); }
-    finally { try { fs.rmSync(posterOut, { force: true }); } catch {} }
-    try {
-      const r0 = await makePreview(local, `${base}.preview.mp4`);
-      if (r0 === 'skipped') row.preview = 'skipped';
-      else if (r0 === 'made') row.preview = true;
-    } catch (e: any) { console.warn('[Local] 재생용 사본 실패:', e?.message); }
-    saveIndex();
+    console.log(`[Local] 썸네일만 ${safeName} (개인판 — 영상은 받지 않음)`);
   } catch (e: any) { failArchive(job, job.taskId, e); }
+  finally { try { fs.rmSync(out, { force: true }); } catch {} }
 }
 
 async function archiveOne(job: Job) {
-  if (PERSONAL) return keepLocal(job);
+  if (PERSONAL) return keepPosterOnly(job);
   const ncp = await ensureNcp();
   if (!ncp) return; // 다음 기회에. 큐에 그대로 남는다.
 
