@@ -1693,8 +1693,16 @@ export function omniTaskRefCaps(model: string, task: string): { image: number; v
 // 두 해상도는 문서가 못 박은 값이다 — 둘 다 "다른 값을 넣으면 에러" 라고 적혀 있다.
 export const DRAFT_RESOLUTION = '480p';
 export const DRAFT_FINAL_RESOLUTION = '1080p';
-// 초안 task id 는 created_at 부터 7일 동안만 본편에 쓸 수 있다 (문서 명시).
-export const DRAFT_VALID_MS = 7 * 24 * 60 * 60 * 1000;
+// 초안 task id 를 본편에 쓸 수 있는 기간은 '만든 때' 로 정해진다.
+// 처음엔 created_at 부터 7일(문서 명시). 2026-10-28 BytePlus 담당자 알림: 그날 저녁부터 만든 초안은 14일, 그 전에 만든 것은
+// 소급 없이 7일 그대로. 바뀌는 시각을 넉넉하게 2026-10-29 09:00 KST 로 잡는다(사용자: "내일 아침에 맞춰서") — 그 사이 몇 시간치는
+// 실제로 14일이어도 7일로 말한다. 만료를 실제보다 늦게 말하는 일(본편을 눌렀는데 BytePlus 가 거절)은 없게.
+// 이미 만든 초안의 기간은 바뀌지 않으므로, 이 줄이 있으면 배포 시각과 상관없이 맞다.
+const DAY_MS = 24 * 60 * 60 * 1000;
+export const DRAFT_14_DAYS_FROM = Date.parse('2026-10-29T09:00:00+09:00');
+export function draftValidDays(createdAt: number): number {
+  return createdAt >= DRAFT_14_DAYS_FROM ? 14 : 7;
+}
 export function modelSupportsDraft(model: string): boolean {
   return MODELS.find(m => m.id === model)?.draftMode === true;
 }
@@ -1709,7 +1717,12 @@ export function draftEffective(model: string, draft?: boolean): boolean {
 // 1초 안팎으로 같다. startTime 이 없으면 timestamp(전송 직전)를 쓴다 — 그쪽이 더 이르므로
 // 만료를 실제보다 늦게 말하는 일은 없다.
 export function draftExpiresAt(m: { startTime?: number; timestamp?: number }): number {
-  return (m.startTime || m.timestamp || 0) + DRAFT_VALID_MS;
+  const created = m.startTime || m.timestamp || 0;
+  return created + draftValidDays(created) * DAY_MS;
+}
+// 그 초안이 며칠짜리인가 — 안내 문구용(7 또는 14).
+export function draftDaysOf(m: { startTime?: number; timestamp?: number }): number {
+  return draftValidDays(m.startTime || m.timestamp || 0);
 }
 
 /**

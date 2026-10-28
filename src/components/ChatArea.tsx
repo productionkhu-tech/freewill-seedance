@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo } from 'react';
-import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, DRAFT_FINAL_RESOLUTION, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
+import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, draftDaysOf, DRAFT_FINAL_RESOLUTION, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
@@ -75,7 +75,7 @@ function translateError(error: string): string {
   //   물려받는 값 재전송 → "generate_audio is not supported for draft_task"
   //   없는 초안 id     → "`content[0].draft_task.id` ... is not valid: the parameter
   //                       'draft_task_id' must be a draft task with status 'succeeded'"
-  if (/draft[_ ]?task/i.test(error)) return 'Draft → 본편 요청이 거절되었습니다.\nDraft는 생성 후 7일까지만 본편으로 만들 수 있습니다. 아래 원문을 확인해주세요.';
+  if (/draft[_ ]?task/i.test(error)) return 'Draft → 본편 요청이 거절되었습니다.\nDraft는 만든 뒤 14일(2026-10-29 오전 9시 전에 만든 Draft는 7일)까지만 본편으로 만들 수 있습니다. 아래 원문을 확인해주세요.';
   // 4k is flagship-only: Fast/Mini reject it at parameter validation, before a task exists.
   if (error.includes('parameter resolution') && error.includes('not valid')) return '이 모델은 선택한 해상도를 지원하지 않습니다. 4K는 Seedance 2.0(플래그십) 전용입니다.';
   if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;
@@ -1563,7 +1563,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                     if (finalOther) return null;
                     const exp = draftExpiresAt(msg);
                     if (Date.now() > exp) return (
-                      <span title="Draft는 생성 후 7일까지만 본편으로 만들 수 있습니다" className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
+                      <span title={`이 Draft는 만든 뒤 ${draftDaysOf(msg)}일까지만 본편으로 만들 수 있었습니다`}className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
                     );
                     return (
                       <button onClick={() => { void actions.current.makeFinalFromDraft(msg.taskId!, msg); }}
@@ -3855,7 +3855,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     }
     const draftMsg = owner.messages.find(m => m.taskId === draftTaskId);
     if (draftMsg && Date.now() > draftExpiresAt(draftMsg)) {
-      warn('Draft는 생성 후 7일까지만 본편으로 만들 수 있습니다.\n같은 설정으로 다시 뽑으려면 Draft 카드의 재생성(✦)을 누르세요.');
+      warn(`이 Draft는 만든 뒤 ${draftDaysOf(draftMsg)}일까지만 본편으로 만들 수 있습니다.\n같은 설정으로 다시 뽑으려면 Draft 카드의 재생성(✦)을 누르세요.`);
       return;
     }
     const us = base.usedSettings || {};
