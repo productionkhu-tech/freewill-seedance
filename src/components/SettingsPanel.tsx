@@ -652,6 +652,25 @@ export function SettingsPanel() {
     );
   };
 
+  // 레퍼런스 · 편집 · 연장 패널의 개수 표 — 한 모양(이름 · n/최대 · 한도). 예전엔 셋이 따로 써서 편집은 영상 줄만, 연장은 한 줄에
+  // 몰아 단어 중간에서 줄이 바뀌었다(26.10.2803). 0개를 받는 종류는 부르는 쪽이 빼고 넘긴다.
+  const renderRefCounts = (rows: { label: string; n: number; max: number; note: string }[]) => (
+    <div className="text-[11px] leading-snug space-y-1">
+      {rows.map(r => (
+        <div key={r.label} className="flex items-baseline gap-2">
+          <span className="w-10 shrink-0 font-semibold text-gray-600">{r.label}</span>
+          <span className={`w-8 shrink-0 tabular-nums ${r.n > r.max ? 'text-red-500' : r.n === r.max ? 'text-amber-600' : 'text-gray-700'}`}>{r.n}/{r.max}</span>
+          <span className="text-gray-400 whitespace-nowrap">{r.note}</span>
+        </div>
+      ))}
+    </div>
+  );
+  const countOf = (t: 'image_url' | 'video_url' | 'audio_url') => assets.filter(a => a.type === t).length;
+  // 이미지는 @어셋 멘션 이미지까지 한도에 든다(보낼 때 함께 센다 — send-request).
+  const imageRow = (max: number) => ({ label: '이미지', n: countOf('image_url') + mentionedElementImages, max,
+    note: `개당 30MB · 300~6000px${mentionedElementImages > 0 ? ` · @어셋 ${mentionedElementImages}` : ''}` });
+  const audioRow = (max: number) => ({ label: '오디오', n: countOf('audio_url'), max, note: `개당 15MB · 2~${Math.floor(refAudSec)}초` });
+
   const renderUploadButton = (label: string, role: AssetRole, type: 'image_url' | 'video_url' | 'audio_url', accept: string, multiple: boolean = false, disabled: boolean = false) => {
     const handleDrop = (e: React.DragEvent<HTMLLabelElement>) => {
       e.preventDefault();
@@ -1153,29 +1172,11 @@ export function SettingsPanel() {
 
               {!isOmni && settings.mode === 'multimodal_reference' && (
                 <div className="space-y-2">
-                  <div className="text-[11px] leading-snug space-y-1">
-                    {(() => {
-                      const panelImgs = assets.filter(a => a.type === 'image_url').length;
-                      const total = panelImgs + mentionedElementImages;
-                      return (
-                        <div className="flex items-baseline gap-2">
-                          <span className="w-10 shrink-0 font-semibold text-gray-600">이미지</span>
-                          <span className={`w-8 shrink-0 tabular-nums ${total > imgMax ? 'text-red-500' : total === imgMax ? 'text-amber-600' : 'text-gray-700'}`}>{total}/{imgMax}</span>
-                          <span className="text-gray-400 whitespace-nowrap">개당 30MB · 300~6000px{mentionedElementImages > 0 ? ` · @어셋 ${mentionedElementImages}` : ''}</span>
-                        </div>
-                      );
-                    })()}
-                    <div className="flex items-baseline gap-2">
-                      <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
-                      <span className={`w-8 shrink-0 tabular-nums ${assets.filter(a => a.type === 'video_url').length > vidMax ? 'text-red-500' : 'text-gray-700'}`}>{assets.filter(a => a.type === 'video_url').length}/{vidMax}</span>
-                      <span className="text-gray-400 whitespace-nowrap">개당 200MB · 2~{Math.floor(refVidSec)}초</span>
-                    </div>
-                    <div className="flex items-baseline gap-2">
-                      <span className="w-10 shrink-0 font-semibold text-gray-600">오디오</span>
-                      <span className={`w-8 shrink-0 tabular-nums ${assets.filter(a => a.type === 'audio_url').length > audMax ? 'text-red-500' : 'text-gray-700'}`}>{assets.filter(a => a.type === 'audio_url').length}/{audMax}</span>
-                      <span className="text-gray-400 whitespace-nowrap">개당 15MB · 2~{Math.floor(refAudSec)}초</span>
-                    </div>
-                  </div>
+                  {renderRefCounts([
+                    imageRow(imgMax),
+                    { label: '비디오', n: countOf('video_url'), max: vidMax, note: `개당 200MB · 2~${Math.floor(refVidSec)}초` },
+                    audioRow(audMax),
+                  ])}
                   {/* Counts are per-model (2.5 allows 10 videos / 10 audio, 2.0 allows 3).
                       These were hardcoded 3, which locked 2.5 out of its own allowance. */}
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= imgMax)}
@@ -1186,18 +1187,23 @@ export function SettingsPanel() {
 
               {!isOmni && settings.mode === 'edit_video' && (
                 <div className="space-y-2">
+                  {/* 2.5 는 영상 여러 개(26.10.2801~) — 모델이 프롬프트를 보고 고칠 영상을 고르고, 결과의 비율 · 길이는 그 영상을
+                      따른다(BytePlus 문서 seedance-2-5). 2.0 은 예전 그대로 1개 · 새로 넣으면 교체. 영상 길이는 모델이 실제로
+                      거는 값(refVidMin · refVidSec — 2.5 편집 4~30초)을 그대로 보인다. */}
+                  {renderRefCounts([
+                    imageRow(editCaps.image),
+                    { label: '비디오', n: countOf('video_url'), max: editCaps.video,
+                      note: editCaps.video > 1 ? `각 ${refVidMin}~${Math.floor(refVidSec)}초 · 합계 ${Math.floor(refVidSec)}초` : `${refVidMin}~${Math.floor(refVidSec)}초 · 넣으면 교체` },
+                    audioRow(editCaps.audio),
+                  ])}
+                  {editCaps.video > 1 && (
+                    <p className="text-[10px] text-gray-500 leading-snug break-keep">여러 개면 <b>고칠 영상을 프롬프트에서 @Video로 지목</b>하세요 — 결과의 비율 · 길이는 그 영상을 따릅니다.</p>
+                  )}
                   {/* Same trap as extend: the model re-derives the task from the prompt after
                       the task is queued, so an edit prompt that doesn't read as an edit fails
                       asynchronously (InvalidParameter.TaskTypeMismatch). BytePlus doc 2607688
-                      names the wording. The source clip must also be 4-30s for editing. */}
-                  <p className="text-[10px] text-amber-600 leading-snug break-keep">프롬프트에 <b>편집한다는 뜻</b>이 드러나야 합니다 — "@Video 1에 ~를 추가/삭제/교체", "바꿔줘". 없으면 모델이 다른 작업으로 분류해 전송 후 실패합니다. 소스 영상은 <b>4~30초</b>여야 합니다.</p>
-                  {/* 2.5 는 영상 여러 개(26.10.2801~) — 모델이 프롬프트를 보고 고칠 영상을 고르고, 결과의 비율 · 길이는 그 영상을
-                      따른다(BytePlus 문서 seedance-2-5). 2.0 은 예전 그대로 1개 · 새로 넣으면 교체. */}
-                  {editCaps.video > 1 && (
-                    <p className="text-[10px] text-gray-500 leading-snug break-keep">
-                      비디오 {assets.filter(a => a.type === 'video_url').length}/{editCaps.video} · 각 4~30초 · 합계 {Math.floor(refVidSec)}초까지. 여러 개면 <b>고칠 영상을 프롬프트에서 @Video로 지목</b>하세요 — 결과의 비율 · 길이는 그 영상을 따릅니다.
-                    </p>
-                  )}
+                      names the wording. */}
+                  <p className="text-[10px] text-amber-600 leading-snug break-keep">프롬프트에 <b>편집한다는 뜻</b>이 드러나야 합니다 — "@Video 1에 ~를 추가/삭제/교체", "바꿔줘". 없으면 모델이 다른 작업으로 분류해 전송 후 실패합니다.</p>
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= imgMax)}
                   {editCaps.video > 1
                     ? renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= editCaps.video)
@@ -1207,15 +1213,18 @@ export function SettingsPanel() {
                         ? renderReplaceButton('비디오 교체', existingVideo, 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm')
                         : renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', false, false);
                     })()}
-                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= audMax)}
+                  {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', true, assets.filter(a => a.type === 'audio_url').length >= audMax)}
                 </div>
               )}
 
               {!isOmni && settings.mode === 'extend_video' && (
                 <div className="space-y-2">
-                  <p className="text-[12px] text-gray-500 leading-tight">
-                    비디오: {assets.filter(a => a.type === 'video_url').length}/{extendCaps.video}{extendCaps.video > 3 ? ` · 합계 ${Math.floor(refVidSec)}초까지` : ` (최대 ${extendCaps.video}개 이어붙이기)`}{extendCaps.image > 0 ? ` · 이미지 ${assets.filter(a => a.type === 'image_url').length}/${extendCaps.image}` : ''}{extendCaps.audio > 0 ? ` · 오디오 ${assets.filter(a => a.type === 'audio_url').length}/${extendCaps.audio}` : ''}
-                  </p>
+                  {/* 받는 종류만 줄을 보인다 — 2.0 계열 연장은 비디오 한 줄(이미지 · 오디오 0). */}
+                  {renderRefCounts([
+                    ...(extendCaps.image > 0 ? [imageRow(extendCaps.image)] : []),
+                    { label: '비디오', n: countOf('video_url'), max: extendCaps.video, note: `각 ${refVidMin}~${Math.floor(refVidSec)}초 · 합계 ${Math.floor(refVidSec)}초` },
+                    ...(extendCaps.audio > 0 ? [audioRow(extendCaps.audio)] : []),
+                  ])}
                   {/* Seedance re-reads the task from the PROMPT after the task is queued, and
                       disagreeing with the mode we declared costs a full async failure
                       (InvalidParameter.TaskTypeMismatch) — the wait and the slot are already
