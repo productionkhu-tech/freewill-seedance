@@ -2318,7 +2318,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // become <IMAGE_REF_N>). Never key this off the stale Seedance `mode` when on Omni.
   const elementMentionEnabled = isOmni
     ? omniTask === 'reference_to_video'
-    : (project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video');
+    : (project.settings.mode === 'multimodal_reference' || project.settings.mode === 'edit_video'
+      || (project.settings.mode === 'extend_video' && modeRefCaps(project.settings.model, 'extend_video').image > 0));
   const collectionElements = useMemo(
     () => (elementMentionEnabled && boundCollectionId ? elementAssets.filter(a => a.collectionId === boundCollectionId) : []),
     [elementAssets, boundCollectionId, elementMentionEnabled]
@@ -3008,7 +3009,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
 
     const mode = project.settings.mode;
     if (mode === 'text_to_video') { warn('Text to Video 모드에서는 이미지를 첨부할 수 없습니다.'); return; }
-    if (mode === 'extend_video') { warn('Extend Video 모드에서는 이미지를 첨부할 수 없습니다.\n(비디오 1~3개만 사용하는 모드입니다)'); return; }
+    if (mode === 'extend_video' && modeRefCaps(project.settings.model, mode).image === 0) { warn('이 모델의 Extend Video 모드에서는 이미지를 첨부할 수 없습니다.\n(비디오만 사용하는 모드입니다)'); return; }
 
     for (const raw of imageFiles) {
       // 클립보드 이미지는 전부 image.png라는 이름으로 들어옴 → 구분 가능한 이름 부여
@@ -3059,9 +3060,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
             pasteCycleRef.current = { firstId: first.id, lastId: last.id, next: targetRole === 'first_frame' ? 'last_frame' : 'first_frame' };
           }
         } else {
-          // multimodal_reference / edit_video — 레퍼런스 이미지는 모델별 상한, 초과 시 기존 유지
+          // multimodal_reference / edit_video / (2.5) extend_video — 레퍼런스 이미지는 모델 · 모드별 상한, 초과 시 기존 유지
           const imgCount = assets.filter(a => a.type === 'image_url').length;
-          const pasteCap = modelImageMax(project.settings.model);
+          const pasteCap = mode === 'extend_video' ? modeRefCaps(project.settings.model, mode).image : modelImageMax(project.settings.model);
           if (imgCount >= pasteCap) {
             warn(`이미지는 최대 ${pasteCap}장까지만 첨부할 수 있습니다.\n기존 이미지는 그대로 유지됩니다.`);
             break;

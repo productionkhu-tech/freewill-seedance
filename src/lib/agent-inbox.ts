@@ -256,7 +256,7 @@ function manualText(m: any, version: string): string {
       L.push('', '| mode | 이름 | 레퍼런스 | 고정 · 조건 | 마지막 프레임 |', '|---|---|---|---|---|');
       for (const mo of x.modes) {
         const fixed = [mo.ratioLocked ? '비율 adaptive(입력 기준)' : '', mo.durationLocked ? '길이 자동' : '',
-          mo.minRefVideoSec && mo.refs.video ? `원본 영상 ${mo.minRefVideoSec}초 이상` : '', mo.id === 'edit_video' ? '영상 1개(교체)' : ''].filter(Boolean).join(' · ');
+          mo.minRefVideoSec && mo.refs.video ? `원본 영상 ${mo.minRefVideoSec}초 이상` : '', mo.id === 'edit_video' ? (mo.refs.video === 1 ? '영상 1개(교체)' : '고칠 영상을 프롬프트에서 @Video 로 지목(결과 비율 · 길이는 그 영상)') : ''].filter(Boolean).join(' · ');
         L.push(`| \`${mo.id}\` | ${mo.name} | ${capsText(mo.refs)} | ${fixed || '—'} | ${mo.returnLastFrame ? '가능' : '—'} |`);
       }
     }

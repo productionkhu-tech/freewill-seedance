@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, modeRefCaps, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
 import { PERSONAL } from '../lib/edition';
 import { PersonalKeysCard } from './PersonalKeys';
@@ -273,6 +273,9 @@ export function SettingsPanel() {
   const imgMax = modelImageMax(settings.model);                  // 2.0: 9 (unchanged)
   const vidMax = modelVideoMax(settings.model);                  // 2.0: 3 (unchanged)
   const audMax = modelAudioMax(settings.model);                  // 2.0: 3 (unchanged)
+  // 편집 · 연장의 수(26.10.2801~). 2.0 은 편집 영상 1(교체) · 연장 영상 3 · 연장 이미지 0 그대로, 2.5 는 모델 정보대로.
+  const editCaps = modeRefCaps(settings.model, 'edit_video');
+  const extendCaps = modeRefCaps(settings.model, 'extend_video');
   const refVidSec = modelRefVideoSec(settings.model);            // 2.0: 15.2 (unchanged)
   const refVidMin = refVideoMinSecFor(settings.model, settings.mode); // 2.5 편집만 4s, 그 외 2s
   const refAudSec = modelRefAudioSec(settings.model);            // 2.0: 15.2 · 2.5: 30.2
@@ -381,7 +384,7 @@ export function SettingsPanel() {
       if (t === 'reference_to_video') return ['image_url', 'video_url']; // images (≥1) + optional 1 video ref
       return ['image_url']; // image_to_video
     }
-    if (settings.mode === 'extend_video') return ['video_url'];
+    if (settings.mode === 'extend_video') return modeRefCaps(settings.model, 'extend_video').image > 0 ? ['image_url', 'video_url'] : ['video_url'];
     if (settings.mode === 'edit_video') return ['image_url', 'video_url', 'audio_url'];
     if (settings.mode === 'multimodal_reference') return ['image_url', 'video_url', 'audio_url'];
     if (settings.mode === 'image_to_video_first' || settings.mode === 'image_to_video_first_last') return ['image_url'];
@@ -451,9 +454,12 @@ export function SettingsPanel() {
       if (assetIdType === 'audio_url') maxAllowed = audMax;
     } else if (settings.mode === 'edit_video') {
       if (assetIdType === 'image_url') maxAllowed = imgMax;
-      if (assetIdType === 'video_url') maxAllowed = 1;
+      if (assetIdType === 'video_url') maxAllowed = editCaps.video;
       if (assetIdType === 'audio_url') maxAllowed = audMax;
-    } else if (settings.mode === 'extend_video' && assetIdType === 'video_url') maxAllowed = 3;
+    } else if (settings.mode === 'extend_video') {
+      if (assetIdType === 'video_url') maxAllowed = extendCaps.video;
+      if (assetIdType === 'image_url') maxAllowed = extendCaps.image;
+    }
 
     if (currentCount >= maxAllowed) return;
 
@@ -490,10 +496,11 @@ export function SettingsPanel() {
       if (type === 'audio_url') maxAllowed = audMax;
     } else if (settings.mode === 'edit_video') {
       if (type === 'image_url') maxAllowed = imgMax;
-      if (type === 'video_url') maxAllowed = 1;
+      if (type === 'video_url') maxAllowed = editCaps.video;
       if (type === 'audio_url') maxAllowed = audMax;
     } else if (settings.mode === 'extend_video') {
-      if (type === 'video_url') maxAllowed = 3;
+      if (type === 'video_url') maxAllowed = extendCaps.video;
+      if (type === 'image_url') maxAllowed = extendCaps.image;
     } else if (settings.mode === 'image_to_video_first' && type === 'image_url') {
       maxAllowed = 1;
     } else if (settings.mode === 'image_to_video_first_last' && type === 'image_url') {
@@ -1179,13 +1186,22 @@ export function SettingsPanel() {
                       asynchronously (InvalidParameter.TaskTypeMismatch). BytePlus doc 2607688
                       names the wording. The source clip must also be 4-30s for editing. */}
                   <p className="text-[10px] text-amber-600 leading-snug break-keep">프롬프트에 <b>편집한다는 뜻</b>이 드러나야 합니다 — "@Video 1에 ~를 추가/삭제/교체", "바꿔줘". 없으면 모델이 다른 작업으로 분류해 전송 후 실패합니다. 소스 영상은 <b>4~30초</b>여야 합니다.</p>
+                  {/* 2.5 는 영상 여러 개(26.10.2801~) — 모델이 프롬프트를 보고 고칠 영상을 고르고, 결과의 비율 · 길이는 그 영상을
+                      따른다(BytePlus 문서 seedance-2-5). 2.0 은 예전 그대로 1개 · 새로 넣으면 교체. */}
+                  {editCaps.video > 1 && (
+                    <p className="text-[10px] text-gray-500 leading-snug break-keep">
+                      비디오 {assets.filter(a => a.type === 'video_url').length}/{editCaps.video} · 각 4~30초 · 합계 {Math.floor(refVidSec)}초까지. 여러 개면 <b>고칠 영상을 프롬프트에서 @Video로 지목</b>하세요 — 결과의 비율 · 길이는 그 영상을 따릅니다.
+                    </p>
+                  )}
                   {renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= imgMax)}
-                  {(() => {
-                    const existingVideo = assets.find(a => a.type === 'video_url');
-                    return existingVideo
-                      ? renderReplaceButton('비디오 교체', existingVideo, 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm')
-                      : renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', false, false);
-                  })()}
+                  {editCaps.video > 1
+                    ? renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= editCaps.video)
+                    : (() => {
+                      const existingVideo = assets.find(a => a.type === 'video_url');
+                      return existingVideo
+                        ? renderReplaceButton('비디오 교체', existingVideo, 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm')
+                        : renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', false, false);
+                    })()}
                   {renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', false, assets.filter(a => a.type === 'audio_url').length >= audMax)}
                 </div>
               )}
@@ -1193,7 +1209,7 @@ export function SettingsPanel() {
               {!isOmni && settings.mode === 'extend_video' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
-                    비디오: {assets.filter(a => a.type === 'video_url').length}/3 (최대 3개 이어붙이기)
+                    비디오: {assets.filter(a => a.type === 'video_url').length}/{extendCaps.video}{extendCaps.video > 3 ? ` · 합계 ${Math.floor(refVidSec)}초까지` : ` (최대 ${extendCaps.video}개 이어붙이기)`}{extendCaps.image > 0 ? ` · 이미지 ${assets.filter(a => a.type === 'image_url').length}/${extendCaps.image}` : ''}
                   </p>
                   {/* Seedance re-reads the task from the PROMPT after the task is queued, and
                       disagreeing with the mode we declared costs a full async failure
@@ -1202,7 +1218,9 @@ export function SettingsPanel() {
                       Note this is the exact OPPOSITE of Gemini Omni, whose input filter
                       REJECTS "연장/extend" — same word, two providers, opposite requirements. */}
                   <p className="text-[10px] text-amber-600 leading-snug break-keep">프롬프트에 <b>이어붙인다는 뜻</b>이 드러나야 합니다 — "@Video 1 뒤를 이어서", "계속해서", "extend/continue". 없으면 모델이 다른 작업으로 분류해 전송 후 실패합니다.</p>
-                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= 3)}
+                  {/* 2.5 연장은 영상 10개 · 이미지도 받는다(26.10.2801~ — 문서 예시 "@Video 1 을 연장하고 @Image 1 의 인물이 …"). */}
+                  {extendCaps.image > 0 && renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= extendCaps.image)}
+                  {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= extendCaps.video)}
                 </div>
               )}
             </motion.div>

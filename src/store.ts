@@ -1334,6 +1334,13 @@ const SEEDANCE_25 = {
   // A hard constraint, and one that is only checked AFTER the task is queued
   // (InvalidParameter.TaskTypeConstraint), so a 3s clip costs a full async failure.
   editRefVideoMinSec: 4,
+  // 편집 · 연장에 영상 여러 개 · 연장에 이미지 (26.10.2801~). 문서(seedance-2-5, 2026-10-28 판): 편집은 "레퍼런스 영상 최소 1개,
+  // 모델이 프롬프트 의도로 고칠 영상을 고르고 결과 비율 · 길이는 그 영상을 따른다", 영상은 최대 10개 · 합계 30초.
+  // 2026-10-28 실측(TA Test, 480p): 편집 영상 2 → @Video 2 를 써서 @Video 1 을 고침(비율 · 길이 = @Video 1) · 편집 영상 7(29.5초) 생성됨 ·
+  // 연장 영상 10(29.2초) 생성됨 · 연장 영상 1 + 이미지 1 생성됨 · 합계 33초는 편집 · 연장 모두 생성 전에 400("≤ 30.2") · 11개도 생성 전 400.
+  // 편집의 둘째 영상은 3초도 받아 줬지만 문서는 "편집은 영상마다 4~30초" — 어느 영상을 고칠지는 프롬프트가 정해 앱이 모르므로 전부 4초로 둔다.
+  // 영상이 많을수록 모델이 @Video 1 의 움직임을 덜 지킨다(7개 시험) — 화면 안내가 '고칠 영상 지목' 을 말한다.
+  editVidMax: 10, extendVidMax: 10, extendImgMax: 30,
   refVideoSec: 30.2, refAudioSec: 30.2,
   // 2.5 can take reference audio with no image/video alongside it. 2.0 cannot.
   audioOnly: true,
@@ -1457,6 +1464,9 @@ export const MODELS: {
   refVideoSec?: number; refAudioSec?: number;
   // Shortest reference video the EDITING task accepts, when the model states one.
   editRefVideoMinSec?: number;
+  // 편집 · 연장에 붙일 수 있는 수(26.10.2801~). 없으면 예전 그대로 — 편집 영상 1(새로 넣으면 교체) · 연장 영상 3 · 연장 이미지 0.
+  // 문서와 실측으로 확인한 모델만 적는다(지금은 2.5 — 아래 SEEDANCE_25 주석).
+  editVidMax?: number; extendVidMax?: number; extendImgMax?: number;
   outputFormat?: string; outputFormats?: string[]; audioOnly?: boolean;
   adaptiveOnly?: GenerationMode[]; autoDurationOnly?: GenerationMode[];
   refTaskTypes?: Partial<Record<GenerationMode, string>>;
@@ -1653,12 +1663,16 @@ export function modelAllowsAudioOnly(model: string): boolean {
   return MODELS.find(m => m.id === model)?.audioOnly === true;
 }
 // 모드(시댄스) · 작업(Omni)별로 붙일 수 있는 레퍼런스 개수 (26.10.302~). 첨부(ChatArea attachFiles — 드래그와
-// 에이전트 작업함)와 에이전트 설명서가 같이 읽는다. 0 = 그 종류는 안 받음. 편집의 영상 1개는 '교체' 다.
+// 에이전트 작업함)와 에이전트 설명서가 같이 읽는다. 0 = 그 종류는 안 받음. 편집 영상이 1개인 모델은 새로 넣으면 '교체' 다
+// (여러 개 받는 모델은 더하고, 어느 영상을 고칠지는 프롬프트가 정한다 — 26.10.2801~).
 export function modeRefCaps(model: string, mode: GenerationMode): { image: number; video: number; audio: number } {
   switch (mode) {
     case 'multimodal_reference': return { image: modelImageMax(model), video: modelVideoMax(model), audio: modelAudioMax(model) };
-    case 'edit_video': return { image: modelImageMax(model), video: 1, audio: modelAudioMax(model) };
-    case 'extend_video': return { image: 0, video: 3, audio: 0 };
+    case 'edit_video': return { image: modelImageMax(model), video: MODELS.find(m => m.id === model)?.editVidMax ?? 1, audio: modelAudioMax(model) };
+    case 'extend_video': {
+      const m = MODELS.find(x => x.id === model);
+      return { image: m?.extendImgMax ?? 0, video: m?.extendVidMax ?? 3, audio: 0 };
+    }
     case 'image_to_video_first': return { image: 1, video: 0, audio: 0 };
     case 'image_to_video_first_last': return { image: 2, video: 0, audio: 0 };
     default: return { image: 0, video: 0, audio: 0 };

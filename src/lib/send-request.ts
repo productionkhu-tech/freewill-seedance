@@ -277,9 +277,9 @@ export async function attachFilesTo(sink: AssetSink, allFiles: File[], src?: (f:
     }
 
     if (file.type.startsWith('image/')) {
-      if (mode === 'extend_video') { rejected.push(`${file.name}: extend_video 모드는 이미지를 받지 않습니다.`); continue; }
       const imgCount = assets.filter(a => a.type === 'image_url').length;
       const maxImg = modeRefCaps(model, mode).image;   // store.ts — 에이전트 설명서도 같은 수를 읽는다
+      if (mode === 'extend_video' && maxImg === 0) { rejected.push(`${file.name}: 이 모델의 extend_video 모드는 이미지를 받지 않습니다.`); continue; }
       if (imgCount >= maxImg) { rejected.push(`${file.name}: 이미지 한도 ${maxImg}개 초과`); continue; }
       let role: any = 'reference_image';
       if (mode === 'image_to_video_first') role = 'first_frame';
@@ -308,11 +308,11 @@ export async function attachFilesTo(sink: AssetSink, allFiles: File[], src?: (f:
       const existingVideos = assets.filter(a => a.type === 'video_url');
       const vidCount = existingVideos.length;
       const maxVid = modeRefCaps(model, mode).video;
-      // edit_video has a 1-video cap. When the user drops a new video while one
+      // edit_video with a 1-video cap (2.0 계열). When the user drops a new video while one
       // is already attached, treat it as a replace (preserve asset id so any
       // "@[Video 1]" mention keeps pointing to the same slot) rather than
-      // rejecting with the over-limit alert.
-      const shouldReplace = mode === 'edit_video' && vidCount >= 1;
+      // rejecting with the over-limit alert. 여러 개 받는 모델(2.5)은 더한다.
+      const shouldReplace = mode === 'edit_video' && maxVid === 1 && vidCount >= 1;
       if (!shouldReplace && vidCount >= maxVid) {
         rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue;
       }
@@ -489,9 +489,12 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
     .map(id => elementById.get(id))
     .filter(Boolean) as ElementAssetT[];
   if (mentionedElements.length > 0) {
-    // Reference images only carry in these two modes.
-    if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
-      warn('어셋 멘션은 Multimodal Reference 또는 Edit Video 모드에서만 레퍼런스로 전송됩니다.\n해당 모드로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.');
+    // Reference images only carry in modes that take them — reference · edit, and extend on a
+    // model whose extend takes images (2.5, 26.10.2801~).
+    const takesImages = mode === 'multimodal_reference' || mode === 'edit_video'
+      || (mode === 'extend_video' && modeRefCaps(settings.model, mode).image > 0);
+    if (!takesImages) {
+      warn('어셋 멘션은 레퍼런스 이미지를 받는 모드(Multimodal Reference · Edit Video · 2.5 의 Extend Video)에서만 전송됩니다.\n해당 모드로 바꾸거나 프롬프트의 어셋 멘션을 지워주세요.');
       return;
     }
   }
@@ -502,7 +505,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   {
     const panelImageCount = assets.filter(a => a.type === 'image_url').length;
     const elementImageCount = mentionedElements.reduce((n, e) => n + e.images.length, 0);
-    const cap = modelImageMax(settings.model);
+    const cap = mode === 'extend_video' ? modeRefCaps(settings.model, mode).image : modelImageMax(settings.model);
     if (panelImageCount + elementImageCount > cap) {
       warn(`이미지 합산 ${panelImageCount + elementImageCount}장 — 최대 ${cap}장까지만 보낼 수 있습니다.\n(래퍼런스 패널 ${panelImageCount}장 + 어셋 멘션 ${elementImageCount}장)\n이미지를 줄이거나 모델을 바꿔주세요.`);
       return;
@@ -511,13 +514,15 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   // Same story for video/audio COUNT. Attach-time already caps these, but a model switch
   // can strand assets that were legal under the previous model (2.5 allows 10 videos,
   // 2.0 only 3) — without this the request goes out and BytePlus 400s with an English
-  // message the user can't act on. Reference mode only: edit/extend have their own
-  // structural counts (1 source / 1–3 clips) that don't vary by model.
-  if (mode === 'multimodal_reference') {
+  // message the user can't act on. Edit/extend counts vary by model too since 26.10.2801
+  // (2.5 edit 10 · extend 10, 2.0 edit 1 · extend 3) — the same stranding applies, so they
+  // read their own caps from modeRefCaps.
+  if (mode === 'multimodal_reference' || mode === 'edit_video' || mode === 'extend_video') {
     const vCount = assets.filter(a => a.type === 'video_url').length;
     const aCount = assets.filter(a => a.type === 'audio_url').length;
-    const vCap = modelVideoMax(settings.model);
-    const aCap = modelAudioMax(settings.model);
+    const caps = modeRefCaps(settings.model, mode);
+    const vCap = mode === 'multimodal_reference' ? modelVideoMax(settings.model) : caps.video;
+    const aCap = mode === 'multimodal_reference' ? modelAudioMax(settings.model) : caps.audio;
     if (vCount > vCap) { warn(`비디오 ${vCount}개 — 최대 ${vCap}개까지만 보낼 수 있습니다.\n비디오를 줄이거나 모델을 바꿔주세요.`); return; }
     if (aCount > aCap) { warn(`오디오 ${aCount}개 — 최대 ${aCap}개까지만 보낼 수 있습니다.\n오디오를 줄이거나 모델을 바꿔주세요.`); return; }
   }
