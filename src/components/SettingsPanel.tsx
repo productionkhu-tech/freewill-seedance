@@ -384,7 +384,10 @@ export function SettingsPanel() {
       if (t === 'reference_to_video') return ['image_url', 'video_url']; // images (≥1) + optional 1 video ref
       return ['image_url']; // image_to_video
     }
-    if (settings.mode === 'extend_video') return modeRefCaps(settings.model, 'extend_video').image > 0 ? ['image_url', 'video_url'] : ['video_url'];
+    if (settings.mode === 'extend_video') {
+      const c = modeRefCaps(settings.model, 'extend_video');
+      return [...(c.image > 0 ? ['image_url' as const] : []), 'video_url' as const, ...(c.audio > 0 ? ['audio_url' as const] : [])];
+    }
     if (settings.mode === 'edit_video') return ['image_url', 'video_url', 'audio_url'];
     if (settings.mode === 'multimodal_reference') return ['image_url', 'video_url', 'audio_url'];
     if (settings.mode === 'image_to_video_first' || settings.mode === 'image_to_video_first_last') return ['image_url'];
@@ -459,6 +462,7 @@ export function SettingsPanel() {
     } else if (settings.mode === 'extend_video') {
       if (assetIdType === 'video_url') maxAllowed = extendCaps.video;
       if (assetIdType === 'image_url') maxAllowed = extendCaps.image;
+      if (assetIdType === 'audio_url') maxAllowed = extendCaps.audio;
     }
 
     if (currentCount >= maxAllowed) return;
@@ -501,6 +505,7 @@ export function SettingsPanel() {
     } else if (settings.mode === 'extend_video') {
       if (type === 'video_url') maxAllowed = extendCaps.video;
       if (type === 'image_url') maxAllowed = extendCaps.image;
+      if (type === 'audio_url') maxAllowed = extendCaps.audio;
     } else if (settings.mode === 'image_to_video_first' && type === 'image_url') {
       maxAllowed = 1;
     } else if (settings.mode === 'image_to_video_first_last' && type === 'image_url') {
@@ -1209,7 +1214,7 @@ export function SettingsPanel() {
               {!isOmni && settings.mode === 'extend_video' && (
                 <div className="space-y-2">
                   <p className="text-[12px] text-gray-500 leading-tight">
-                    비디오: {assets.filter(a => a.type === 'video_url').length}/{extendCaps.video}{extendCaps.video > 3 ? ` · 합계 ${Math.floor(refVidSec)}초까지` : ` (최대 ${extendCaps.video}개 이어붙이기)`}{extendCaps.image > 0 ? ` · 이미지 ${assets.filter(a => a.type === 'image_url').length}/${extendCaps.image}` : ''}
+                    비디오: {assets.filter(a => a.type === 'video_url').length}/{extendCaps.video}{extendCaps.video > 3 ? ` · 합계 ${Math.floor(refVidSec)}초까지` : ` (최대 ${extendCaps.video}개 이어붙이기)`}{extendCaps.image > 0 ? ` · 이미지 ${assets.filter(a => a.type === 'image_url').length}/${extendCaps.image}` : ''}{extendCaps.audio > 0 ? ` · 오디오 ${assets.filter(a => a.type === 'audio_url').length}/${extendCaps.audio}` : ''}
                   </p>
                   {/* Seedance re-reads the task from the PROMPT after the task is queued, and
                       disagreeing with the mode we declared costs a full async failure
@@ -1221,6 +1226,8 @@ export function SettingsPanel() {
                   {/* 2.5 연장은 영상 10개 · 이미지도 받는다(26.10.2801~ — 문서 예시 "@Video 1 을 연장하고 @Image 1 의 인물이 …"). */}
                   {extendCaps.image > 0 && renderUploadButton('이미지 추가', 'reference_image', 'image_url', 'image/*', true, assets.filter(a => a.type === 'image_url').length >= extendCaps.image)}
                   {renderUploadButton('비디오 추가', 'reference_video', 'video_url', 'video/mp4,video/quicktime,.mp4,.mov,.m4v,.webm', true, assets.filter(a => a.type === 'video_url').length >= extendCaps.video)}
+                  {/* 2.5 연장은 오디오도 받는다(26.10.2802~ — 소리는 레퍼런스를 참고해 새로 만든다, 그대로 붙이지 않는다). */}
+                  {extendCaps.audio > 0 && renderUploadButton('오디오 추가', 'reference_audio', 'audio_url', 'audio/wav,audio/mpeg', true, assets.filter(a => a.type === 'audio_url').length >= extendCaps.audio)}
                 </div>
               )}
             </motion.div>

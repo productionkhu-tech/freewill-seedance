@@ -1340,7 +1340,9 @@ const SEEDANCE_25 = {
   // 연장 영상 10(29.2초) 생성됨 · 연장 영상 1 + 이미지 1 생성됨 · 합계 33초는 편집 · 연장 모두 생성 전에 400("≤ 30.2") · 11개도 생성 전 400.
   // 편집의 둘째 영상은 3초도 받아 줬지만 문서는 "편집은 영상마다 4~30초" — 어느 영상을 고칠지는 프롬프트가 정해 앱이 모르므로 전부 4초로 둔다.
   // 영상이 많을수록 모델이 @Video 1 의 움직임을 덜 지킨다(7개 시험) — 화면 안내가 '고칠 영상 지목' 을 말한다.
-  editVidMax: 10, extendVidMax: 10, extendImgMax: 30,
+  // 연장에 오디오 (26.10.2802~): 문서는 편집 · 연장 둘 다 reference_audio 를 적는다. 2026-10-28 실측(480p · 소리 켬): 연장 영상 1 + 오디오 1 생성됨,
+  // 편집 영상 1 + 오디오 1 도 생성됨. 소리는 레퍼런스를 그대로 붙이지 않고 참고해 새로 만든다(음 높이 지문이 원본 0.12~0.13 → 0.31~0.55 로 레퍼런스 쪽).
+  editVidMax: 10, extendVidMax: 10, extendImgMax: 30, extendAudMax: 10,
   refVideoSec: 30.2, refAudioSec: 30.2,
   // 2.5 can take reference audio with no image/video alongside it. 2.0 cannot.
   audioOnly: true,
@@ -1464,9 +1466,9 @@ export const MODELS: {
   refVideoSec?: number; refAudioSec?: number;
   // Shortest reference video the EDITING task accepts, when the model states one.
   editRefVideoMinSec?: number;
-  // 편집 · 연장에 붙일 수 있는 수(26.10.2801~). 없으면 예전 그대로 — 편집 영상 1(새로 넣으면 교체) · 연장 영상 3 · 연장 이미지 0.
-  // 문서와 실측으로 확인한 모델만 적는다(지금은 2.5 — 아래 SEEDANCE_25 주석).
-  editVidMax?: number; extendVidMax?: number; extendImgMax?: number;
+  // 편집 · 연장에 붙일 수 있는 수(26.10.2801~ · 연장 오디오 2802~). 없으면 예전 그대로 — 편집 영상 1(새로 넣으면 교체) · 연장 영상 3 ·
+  // 연장 이미지 0 · 연장 오디오 0. 문서와 실측으로 확인한 모델만 적는다(지금은 2.5 — 아래 SEEDANCE_25 주석).
+  editVidMax?: number; extendVidMax?: number; extendImgMax?: number; extendAudMax?: number;
   outputFormat?: string; outputFormats?: string[]; audioOnly?: boolean;
   adaptiveOnly?: GenerationMode[]; autoDurationOnly?: GenerationMode[];
   refTaskTypes?: Partial<Record<GenerationMode, string>>;
@@ -1671,7 +1673,7 @@ export function modeRefCaps(model: string, mode: GenerationMode): { image: numbe
     case 'edit_video': return { image: modelImageMax(model), video: MODELS.find(m => m.id === model)?.editVidMax ?? 1, audio: modelAudioMax(model) };
     case 'extend_video': {
       const m = MODELS.find(x => x.id === model);
-      return { image: m?.extendImgMax ?? 0, video: m?.extendVidMax ?? 3, audio: 0 };
+      return { image: m?.extendImgMax ?? 0, video: m?.extendVidMax ?? 3, audio: m?.extendAudMax ?? 0 };
     }
     case 'image_to_video_first': return { image: 1, video: 0, audio: 0 };
     case 'image_to_video_first_last': return { image: 2, video: 0, audio: 0 };

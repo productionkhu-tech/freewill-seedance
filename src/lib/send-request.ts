@@ -342,11 +342,12 @@ export async function attachFilesTo(sink: AssetSink, allFiles: File[], src?: (f:
       } catch (e: any) { rejected.push(`${file.name}: 캐싱 실패 — ${e.message}`); }
 
     } else if (file.type.startsWith('audio/') || /\.(wav|mp3|mpeg|mpga)$/i.test(file.name)) {
-      if (mode !== 'multimodal_reference' && mode !== 'edit_video') {
+      // 받는 모드 · 수는 modeRefCaps 한 곳(레퍼런스 · 편집, 2.5 는 연장도 — 26.10.2802~).
+      const maxAud = modeRefCaps(model, mode).audio;
+      if (maxAud === 0) {
         rejected.push(`${file.name}: 이 모드에서는 오디오를 사용할 수 없습니다.`); continue;
       }
       const audCount = assets.filter(a => a.type === 'audio_url').length;
-      const maxAud = modeRefCaps(model, mode).audio;
       if (audCount >= maxAud) { rejected.push(`${file.name}: 오디오 한도 ${maxAud}개 초과`); continue; }
       const audErr = await validateAudioFile(file, modelRefAudioSec(model));
       if (audErr) { rejected.push(`${file.name}: ${audErr}`); continue; }
