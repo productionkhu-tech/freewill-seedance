@@ -834,6 +834,33 @@ export function draftLeftLabel(expiresAt: number, now = Date.now()): string {
   return `${Math.max(1, Math.ceil(left / (60 * 60 * 1000)))}시간 남음`;
 }
 
+// Draft → 본편 버튼. 카드는 memo 라 앱을 켜 둔 채로는 다시 그려지지 않는다 — 남은 기간 글자('11/12까지' →
+// '5시간 남음')와 만료(버튼 → '본편 불가')가 제때 바뀌게, 다음에 글자가 바뀌는 때에 맞춰 스스로 다시 그린다.
+// 잠자기에서 깨면 타이머가 늦을 수 있어 길어도 1시간마다 다시 본다. 누를 때도 makeFinalFromDraft 가 한 번 더 막는다.
+function DraftFinalButton({ msg, onMake }: { msg: ChatMessage; onMake: () => void }) {
+  const exp = draftExpiresAt(msg);
+  const [tick, setTick] = useState(0);
+  const left = exp - Date.now();
+  useEffect(() => {
+    if (left <= 0) return;
+    const HOUR = 60 * 60 * 1000, DAY = 24 * HOUR;
+    const next = left >= DAY ? left - DAY : left - (Math.ceil(left / HOUR) - 1) * HOUR;
+    const t = window.setTimeout(() => setTick(n => n + 1), Math.min(next, HOUR) + 50);
+    return () => window.clearTimeout(t);
+  }, [exp, tick]);
+  if (left <= 0) return (
+    <span title={`이 Draft는 만든 뒤 ${draftDaysOf(msg)}일까지만 본편으로 만들 수 있었습니다`} className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
+  );
+  return (
+    <button onClick={onMake}
+      title={`구도·길이·비율은 이 Draft 그대로 두고 1080p 로 다시 그립니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
+      className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-indigo-500 transition-all whitespace-nowrap shrink-0 text-white bg-indigo-500 hover:bg-indigo-600 active:scale-95">
+      <Sparkles size={14} /> 1080p 본편 만들기
+      <span className="text-[11px] font-normal text-white/75">{draftLeftLabel(exp)}</span>
+    </button>
+  );
+}
+
 const settingsTagList = (us: any, videoUrl?: string, draftOf?: string): string[] => {
   if (!us) return [];
   // 초안/본편 표시는 모델·해상도 칩 뒤에 붙인다. 앞쪽 칩의 순서는 기존 카드와 같게 둔다.
@@ -1561,18 +1588,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                     // 본편이 이미 있으면(만드는 중 포함) 여기엔 아무것도 없다 — 카드 맨 위의
                     // 짝 줄(PairLink)이 그 본편을 썸네일로 보여 주고 데려간다.
                     if (finalOther) return null;
-                    const exp = draftExpiresAt(msg);
-                    if (Date.now() > exp) return (
-                      <span title={`이 Draft는 만든 뒤 ${draftDaysOf(msg)}일까지만 본편으로 만들 수 있었습니다`}className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
-                    );
-                    return (
-                      <button onClick={() => { void actions.current.makeFinalFromDraft(msg.taskId!, msg); }}
-                        title={`구도·길이·비율은 이 Draft 그대로 두고 1080p 로 다시 그립니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
-                        className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-indigo-500 transition-all whitespace-nowrap shrink-0 text-white bg-indigo-500 hover:bg-indigo-600 active:scale-95">
-                        <Sparkles size={14} /> 1080p 본편 만들기
-                        <span className="text-[11px] font-normal text-white/75">{draftLeftLabel(exp)}</span>
-                      </button>
-                    );
+                    return <DraftFinalButton msg={msg} onMake={() => { void actions.current.makeFinalFromDraft(msg.taskId!, msg); }} />;
                   })()}
                 </div>
                 {/* Just the duration. The start/finish timestamps used to sit here
