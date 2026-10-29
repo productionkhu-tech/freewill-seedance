@@ -553,10 +553,20 @@ ipcMain.handle('pick-download-dir', async () => {
 // Write an in-memory blob (blobCache fast-path download) straight to the
 // session download folder. Without this, blobCache hits would go to the
 // browser's default folder via <a download>, bypassing the chosen folder.
-ipcMain.handle('save-blob', async (_e, { filename, buffer, meta }) => {
+// unique(26.10.2902~ 장면 캡처): 같은 이름이 있으면 덮지 않고 '이름 (2).png' 처럼 비는 이름을 찾는다 — 같은 장면을 여러 번
+// 떠도 앞의 것이 사라지지 않게. 영상 다운로드는 그대로 덮는다(같은 영상을 다시 받는 것이라).
+ipcMain.handle('save-blob', async (_e, { filename, buffer, meta, unique }) => {
   try {
     const dir = sessionDownloadDir || app.getPath('downloads');
-    const savePath = path.join(dir, safeFileName(filename));
+    let savePath = path.join(dir, safeFileName(filename));
+    if (unique) {
+      const ext = path.extname(savePath), stem = savePath.slice(0, savePath.length - ext.length);
+      for (let n = 2; ; n++) {
+        try { fs.writeFileSync(savePath, Buffer.from(buffer), { flag: 'wx' }); break; }
+        catch (err) { if (err.code !== 'EEXIST' || n > 999) throw err; savePath = `${stem} (${n})${ext}`; }
+      }
+      return { ok: true, path: savePath };
+    }
     fs.writeFileSync(savePath, Buffer.from(buffer));
     // 받은 영상이면 생성 설정을 넣는다(아래 '받은 영상에 생성 설정 넣기').
     if (meta) embedSettings(savePath, meta);

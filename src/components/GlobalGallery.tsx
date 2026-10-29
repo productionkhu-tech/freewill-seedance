@@ -567,7 +567,7 @@ export function GlobalGallery({ onClose }: { onClose: () => void }) {
                 style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                 className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all">
                 <div className="aspect-video bg-black relative group">
-                  <VideoPlayer sources={playbackChain(r)} poster={posterSrcFor(r)} posterOf={r} className="w-full h-full" is4k={r.usedSettings?.resolution === '4k'} />
+                  <VideoPlayer sources={playbackChain(r)} poster={posterSrcFor(r)} posterOf={r} className="w-full h-full" is4k={r.usedSettings?.resolution === '4k'} clip={r} besideStar />
                   <ClipStamp ms={r.timestamp} />
                   <button
                     onClick={(e) => { e.stopPropagation(); updateMessage(r.projectId, r.id, { starred: !r.starred }); }}

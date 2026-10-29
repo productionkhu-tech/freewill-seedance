@@ -5,7 +5,7 @@ import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollecti
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
 import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight, ClipboardCopy, ImageDown } from 'lucide-react';
 import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink } from '../lib/send-request';
 import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from '../lib/agent-inbox';
 import { visibleProjectIds } from '../lib/split';
@@ -98,9 +98,78 @@ const CAN_PLAY_HEVC = (() => {
   } catch { return false; }
 })();
 
+// ─── 재생 규칙 (26.10.2902~, 사용자 2026-10-29) ───
+// 커서를 한 번 대면 그 뒤로는 커서가 떠나도 계속 돈다(반복 재생). 예전에는 커서를 떼면 멈추고, 끝까지 보면 커서를 뗐다
+// 다시 대야 처음부터 돌았다. 멈추는 것은 셋뿐이다 —
+//   · 정지 버튼(영상을 눌러도 같다) — 커서를 다시 대도 안 돈다. 재생 버튼으로만 다시 튼다.
+//   · 다른 영상이 돌기 시작함 — 한 번에 하나만 돈다(두 칸으로 나눠 봐도). 갤러리를 커서로 훑어도 지나간 카드가 다 돌지 않는다.
+//   · 안 보이게 됨 — 스크롤로 화면에서 완전히 벗어남 · 창을 숨기거나 내림 · 절전 · 화면 잠금.
+// 뒤의 둘은 '저절로 멈춤' 이다. 그 장면에 멈춰 있고(스크롤로 돌아와도 저절로 다시 돌지 않는다) 커서를 다시 대면 거기서부터 돈다.
+let playingVideo: HTMLVideoElement | null = null;
+// 저절로 멈춘 영상 표시 — pause 이벤트가 이걸 보고 정지 버튼과 가른다.
+const autoPaused = new WeakSet<HTMLVideoElement>();
+const autoPause = (v: HTMLVideoElement) => {
+  if (v.paused) return;   // 이미 멈췄으면 pause 이벤트가 안 온다 — 표시만 남아 다음 정지 버튼을 '저절로' 로 잘못 읽는다
+  autoPaused.add(v);
+  v.pause();
+};
+// 마지막으로 커서를 댄 플레이어. 아직 안 붙은 카드에 커서를 댔다가 다른 카드로 옮기면, 앞 카드가 다 받은 뒤 끼어들어 돌지 않게.
+let lastHovered: object | null = null;
+// 창이 안 보이게 됨. 화면의 visibilitychange 는 앱(backgroundThrottling:false)에서 안 와서 main 이 알려 주는 것을 쓴다
+// (store.ts flushAll 과 같은 신호 — 숨김 · 최소화 · 절전 · 화면 잠금). 브라우저 실행은 visibilitychange 로.
+if (typeof window !== 'undefined') {
+  const hidden = () => { if (playingVideo) autoPause(playingVideo); };
+  (window as any).electronAPI?.onFlushRequest?.(hidden);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') hidden(); });
+}
+// 목록(스크롤 영역). 없으면 null — IntersectionObserver 는 그때 화면 전체를 뿌리로 쓴다.
+const scrollParentOf = (el: HTMLElement): HTMLElement | null => {
+  let p = el.parentElement;
+  while (p) {
+    const oy = getComputedStyle(p).overflowY;
+    if (oy === 'auto' || oy === 'scroll') return p;
+    p = p.parentElement;
+  }
+  return null;
+};
+// 화면에 떠 있는 프레임의 시각(mediaTime). 멈춘 뒤 currentTime 은 그 프레임 안 어딘가라서 캡처가 다음 프레임을 뜰 수 있다.
+const frameWatched = new WeakSet<HTMLVideoElement>();
+const watchFrames = (v: HTMLVideoElement, onFrame: (t: number) => void) => {
+  if (frameWatched.has(v) || !('requestVideoFrameCallback' in v)) return;
+  frameWatched.add(v);
+  const tick = (_now: number, meta: { mediaTime: number }) => { onFrame(meta.mediaTime); (v as any).requestVideoFrameCallback(tick); };
+  (v as any).requestVideoFrameCallback(tick);
+};
+
+// ─── 장면 캡처 (26.10.2902~) ───
+// 영상 오른쪽 위 버튼 둘 — 클립보드 / PNG 저장(사용자: "클립보드만 하고 싶을 때 있고 저장하고 싶을 때 있음"). 누르면 잠깐
+// 멈췄다가 이어서 돈다. 재생용 사본(H.264 · 4K 는 1080p)이 돌고 있으면 그 장면을 원본에서 뜬다(서버 /api/media/:taskId/frame,
+// 사용자 결정 '원본에서 뜨기'). 사본이 아니면(원본 · 24시간 링크) 화면의 영상이 곧 원본이라 그 자리에서 캔버스로 뜬다.
+// 서버가 못 뜨면 사본에서 뜨고 그렇다고 알린다.
+type CaptureClip = { taskId?: string; videoUrl?: string; usedSettings?: any; videoStorage?: { project?: string; ext?: string; projectId?: string } };
+const isProxySrc = (src: string) => /^\/api\/media\/[^/?]+\/preview$/.test(src);
+const frameUrlFor = (clip: CaptureClip, t: number) => {
+  const [p, q] = mediaSrcFor(clip).split('?');
+  return `${p}/frame?${q ? `${q}&` : ''}t=${t.toFixed(4)}`;
+};
+const frameFromVideo = (v: HTMLVideoElement): Promise<Blob | null> => {
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  const ctx = c.getContext('2d');
+  if (!ctx || !c.width) return Promise.resolve(null);
+  ctx.drawImage(v, 0, 0);
+  return new Promise(r => c.toBlob(r, 'image/png'));
+};
+// 파일 이름 = 그 영상을 받을 때 이름 + 장면 시각 — seedance-2026-10-29-cgt-…-q26vf_03.208s.png.
+// 같은 장면을 또 뜨면 main 이 ' (2)' 를 붙인다(save-blob unique) — 앞의 것을 덮지 않는다.
+const captureFilename = (clip: CaptureClip, t: number) => {
+  const [s, ms] = t.toFixed(3).split('.');
+  return `${downloadFilenameFor(clip).replace(/\.[^.]+$/, '')}_${s.padStart(2, '0')}.${ms}s.png`;
+};
+
 // Exported for the all-projects gallery (GlobalGallery). Lazy-mounts on intersection,
 // so a grid of hundreds of clips only ever fetches the handful actually on screen.
-export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf, failPoster }: {
+export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf, failPoster, clip, besideStar }: {
   /** 재생 소스를 우선순위 순으로. 앞에서부터 쓰고, 실패하면 다음 단으로 내려간다.
    *  목록은 playbackChain() 한 곳에서만 만든다 — 단이 늘어도 호출부는 안 건드린다. */
   sources: string[];
@@ -115,9 +184,24 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
   /** 못 불러왔을 때 뒤에 깔 썸네일 주소. 실패했을 때만 <img> 가 생기므로
    *  정상 재생 경로에는 아무 비용도 없다 — 캡처와 무관하다. */
   failPoster?: string;
+  /** 장면 캡처 버튼(오른쪽 위)을 붙일 영상의 메시지. 없으면 버튼이 없다. */
+  clip?: CaptureClip;
+  /** 오른쪽 위에 채택 별이 있는 카드(갤러리) — 캡처 버튼을 그 왼쪽으로 비킨다. */
+  besideStar?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // 재생 규칙(위 '재생 규칙'). 정지 버튼으로 멈췄나 · 커서를 댔는데 아직 안 붙어서 붙는 즉시 틀어야 하나 · 지금 보이나.
+  const userPausedRef = useRef(false);
+  const wantPlayRef = useRef(false);
+  const visibleRef = useRef(true);
+  const autoMutedRef = useRef(false);
+  const selfRef = useRef({});
+  // 멀리 벗어나 영상을 내렸다 다시 붙일 때 이어 볼 자리 — 돌아와도 멈춘 장면 그대로 있어야 한다.
+  const resumeAtRef = useRef(0);
+  const frameTimeRef = useRef<number | null>(null);
+  const [capturing, setCapturing] = useState<null | 'clipboard' | 'file'>(null);
+  const [flash, setFlash] = useState(0);
 
   // 포스터 모드: 목록에서는 <img> 만 띄우고 <video> 는 아예 만들지 않는다.
   // content-visibility 는 그리기만 건너뛸 뿐 네트워크와 비디오 디코더는 못 막는다 —
@@ -197,14 +281,9 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
     const container = containerRef.current;
     if (!container) return;
 
+    // 멈추는 것은 여기서 하지 않는다(26.10.2902~) — 500px 바깥이 아니라 화면에서 벗어나는 순간 멈춰야 해서 아래 'seen' 이 한다.
     const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setMounted(true);
-        } else if (videoRef.current) {
-          videoRef.current.pause();
-        }
-      },
+      ([entry]) => { if (entry.isIntersecting) setMounted(true); },
       { threshold: 0, rootMargin: '500px' }
     );
     observer.observe(container);
@@ -214,16 +293,13 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
     // 2000px 넘게 멀어지면 내리고, 다시 보이면 붙인다 — 바이트는 blobCache · 로컬 사본에서 바로 다시 온다.
     // ★ 뿌리(root)를 스크롤 영역으로 잡는다. 뷰포트를 뿌리로 두면 rootMargin 은 뷰포트에만 붙고, 카드는 안쪽 스크롤
     //   영역에서 먼저 잘려서 '화면 밖 = 멀리' 가 된다(벗어나자마자 내렸다 붙였다 깜빡인다).
-    let scroller: HTMLElement | null = container.parentElement;
-    while (scroller) {
-      const oy = getComputedStyle(scroller).overflowY;
-      if (oy === 'auto' || oy === 'scroll') break;
-      scroller = scroller.parentElement;
-    }
+    const scroller = scrollParentOf(container);
     const far = scroller ? new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) return;
         if (videoRef.current && document.fullscreenElement === videoRef.current) return;
+        // 돌아왔을 때 멈춘 장면 그대로 있게 자리를 적어 둔다(붙을 때 onLoadedData 가 되돌린다).
+        if (videoRef.current) resumeAtRef.current = videoRef.current.currentTime;
         setMounted(false);
       },
       { root: scroller, threshold: 0, rootMargin: '2000px 0px' }
@@ -231,6 +307,24 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
     far?.observe(container);
     return () => { observer.disconnect(); far?.disconnect(); };
   }, [eager]);
+
+  // 화면(목록)에서 완전히 벗어나면 그 장면에서 멈춘다 — 다시 보여도 저절로 돌지 않는다(재생 규칙). 미리보기 창(eager)도 같다.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const seen = new IntersectionObserver(
+      ([entry]) => {
+        visibleRef.current = entry.isIntersecting;
+        if (entry.isIntersecting) return;
+        wantPlayRef.current = false;
+        const v = videoRef.current;
+        if (v && document.fullscreenElement !== v) autoPause(v);
+      },
+      { root: scrollParentOf(container), threshold: 0 }
+    );
+    seen.observe(container);
+    return () => seen.disconnect();
+  }, []);
 
   // ── Keep your place across fullscreen ──────────────────────────────────────
   // Chromium scrolls a fullscreened element into view on the way IN and does not put
@@ -272,26 +366,92 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
-  // Hover-to-play with sound. Leaving the card just pauses — we keep the current
-  // playback position so the next hover resumes from where the user was watching.
-  const handleMouseEnter = () => {
+  // 소리 내며 튼다. 소리 있는 자동 재생이 막히면(NotAllowedError) 소리 없이라도 돌게 한다 — 볼륨 단추로 켜면 된다.
+  // ★ 멈춤이 끼어들어 play() 가 거절된 것(AbortError)은 다시 틀지 않는다. 예전 코드는 거절이면 무엇이든 소리 없이 다시
+  //   틀어서, 막 멈춘 영상이 소리 없이 다시 돌 수 있었다.
+  const startPlay = (v: HTMLVideoElement) => {
+    if (autoMutedRef.current) { v.muted = false; autoMutedRef.current = false; }
+    v.play().catch((err) => {
+      if (err?.name !== 'NotAllowedError' || videoRef.current !== v) return;
+      v.muted = true; autoMutedRef.current = true;
+      v.play().catch(() => {});
+    });
+  };
+  // 커서를 대면 돈다(재생 규칙). 떼도 안 멈춘다. 정지 버튼으로 멈춘 영상은 커서로는 다시 안 돈다.
+  // ★ '댄다' 는 마우스를 실제로 움직여 올린 것만이다. 휠로 굴리면 가만히 있는 커서 밑으로 카드가 지나가며 mouseenter 가
+  //   오는데, 그걸 받으면 스크롤로 되돌아온 영상이 저절로 다시 돌고(사용자: "스크롤을 다시 올린다고 다시 재생되면 안 됨")
+  //   지나가는 카드마다 돌기 시작한다(실측 2026-10-29). 그래서 움직임이 있는 mousemove 로 받고, 카드에 들어와 한 번만 —
+  //   떠나거나 저절로 멈추면 다시 받는다(캡처의 잠깐 멈춤은 빼고 — 누르며 손이 떨려도 바로 다시 돌지 않게).
+  const hoverDoneRef = useRef(false);
+  const capturingRef = useRef(false);
+  const handleMouseMove = (e: { movementX: number; movementY: number }) => {
+    if ((!e.movementX && !e.movementY) || hoverDoneRef.current) return;
+    hoverDoneRef.current = true;
+    lastHovered = selfRef.current;
+    if (userPausedRef.current) return;
+    wantPlayRef.current = true;   // 아직 안 붙었으면 붙는 즉시(onLoadedData)
     // 포스터가 떠 있으면 여기서 영상으로 바꾼다 — 목록을 훑는 동안에는 이미지만 산다.
     if (showPoster) { setWantVideo(true); return; }
     const v = videoRef.current;
-    if (!v) return;
-    v.muted = false;
-    v.play().catch(() => {
-      // Browser autoplay policy may block unmuted playback without an explicit click.
-      // Fall back to muted playback so the user at least sees motion; they can click
-      // the volume control to unmute manually.
-      if (videoRef.current) {
-        videoRef.current.muted = true;
-        videoRef.current.play().catch(() => {});
-      }
-    });
+    if (v && v.paused) startPlay(v);   // 4K 는 preload=metadata 라 틀어야 받기 시작한다 — 받은 정도를 따지지 않는다
   };
-  const handleMouseLeave = () => {
-    videoRef.current?.pause();
+
+  const capture = async (to: 'clipboard' | 'file') => {
+    const v = videoRef.current;
+    if (!v || !clip || capturing) return;
+    const toast = (msg: string, ok: boolean) => window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { msg, ok } }));
+    if (v.readyState < 2) { toast('영상을 아직 불러오는 중입니다', false); return; }
+    const wasPlaying = !v.paused;
+    const started = Date.now();
+    autoPause(v);
+    capturingRef.current = true;
+    setCapturing(to); setFlash(n => n + 1);
+    try {
+      // 멈춘 뒤 두 프레임 기다린다 — 멈추는 사이 마지막 프레임이 올라오면 그 시각을 받는다.
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const t = frameTimeRef.current ?? v.currentTime;
+      const onCopy = isProxySrc(activeSrc);
+      let png: Blob | null = null;
+      if (onCopy && clip.taskId) {
+        try { const r = await fetch(frameUrlFor(clip, t)); if (r.ok) png = await r.blob(); } catch { /* 사본에서 뜬다 */ }
+      }
+      const fromCopy = !png && onCopy;
+      if (!png) png = await frameFromVideo(v);
+      if (!png) throw new Error('장면을 뜨지 못했습니다');
+      let dim = '';
+      try { const b = await createImageBitmap(png); dim = ` · ${b.width}×${b.height}`; b.close?.(); } catch { /* 크기 표시만 뺀다 */ }
+      const note = fromCopy ? ' — 원본을 못 읽어 재생용 사본에서 떴습니다' : '';
+      if (to === 'clipboard') {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+        toast(`장면 복사됨 · ${t.toFixed(2)}초${dim}${note}`, !fromCopy);
+      } else {
+        const name = captureFilename(clip, t);
+        const api = (window as any).electronAPI;
+        if (api?.saveBlob) {
+          const r = await api.saveBlob({ filename: name, buffer: await png.arrayBuffer(), unique: true });
+          if (!r?.ok) throw new Error(r?.error || '저장하지 못했습니다');
+          toast(`장면 저장됨 · ${String(r.path || name).split(/[\\/]/).pop()}${dim}${note}`, !fromCopy);
+        } else {
+          // 브라우저 실행 — 브라우저가 받은 파일 폴더에 둔다(겹치는 이름은 브라우저가 알아서 피한다).
+          const u = URL.createObjectURL(png);
+          const a = document.createElement('a');
+          a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(u), 60000);
+          toast(`장면 저장됨 · ${name}${dim}${note}`, !fromCopy);
+        }
+      }
+    } catch (e: any) {
+      toast(`장면 캡처 실패: ${e?.message || e}`, false);
+    } finally {
+      capturingRef.current = false;
+      setCapturing(null);
+      // 잠깐 멈췄다가 이어서 돈다(사용자 "캡처하면 잠시 멈추면서"). 그 사이 정지 버튼을 눌렀거나 · 다른 영상이 돌기 시작했거나 ·
+      // 화면에서 벗어났으면 그대로 둔다.
+      if (wasPlaying) window.setTimeout(() => {
+        if (videoRef.current === v && v.paused && !userPausedRef.current && visibleRef.current
+          && !(playingVideo && playingVideo !== v && !playingVideo.paused)) startPlay(v);
+      }, Math.max(0, 500 - (Date.now() - started)));
+    }
   };
 
   // Use shared blob cache (populated by store on success). Fetch + cache if missing.
@@ -354,12 +514,12 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
   return (
     <div
       ref={containerRef}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => { hoverDoneRef.current = false; }}
       // Capture phase: the native controls swallow pointerdown, so a bubbling listener
       // would never see the click on the fullscreen button.
       onPointerDownCapture={rememberScroll}
-      className={`${className} aspect-video bg-black flex items-center justify-center relative`}
+      className={`${className} aspect-video bg-black flex items-center justify-center relative group/vp`}
     >
       {/* 목록 썸네일. 마우스를 올리거나 누르면 영상으로 바뀐다. */}
       {showPoster && (
@@ -467,7 +627,29 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
           // 포스터가 없어서 영상을 띄운 경우, 첫 프레임을 떠서 올려둔다. 다음부터는
           // 이 카드도 16~34KB 이미지로 뜬다. 코덱이 없어 디코딩이 안 되면 여기까지
           // 오지 않으므로(onError 로 빠진다) 아무 기록도 남기지 않고, 다음 기회에 다시 한다.
-          onLoadedData={(e) => { if (posterOf && posterState === 'none') void capturePoster(e.currentTarget, posterOf); }}
+          onLoadedData={(e) => {
+            const v = e.currentTarget;
+            if (posterOf && posterState === 'none') void capturePoster(v, posterOf);
+            watchFrames(v, t => { frameTimeRef.current = t; });
+            // 멀리 벗어나 내렸던 영상 — 멈춘 장면으로 되돌린다.
+            if (resumeAtRef.current) { v.currentTime = resumeAtRef.current; resumeAtRef.current = 0; }
+            // 커서를 댔을 때 아직 안 붙어 있었다 — 그 뒤 다른 카드에 커서를 대지 않았으면 지금 튼다.
+            if (wantPlayRef.current && lastHovered === selfRef.current && !userPausedRef.current && visibleRef.current) startPlay(v);
+          }}
+          // 끝나면 처음부터 다시(재생 규칙). 멈추는 건 정지 버튼 · 다른 영상 · 안 보일 때뿐.
+          loop
+          onPlay={(e) => {
+            const v = e.currentTarget;
+            userPausedRef.current = false; wantPlayRef.current = false;
+            if (playingVideo && playingVideo !== v) autoPause(playingVideo);   // 한 번에 하나만
+            playingVideo = v;
+          }}
+          onPause={(e) => {
+            const v = e.currentTarget;
+            if (playingVideo === v) playingVideo = null;
+            if (autoPaused.has(v)) { autoPaused.delete(v); if (!capturingRef.current) hoverDoneRef.current = false; }
+            else userPausedRef.current = true;   // 정지 버튼(영상 누르기 · 스페이스 포함)
+          }}
           controls
           // ★ 브라우저가 <video> 에 얹어주는 저장 기능을 전부 끈다.
           //   여기 물린 src 는 재생용 H.264 프록시다(playbackSrcFor). 컨트롤 막대의
@@ -485,6 +667,24 @@ export function VideoPlayer({ sources, className, eager, is4k, poster, posterOf,
           preload={is4k ? 'metadata' : 'auto'}
           className="w-full h-full object-contain"
         />
+      )}
+      {/* 장면 캡처 — 오른쪽 위, 커서를 올렸을 때. 갤러리는 채택 별 왼쪽. 누르는 순간 하얗게 한 번 번쩍인다. */}
+      {clip && !showPoster && mounted && (blobSrc || is4k) && !failed && !(is4k && !CAN_PLAY_HEVC) && (
+        <>
+          {flash > 0 && (
+            <motion.div key={flash} initial={{ opacity: 0.5 }} animate={{ opacity: 0 }} transition={{ duration: 0.35, ease: 'easeOut' }}
+              className="absolute inset-0 bg-white pointer-events-none" />
+          )}
+          <div className={`absolute top-2 ${besideStar ? 'right-10' : 'right-2'} z-10 flex gap-1 transition-opacity ${capturing ? 'opacity-100' : 'opacity-0 group-hover/vp:opacity-100 focus-within:opacity-100'}`}>
+            {([['clipboard', '이 장면을 클립보드에 복사', ClipboardCopy], ['file', '이 장면을 PNG로 저장 (다운로드 폴더)', ImageDown]] as const).map(([to, label, Icon]) => (
+              <button key={to} type="button" title={label} aria-label={label} disabled={!!capturing}
+                onClick={(e) => { e.stopPropagation(); void capture(to); }}
+                className="p-1.5 rounded-full bg-black/45 backdrop-blur-sm text-white/80 hover:text-white hover:bg-black/60 disabled:cursor-wait transition-colors">
+                {capturing === to ? <Loader2 size={15} className="animate-spin" /> : <Icon size={15} />}
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
@@ -1541,7 +1741,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
             <div className="space-y-3">
               {msg.videoUrl && (
                 <div className="relative">
-                  <VideoPlayer sources={playbackChain(msg)} failPoster={posterSrcFor(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} />
+                  <VideoPlayer sources={playbackChain(msg)} failPoster={posterSrcFor(msg)} className="rounded-xl overflow-hidden border border-gray-200/80 bg-black" is4k={msg.usedSettings?.resolution === '4k'} clip={msg} />
                   <ClipStamp ms={msg.timestamp} />
                 </div>
               )}
@@ -4207,7 +4407,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={() => setPreviewItem(null)}>
           <div className="bg-white dark:bg-[#1c1c1e] rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto shadow-2xl animate-slide-up" onClick={e => e.stopPropagation()}>
             <div className="aspect-video bg-black rounded-t-2xl overflow-hidden">
-              <VideoPlayer sources={playbackChain(previewItem)} failPoster={posterSrcFor(previewItem)} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} />
+              <VideoPlayer sources={playbackChain(previewItem)} failPoster={posterSrcFor(previewItem)} className="w-full h-full" eager is4k={previewItem.usedSettings?.resolution === '4k'} clip={previewItem} />
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -4339,7 +4539,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                   style={{ contentVisibility: 'auto', containIntrinsicSize: '260px' } as any}
                   className="bg-white dark:bg-[#1c1c1e] rounded-xl shadow-sm border border-gray-200/80 overflow-hidden hover:shadow-md hover:border-gray-300 transition-all duration-200" >
                   <div className="aspect-video bg-black relative group">
-                    <VideoPlayer sources={playbackChain(item)} poster={posterSrcFor(item)} posterOf={item} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} />
+                    <VideoPlayer sources={playbackChain(item)} poster={posterSrcFor(item)} posterOf={item} className="w-full h-full" is4k={item.usedSettings?.resolution === '4k'} clip={item} besideStar />
                     <ClipStamp ms={item.timestamp} />
                     {/* 채택된 컷은 항상 보이고, 아닌 것은 hover 시에만 — 그리드가 조용해진다 */}
                     <button onClick={(e) => { e.stopPropagation(); toggleStar(item.id, !item.starred); }}

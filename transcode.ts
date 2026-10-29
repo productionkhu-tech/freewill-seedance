@@ -112,3 +112,45 @@ export async function makePreview(src: string, out: string): Promise<'made' | 's
     return 'failed';
   }
 }
+
+/**
+ * 장면 캡처(26.10.2902~) — 영상의 t 초 장면 한 장을 PNG 로. 화면에 도는 건 재생용 사본(H.264 · 4K 는 1080p)이라,
+ * 캡처는 원본에서 뜬다(사용자 결정 2026-10-29 '원본에서 뜨기').
+ *
+ * t 는 화면에 떠 있던 프레임의 시각(requestVideoFrameCallback 의 mediaTime)이다. 사본은 원본을 다시 인코딩한 것이라
+ * 프레임 시각이 같다. -ss 를 입력 앞에 두면 그 시각 이상인 첫 프레임이 나오는데(정확 탐색), 시각을 반올림한 오차로
+ * 다음 프레임으로 넘어가지 않게 8ms(60fps 의 반 프레임)를 당긴다.
+ * 10비트 원본은 -pix_fmt 를 안 주면 16비트 PNG(4K 50MB)가 된다 — 8비트로. 색 변환은 원본 태그(bt709)를 따른다.
+ * src 는 파일 경로나 이 서버의 /api/media 주소(로컬 사본이 없으면 거기서 NCP 를 흘려준다).
+ * ★ ffmpeg 은 bt709 원본이면 PNG 에 gAMA(0.51) · cHRM 을 적는다. 픽셀은 화면과 같은데 브라우저 · 포토샵이 그 표시를 보고
+ *   더 밝게 그린다(실측 2026-10-29: 화면보다 RGB 평균 +6, 표시를 빼면 사본 캡처와 차이 1.4). 화면에서 본 색 그대로 보이게 뺀다.
+ */
+const PNG_DROP = new Set(['gAMA', 'cHRM']);
+function stripPngColorTags(png: Buffer): Buffer {
+  const parts: Buffer[] = [png.subarray(0, 8)];
+  for (let p = 8; p + 12 <= png.length;) {
+    const len = png.readUInt32BE(p);
+    const end = p + 12 + len;
+    if (end > png.length) return png;   // 모양이 이상하면 손대지 않는다
+    if (!PNG_DROP.has(png.toString('latin1', p + 4, p + 8))) parts.push(png.subarray(p, end));
+    p = end;
+  }
+  return Buffer.concat(parts);
+}
+export async function extractFrame(src: string, t: number): Promise<Buffer | null> {
+  const bin = ffmpegPath();
+  if (!bin) return null;
+  const ss = Math.max(0, t - 0.008).toFixed(4);
+  return new Promise((resolve) => {
+    execFile(bin, ['-hide_banner', '-loglevel', 'error', '-ss', ss, '-i', src,
+      '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'image2pipe', '-c:v', 'png', 'pipe:1'],
+    { timeout: 60000, windowsHide: true, encoding: 'buffer', maxBuffer: 96 * 1024 * 1024 }, (err, stdout) => {
+      const out = stdout as unknown as Buffer;
+      if (err || !out || out.length < 1024) {
+        if (err) console.warn('[Transcode] 장면 캡처 실패:', err.message);
+        return resolve(null);
+      }
+      resolve(stripPngColorTags(out));
+    });
+  });
+}

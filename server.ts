@@ -28,6 +28,7 @@ import {
   lastNcpError, resetNcpBackoff,
   initC2paIndex, taskIdForC2pa,
 } from './ncp';
+import { extractFrame } from './transcode';
 
 dotenv.config();
 
@@ -2116,6 +2117,22 @@ async function startServer() {
       if (!up.body) return res.end();
       Readable.fromWeb(up.body as any).pipe(res);
     } catch { res.status(502).end(); }
+  });
+
+  // 장면 캡처(26.10.2902~) — 영상 카드의 캡처 버튼. 화면에 도는 건 재생용 사본(H.264 · 4K 는 1080p)이라 그 장면을
+  // 원본에서 PNG 로 뜬다(transcode.ts extractFrame). 원본은 아래 /api/media/:taskId 를 그대로 ffmpeg 에 물린다 —
+  // 로컬 사본 · 보관 전 원본 · NCP 를 고르는 규칙이 거기 하나뿐이어야 다운로드와 캡처가 다른 파일을 보지 않는다.
+  // 못 뜨면(원본이 없음 · ffmpeg 없음) 502 — 화면이 재생 중인 사본에서 대신 뜬다.
+  app.get('/api/media/:taskId/frame', async (req, res) => {
+    const t = Number(req.query.t);
+    if (!String(req.params.taskId).replace(/[^A-Za-z0-9._-]/g, '') || !Number.isFinite(t) || t < 0 || t > 3600) return res.status(400).end();
+    const q = new URLSearchParams();
+    for (const k of ['ext', 'project', 'projectId', 'provider']) if (typeof req.query[k] === 'string') q.set(k, req.query[k] as string);
+    const png = await extractFrame(`http://127.0.0.1:${PORT}/api/media/${encodeURIComponent(String(req.params.taskId))}?${q.toString()}`, t);
+    if (!png) return res.status(502).json({ error: 'frame failed' });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(png);
   });
 
   app.post('/api/media/:taskId/poster', express.raw({ type: 'image/webp', limit: '2mb' }), async (req, res) => {
