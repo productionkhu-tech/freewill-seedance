@@ -185,6 +185,12 @@ export function SettingsPanel() {
   const [assetIdType, setAssetIdType] = useState<'image_url' | 'video_url' | 'audio_url'>('image_url');
   const [dragOverAssetId, setDragOverAssetId] = useState<string | null>(null);
   const [elementOpen, setElementOpen] = useState(false);
+  // 태스크 찾기(Ctrl+F)가 카드로 갈 때 — 라이브러리에 가려 도착한 카드가 안 보이면 안 된다.
+  useEffect(() => {
+    const close = () => setElementOpen(false);
+    window.addEventListener('seedance:close-overlays', close);
+    return () => window.removeEventListener('seedance:close-overlays', close);
+  }, []);
   // Slider drafts: while dragging, the value lives in local state (re-renders this
   // panel only) and is committed to the store ONCE on release. Writing the store per
   // drag-tick re-serialized the whole persisted blob + re-rendered the entire app

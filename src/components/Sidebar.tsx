@@ -436,6 +436,12 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const sideShown = (id: string): PaneSide | null =>
     !split ? null : split.slots[0] === id ? sideOf(split, 0) : split.slots[1] === id ? sideOf(split, 1) : null;
   const [galleryOpen, setGalleryOpen] = useState(false);
+  // 태스크 찾기(Ctrl+F)가 카드로 갈 때 — 갤러리에 가려 도착한 카드가 안 보이면 안 된다.
+  useEffect(() => {
+    const close = () => setGalleryOpen(false);
+    window.addEventListener('seedance:close-overlays', close);
+    return () => window.removeEventListener('seedance:close-overlays', close);
+  }, []);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editGroupName, setEditGroupName] = useState('');
   const groupInputRef = useRef<HTMLInputElement>(null);

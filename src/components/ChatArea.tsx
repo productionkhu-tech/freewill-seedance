@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, draftDaysOf, DRAFT_FINAL_RESOLUTION, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
@@ -759,7 +759,10 @@ const agentPromptHtml = (text: string, named: any[], elementPill?: (name: string
     return `<div>${inner || '<br>'}</div>`;
   }).join('');
 
-// 적어 둔 작성 칸 HTML 의 레퍼런스 알약을 지금 레퍼런스 id 에 이름으로 다시 묶는다 — replaceAllAssets 는 새 id 를 준다.
+// 이 노드가 들어 있는 태그(알약). 없으면 null.
+const pillOf = (n: Node | null) => (n instanceof Element ? n : n?.parentElement)?.closest<HTMLElement>('.mention-pill, .element-pill') || null;
+
+// 적어 둔 작성 칸 HTML 의 레퍼런스 알약을 지금 레퍼런스 id 에 이름으로 다시 묶는다 — replaceAllAssets 는새 id 를 준다.
 // handleReuse 와 같은 일. 안 묶으면 알약 감시 effect 가 '지워진 레퍼런스' 로 보고 알약을 지운다.
 const rebindMentionPills = (html: string, named: { id: string; name: string }[]) => {
   const temp = document.createElement('div');
@@ -1133,7 +1136,7 @@ export function ClipStamp({ ms }: { ms: number }) {
 // Draft 는 갤러리에서 기본으로 숨겨져 있어 포스터가 거의 없다(포스터는 갤러리에서 영상을 띄울
 // 때 만들어진다). 뜬 이미지는 이번 실행 동안만 taskId 별로 기억한다.
 const pairThumbCache = new Map<string, string>();
-function PairThumb({ m }: { m: any }) {
+export function PairThumb({ m, className = 'w-16 h-9' }: { m: any; className?: string }) {
   const key = m?.taskId || '';
   const ready = m?.status === 'succeeded' && !!m?.videoUrl;
   const [img, setImg] = useState(() => pairThumbCache.get(key) || '');
@@ -1160,7 +1163,7 @@ function PairThumb({ m }: { m: any }) {
     } catch { /* 다른 출처(원본 URL)라 캔버스로 못 뜨면 영상 첫 프레임을 그대로 보여 준다 */ }
   };
   return (
-    <div ref={boxRef} className="w-16 h-9 rounded-md overflow-hidden bg-black/80 shrink-0 flex items-center justify-center">
+    <div ref={boxRef} className={`${className} rounded-md overflow-hidden bg-black/80 shrink-0 flex items-center justify-center`}>
       {!ready ? <Loader2 size={14} className="animate-spin text-white/70" />
         : img ? <img src={img} alt="" className="w-full h-full object-cover" />
         : !near ? null
@@ -2985,6 +2988,46 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     }, 500);
   };
 
+  // 태그는 눌러도 커서가 안으로 못 들어가게 통째로 고른다(26.11.401). 브라우저에 맡기면 커서가 '고칠 수 없는' 태그 안에 놓여
+  // 칸이 먹통이 된다 — 백스페이스 · 글자 · 붙여넣기가 안 먹고, Ctrl+A 는 칸이 아니라 앱 화면 전체를 고른다. 줄 맨 앞의 태그는
+  // 커서를 앞에 두려다 누르기 쉬워 '맨 앞 태그가 안 지워진다' 로 보였다. 통째로 고르면 백스페이스 · 덮어쓰기 · 붙여넣기가 그대로 된다.
+  const handlePromptMouseDown = (e: ReactMouseEvent<HTMLDivElement>) => {
+    const ce = e.currentTarget;
+    const pill = pillOf(e.target as Node);
+    const sel = window.getSelection();
+    if (!pill || !ce.contains(pill) || !sel) return;
+    e.preventDefault();
+    ce.focus({ preventScroll: true });
+    const parent = pill.parentNode as Node;
+    const at = Array.prototype.indexOf.call(parent.childNodes, pill);
+    // 커서 쪽 → 태그, 또는 태그 → 커서 쪽 중 어느 방향인지. 앞쪽이면 태그까지 포함되게 뒤 칸을, 뒤쪽이면 앞 칸을 잡는다.
+    const isAfterPill = (node: Node, offset: number) => {
+      const start = document.createRange(); start.setStart(parent, at); start.collapse(true);
+      return start.comparePoint(node, offset) >= 0;
+    };
+    if (e.shiftKey && sel.anchorNode && ce.contains(sel.anchorNode)) {
+      sel.extend(parent, isAfterPill(sel.anchorNode, sel.anchorOffset) ? at : at + 1);
+      return;
+    }
+    sel.setBaseAndExtent(parent, at, parent, at + 1);
+    if (e.button !== 0) return;
+    // 누른 채 끌면 거기까지 고른다 — 브라우저에 맡기면 태그에서 시작한 선택은 칸으로 넘어오지 못한다.
+    const onMove = (ev: MouseEvent) => {
+      const r = document.caretRangeFromPoint?.(ev.clientX, ev.clientY);
+      if (!r || !ce.contains(r.startContainer)) return;
+      const hit = pillOf(r.startContainer);
+      if (hit === pill) { sel.setBaseAndExtent(parent, at, parent, at + 1); return; }
+      let node: Node = r.startContainer, offset = r.startOffset;
+      if (hit) { node = hit.parentNode as Node; offset = Array.prototype.indexOf.call(node.childNodes, hit); }
+      const forward = isAfterPill(node, offset);
+      if (hit && forward) offset += 1;
+      sel.setBaseAndExtent(parent, forward ? at : at + 1, node, offset);
+    };
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   // Build a mention pill element — shared by click-to-mention and paste-to-mention.
   const buildMentionPill = (item: any): HTMLSpanElement => {
     const pill = document.createElement('span');
@@ -3085,6 +3128,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     ce.focus();
     const sel = window.getSelection(); if (!sel?.rangeCount) return;
     const range = sel.getRangeAt(0);
+    // 선택이 칸 밖까지 걸쳐 있으면 칸 끝에 넣는다 — 그대로 지우면 앱 화면이 통째로 날아간다.
+    if (!ce.contains(range.commonAncestorContainer)) { range.selectNodeContents(ce); range.collapse(false); }
     range.deleteContents();
     const frag = document.createDocumentFragment();
     nodes.forEach((n, i) => {
@@ -3333,6 +3378,12 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       if (e.key === 'ArrowUp') { e.preventDefault(); mentionIndexRef.current = (mentionIndexRef.current - 1 + filteredMentionAssets.length) % filteredMentionAssets.length; highlightMentionItem(); return; }
       if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertMention(filteredMentionAssets[mentionIndexRef.current]); return; }
       if (e.key === 'Escape') { setMentionState(s => ({ ...s, active: false })); return; }
+    }
+    // Ctrl+A 는 언제나 이 칸만 — 한글 자판이면 e.key 가 'ㅁ' 이라 자리(code)로 본다.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === 'KeyA') {
+      e.preventDefault();
+      window.getSelection()?.selectAllChildren(e.currentTarget);
+      return;
     }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
@@ -4374,7 +4425,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
               onChange={(e) => (showGallery ? setGallerySearch : setHeaderSearch)(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Escape') (showGallery ? setGallerySearch : setHeaderSearch)(''); }}
               placeholder={split ? '검색...' : '프롬프트 · 태스크 ID 검색...'}
-              title="프롬프트 · 태스크 ID 검색"
+              title="프롬프트 · 태스크 ID 검색 — 모든 프로젝트에서 ID 로 찾으려면 Ctrl+F"
               className={`${split ? 'w-32' : 'w-44'} pl-8 pr-7 py-1.5 bg-gray-50 border border-gray-200 focus:border-indigo-400 focus:bg-white dark:focus:bg-[#1c1c1e] rounded-lg text-[13px] outline-none transition-all`} />
             {(showGallery ? gallerySearch : headerSearch) && (
               <button onClick={() => (showGallery ? setGallerySearch : setHeaderSearch)('')} title="검색 지우기 (Esc)"
@@ -4775,7 +4826,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
               </AnimatePresence>
               <div className="flex items-end gap-2 w-full">
                 <div ref={promptScrollRef} style={{ maxHeight: `min(${promptHeight}px, 70vh)` }} className="w-full overflow-y-auto">
-                  <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown} onPaste={handlePromptPaste} onCopy={handlePromptCopy} onCut={handlePromptCut}
+                  <div ref={contentEditableRef} contentEditable onInput={handleInput} onKeyDown={handleKeyDown} onMouseDown={handlePromptMouseDown} onPaste={handlePromptPaste} onCopy={handlePromptCopy} onCut={handlePromptCut}
                     style={{ minHeight: 44 }}
                     className="w-full bg-transparent border-none focus:ring-0 resize-none py-2 px-3 text-[16px] text-[#1d1d1f] dark:text-gray-900 outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-gray-400"
                     data-placeholder="영상을 설명해주세요... (@로 에셋 멘션)" />

@@ -6,6 +6,7 @@ import { useAppStore, billingKeyOf, reconcileBillingSelection } from './store';
 import { visibleProjectIds } from './lib/split';
 import { PERSONAL } from './lib/edition';
 import { PersonalKeysDialog, PersonalKeyBanner } from './components/PersonalKeys';
+import { TaskFinder } from './components/TaskFinder';
 
 export default function App() {
   const { projects, createProject, currentProjectId, _hasHydrated } = useAppStore();
@@ -260,6 +261,7 @@ export default function App() {
       <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
       <Workspace />
       <SettingsPanel />
+      <TaskFinder />
       {projectEndedNote && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[80] w-[min(92%,30rem)] flex items-start gap-2.5 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl shadow-lg px-3.5 py-2.5">
           <span className="text-[13px] leading-snug flex-1 whitespace-pre-line">{projectEndedNote}</span>
