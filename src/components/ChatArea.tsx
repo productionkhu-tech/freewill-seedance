@@ -5,6 +5,8 @@ import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollecti
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
 import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
+import { RevealSourceButton, REVEAL_ON_THUMB } from './RevealSource';
+import { findSourcePath, sourcePathOf } from '../lib/source-path';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight, ClipboardCopy, ImageDown } from 'lucide-react';
 import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink } from '../lib/send-request';
 import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from '../lib/agent-inbox';
@@ -1595,7 +1597,7 @@ export type CardActions = {
 };
 const MessageCard = memo(function MessageCard({ msg, projectId, divider, dividerCount, draftOther, finalOther, elementImageUrlById, isGenerating, actions }: {
   msg: any; projectId: string; divider: boolean; dividerCount: number; draftOther?: any; finalOther?: any;
-  elementImageUrlById: Map<string, { preview: string; original: string }>; isGenerating: boolean; actions: { current: CardActions };
+  elementImageUrlById: Map<string, { preview: string; original: string; path?: string }>; isGenerating: boolean; actions: { current: CardActions };
 }) {
   const isDraft = !!msg.usedSettings?.draft;
   return (
@@ -1657,6 +1659,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                         <HoverZoom className="block w-full h-full" src={asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                       )}
                       <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">{asset.role?.replace('_', ' ')}</div>
+                      <RevealSourceButton path={sourcePathOf(asset)} size={10} className={REVEAL_ON_THUMB} />
                     </div>
                   ))}
                   {((msg.usedElementImages as any) || []).map((ei: any) => {
@@ -1672,6 +1675,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                         className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
                         <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                         <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
+                        <RevealSourceButton path={full?.path || findSourcePath(ei.libId || ei.cacheId)} size={10} className={REVEAL_ON_THUMB} />
                       </div>
                     );
                   })}
@@ -1881,12 +1885,12 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // alert() de-activates the Electron renderer window — which drops the prompt caret and
   // wedges the Korean IME until you alt-tab back (the exact bug users hit). A toast never
   // touches focus, so the caret stays and typing keeps working right after a warning.
-  const [toast, setToast] = useState<{ msg: string; ok?: boolean } | null>(null);
+  const [toast, setToast] = useState<{ msg: string; ok?: boolean; sub?: string } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
-  const showToast = (msg: string, ok = false) => {
-    setToast({ msg, ok });
+  const showToast = (msg: string, ok = false, sub?: string) => {
+    setToast({ msg, ok, sub });
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToast(null), ok ? 2200 : 5000);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), ok ? 2200 : sub ? 8000 : 5000);   // 경로까지 읽을 시간
   };
   // 에이전트 작업(아래 '에이전트 작업함')을 보내는 동안 뜬 경고를 모아, 그 작업의 실패 이유로 돌려준다.
   // 화면 토스트는 평소처럼 뜬다 — 사용자도 왜 안 나갔는지 본다.
@@ -2026,7 +2030,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const onToast = (e: Event) => {
       if (!activeRef.current) return;   // 나눠 보는 중이면 손대는 칸만 띄운다
       const d = (e as CustomEvent).detail || {};
-      showToast(d.msg || '', d.ok === true);
+      showToast(d.msg || '', d.ok === true, typeof d.sub === 'string' ? d.sub : undefined);
     };
     window.addEventListener('seedance:toast', onToast);
     return () => window.removeEventListener('seedance:toast', onToast);
@@ -2182,6 +2186,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           if (img && newSrc && img.getAttribute('src') !== newSrc) {
             img.setAttribute('src', newSrc);
             changed = true;
+          } else if (img && (asset as any).thumbnailUrl === '') {
+            img.remove();   // 교체한 영상의 썸네일을 못 만들었다 — 옛 영상 그림을 남기지 않는다
+            changed = true;
           }
         }
       } else {
@@ -2204,8 +2211,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // per render (which re-ran on every store write, worst when many elements are in use).
   // 26.9.3001~ 둘로 나뉜다: 크게 보기는 JPG 미리보기(화면용), 복사는 원본 그대로.
   const elementImageUrlById = useMemo(() => {
-    const m = new Map<string, { preview: string; original: string }>();
-    for (const e of elementAssets) for (const im of e.images) m.set(`${e.id}__${im.id}`, { preview: libraryPreviewSrc(im), original: libraryOriginalSrc(im) });
+    const m = new Map<string, { preview: string; original: string; path?: string }>();
+    for (const e of elementAssets) for (const im of e.images) m.set(`${e.id}__${im.id}`, { preview: libraryPreviewSrc(im), original: libraryOriginalSrc(im), path: im.originalPath });
     return m;
   }, [elementAssets]);
 
@@ -3215,6 +3222,14 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // Clipboard image paste into the prompt box. Default contentEditable
   // behavior inlines the image into the prompt HTML (disaster) — intercept and
   // route to the asset list per mode instead. Text paste falls through.
+  // 클립보드 이미지는 전부 image.png라는 이름으로 들어옴 → 구분 가능한 이름 부여. 탐색기에서 복사한 파일은 이름 · 경로가 그대로 있으니 둔다(원본 폴더 열기 · 복구가 된다).
+  const clipboardImage = (raw: File): { file: File; src: { originalPath?: string } } => {
+    const originalPath = getFilePath(raw);
+    if (originalPath) return { file: raw, src: { originalPath } };
+    const ext = (raw.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+    return { file: new File([raw], `clipboard-${stamp}-${Math.random().toString(36).slice(2, 5)}.${ext}`, { type: raw.type }), src: {} };
+  };
   const handlePromptPaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
     const imageFiles = Array.from(e.clipboardData?.items || [])
       .filter(it => it.kind === 'file' && it.type.startsWith('image/'))
@@ -3242,9 +3257,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       if (task === 'edit') { warn('Edit Video는 편집할 소스 영상만 씁니다 (이미지 X).'); return; }
       if (task === 'extend') { warn('Extend Video는 이어붙일 원본 영상만 씁니다 (이미지 X).'); return; }
       for (const raw of imageFiles) {
-        const ext = (raw.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
-        const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
-        const file = new File([raw], `clipboard-${stamp}-${Math.random().toString(36).slice(2, 5)}.${ext}`, { type: raw.type });
+        const { file, src } = clipboardImage(raw);
         const sizeErr = validateImageFile(file);
         if (sizeErr) { warn(sizeErr); continue; }
         const assets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
@@ -3262,7 +3275,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         try {
           const thumbnailUrl = await createThumbnail(file);
           const cacheId = await cacheFile(file);
-          addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl });
+          addAsset(project.id, { type: 'image_url', url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...src });
         } catch (err: any) { warn(`이미지 처리 실패: ${err.message || ''}`); }
       }
       return;
@@ -3273,10 +3286,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (mode === 'extend_video' && modeRefCaps(project.settings.model, mode).image === 0) { warn('이 모델의 Extend Video 모드에서는 이미지를 첨부할 수 없습니다.\n(비디오만 사용하는 모드입니다)'); return; }
 
     for (const raw of imageFiles) {
-      // 클립보드 이미지는 전부 image.png라는 이름으로 들어옴 → 구분 가능한 이름 부여
-      const ext = (raw.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
-      const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
-      const file = new File([raw], `clipboard-${stamp}-${Math.random().toString(36).slice(2, 5)}.${ext}`, { type: raw.type });
+      const { file, src } = clipboardImage(raw);
 
       const sizeErr = validateImageFile(file);
       if (sizeErr) { warn(sizeErr); continue; }
@@ -3293,9 +3303,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           const cacheId = await cacheFile(file);
           const existing = assets.find(a => a.role === 'first_frame');
           if (existing) {
-            useAppStore.getState().replaceAsset(project.id, existing.id, { url: '', file_name: file.name, cacheId, thumbnailUrl });
+            useAppStore.getState().replaceAsset(project.id, existing.id, { url: '', file_name: file.name, cacheId, thumbnailUrl, ...src });
           } else {
-            addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl });
+            addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl, ...src });
           }
         } else if (mode === 'image_to_video_first_last') {
           // 빈 슬롯부터 채우고(first → last), 둘 다 차면 first → last → first …
@@ -3305,10 +3315,10 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           const first = assets.find(a => a.role === 'first_frame');
           const last = assets.find(a => a.role === 'last_frame');
           if (!first) {
-            addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl });
+            addAsset(project.id, { type: 'image_url', url: '', role: 'first_frame', file_name: file.name, cacheId, thumbnailUrl, ...src });
             pasteCycleRef.current = null; // 슬롯 구성 변경 → 사이클 리셋
           } else if (!last) {
-            addAsset(project.id, { type: 'image_url', url: '', role: 'last_frame', file_name: file.name, cacheId, thumbnailUrl });
+            addAsset(project.id, { type: 'image_url', url: '', role: 'last_frame', file_name: file.name, cacheId, thumbnailUrl, ...src });
             pasteCycleRef.current = null;
           } else {
             const cycle = pasteCycleRef.current;
@@ -3317,7 +3327,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
             const stale = !cycle || cycle.firstId !== first.id || cycle.lastId !== last.id;
             const targetRole = stale ? 'first_frame' : cycle.next;
             const target = targetRole === 'first_frame' ? first : last;
-            useAppStore.getState().replaceAsset(project.id, target.id, { url: '', file_name: file.name, cacheId, thumbnailUrl });
+            useAppStore.getState().replaceAsset(project.id, target.id, { url: '', file_name: file.name, cacheId, thumbnailUrl, ...src });
             pasteCycleRef.current = { firstId: first.id, lastId: last.id, next: targetRole === 'first_frame' ? 'last_frame' : 'first_frame' };
           }
         } else {
@@ -3330,7 +3340,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           }
           const thumbnailUrl = await createThumbnail(file);
           const cacheId = await cacheFile(file);
-          addAsset(project.id, { type: 'image_url', url: '', role: 'reference_image', file_name: file.name, cacheId, thumbnailUrl });
+          addAsset(project.id, { type: 'image_url', url: '', role: 'reference_image', file_name: file.name, cacheId, thumbnailUrl, ...src });
         }
       } catch (err: any) {
         warn(`클립보드 이미지 처리 실패: ${err?.message || ''}`);
@@ -3444,7 +3454,11 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       const failures: string[] = [];
       const failedNames: string[] = [];   // 안내(report)에는 이름만
       const oldNamed = getAssetNames(msg.usedAssets);
-      for (const [i, a] of (msg.usedAssets as any[]).entries()) {
+      for (const [i, raw] of (msg.usedAssets as any[]).entries()) {
+        // 경로가 없는 레퍼런스(받은 영상 · 옛 기록)는 이 PC 기록에서 같은 내용의 경로를 되찾는다 — 되살린 뒤에도 '원본 폴더 열기' 와
+        // 캐시가 지워졌을 때의 복구가 그대로 된다. 복구 때는 서버가 내용을 대조하므로(cacheId 로) 다른 파일이 들어오지 않는다.
+        const foundPath = raw.originalPath ? undefined : findSourcePath(raw.cacheId, raw.file_name);
+        const a = foundPath ? { ...raw, originalPath: foundPath } : raw;
         const label = a.file_name || a.type.replace('_url', '');
         const oldName = oldNamed[i]?.name;
         const before = restored.length;
@@ -3779,7 +3793,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const out = [];
     for (const p of list) {
       const { file } = await agentFileFromPath(p);
-      try { out.push(await fileToElementImage(file)); }
+      try { out.push(await fileToElementImage(file, p)); }
       catch (e: any) { throw new Error(`${p}: ${e?.message || e}`); }
     }
     return out;
@@ -4275,7 +4289,10 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
               {toast.ok
                 ? <Check size={16} className="text-emerald-500 shrink-0 mt-0.5" />
                 : <AlertCircle size={16} className="text-amber-500 shrink-0 mt-0.5" />}
-              <p className="text-[13px] leading-snug whitespace-pre-line flex-1">{toast.msg}</p>
+              <div className="flex-1 min-w-0">
+                <p className="text-[13px] leading-snug whitespace-pre-line break-keep [overflow-wrap:anywhere]">{toast.msg}</p>
+                {toast.sub && <p className="mt-1 text-[11px] leading-snug font-mono opacity-70 break-all">{toast.sub}</p>}
+              </div>
               <button onClick={() => setToast(null)} className={`shrink-0 -mt-0.5 ${toast.ok ? 'text-emerald-400 hover:text-emerald-700' : 'text-amber-400 hover:text-amber-700'}`}><X size={15} /></button>
             </div>
           </motion.div>
@@ -4481,7 +4498,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                             { src: a.url }, { src: a.thumbnailUrl },
                           ], a.file_name || '이미지');
                         }}
-                        className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
+                        className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50 relative group">
                         {a.type === 'image_url' ? (
                           <HoverZoom className="block w-full h-full" src={a.url} fullSrc={a.cacheId ? `/api/cache/${a.cacheId}` : undefined}>
                             <img src={a.url} className="w-full h-full object-cover cursor-zoom-in" />
@@ -4498,6 +4515,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-gray-400">{a.type === 'audio_url' ? <Music size={20} /> : <Video size={20} />}</div>
                         )}
+                        <RevealSourceButton path={sourcePathOf(a)} size={12} className={REVEAL_ON_THUMB} />
                       </div>
                     ))}
                     {((previewItem.usedElementImages as any) || []).map((ei: any) => {
@@ -4510,8 +4528,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                                       { src: ei.cacheId && `/api/cache/${ei.cacheId}`, original: true },
                                       { src: ei.url },
                                     ], ei.name || '이미지'); }}
-                          className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50" style={{ border: `2px solid ${meta.border}` }}>
+                          className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50 relative group" style={{ border: `2px solid ${meta.border}` }}>
                           <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
+                          <RevealSourceButton path={full?.path || findSourcePath(ei.libId || ei.cacheId)} size={12} className={REVEAL_ON_THUMB} />
                         </div>
                       );
                     })}

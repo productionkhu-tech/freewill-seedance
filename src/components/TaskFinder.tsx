@@ -212,7 +212,7 @@ export function TaskFinder() {
   return createPortal(
     <div className="fixed inset-0 z-[300] bg-black/25 flex justify-center items-start px-4 pt-[9vh] text-gray-900"
       onMouseDown={(e) => { if (e.target === e.currentTarget) close(true); }}>
-      <div className="w-full max-w-[680px] max-h-[74vh] flex flex-col bg-white dark:bg-[#1c1c1e] border border-gray-200 rounded-xl shadow-2xl overflow-hidden">
+      <div className="w-full max-w-[680px] max-h-[74vh] flex flex-col break-keep break-words bg-white dark:bg-[#1c1c1e] border border-gray-200 rounded-xl shadow-2xl overflow-hidden">
         <div className="flex items-center gap-2.5 px-3.5 h-12 shrink-0">
           <Search size={16} className="text-gray-400 shrink-0" />
           <input ref={inputRef} value={text} spellCheck={false} autoComplete="off" aria-label="태스크 ID 찾기"

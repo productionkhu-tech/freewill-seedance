@@ -2,8 +2,10 @@ import { useState, useMemo, useEffect, useCallback, memo } from 'react';
 import { useAppStore, AssetCategory, ElementAsset, ElementImage, MODELS, modelImageMax, mentionKey, uniqueElementName, groupElementFiles } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Plus, Search, Trash2, Image as ImageIcon, Upload, Check, Link2, Pencil, Layers, User, MapPin, Package, AlertTriangle, Share2, Copy, Loader2 } from 'lucide-react';
-import { validateImageFile, validateImageDimensions, createThumbnail, createElementPackLink, fetchElementPackByLink, storeLibraryImage, libraryPreviewSrc, libraryImageDataUrl } from '../lib/utils';
+import { getFilePath, validateImageFile, validateImageDimensions, createThumbnail, createElementPackLink, fetchElementPackByLink, storeLibraryImage, libraryPreviewSrc, libraryImageDataUrl } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
+import { RevealSourceButton } from './RevealSource';
+import { findSourcePath } from '../lib/source-path';
 
 // Category visuals — shared with ChatArea mention pills. `accent` is the solid
 // dot color used in the prompt pills (kept emoji-free for a cleaner look).
@@ -72,7 +74,8 @@ function parseBundle(text: string): { kind: 'collection' | 'asset'; collectionNa
 // load a JPG preview by URL (libraryPreviewSrc), and send/copy/share read the original
 // file untouched. storeLibraryImage verifies the server wrote every byte.
 // 에이전트 작업함(ChatArea 의 elements.add)도 이 함수로 등록한다 — 검사 · 썸네일 · 원본 저장이 화면과 같게.
-export async function fileToElementImage(file: File): Promise<ElementImage> {
+// path: 파일 객체에서 경로를 못 얻는 길(에이전트는 경로로 읽어 File 을 새로 만든다)이 알려 주는 원본 경로.
+export async function fileToElementImage(file: File, path?: string): Promise<ElementImage> {
   const sizeErr = validateImageFile(file);
   if (sizeErr) throw new Error(sizeErr);
   const dimErr = await validateImageDimensions(file);
@@ -80,7 +83,8 @@ export async function fileToElementImage(file: File): Promise<ElementImage> {
   // 256, not the 80 default: the thumbnail is what the editor grid and the drop dialog
   // actually paint, and 80px was sized for prompt pills. ~15KB per image — noise.
   const [thumbnailUrl, libId] = await Promise.all([createThumbnail(file, 256), storeLibraryImage(file, file.name)]);
-  return { id: crypto.randomUUID(), libId, thumbnailUrl, ...(file.name ? { file_name: file.name } : {}) };
+  const originalPath = path || getFilePath(file);
+  return { id: crypto.randomUUID(), libId, thumbnailUrl, ...(file.name ? { file_name: file.name } : {}), ...(originalPath ? { originalPath } : {}) };
 }
 
 /* ─── Drag & drop intake: OS files → assets named after the files ─── */
@@ -446,6 +450,8 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, shareSec, on
                     className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity" title="제거">
                     <X size={11} />
                   </button>
+                  <RevealSourceButton path={img.originalPath || findSourcePath(img.libId || img.cacheId, img.file_name)} size={11} onMessage={(msg, sub) => setError(`${msg}\n${sub}`)}
+                    className="absolute top-0.5 left-0.5 bg-black/60 hover:bg-[#0071e3] text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
               ))}
               {images.length < MAX_ELEMENT_IMAGES && (
@@ -474,7 +480,7 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, shareSec, on
             </p>
           </div>
 
-          {error && <p className="text-[12px] text-red-500 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-line">{error}</p>}
+          {error && <p className="text-[12px] text-red-500 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-line break-keep [overflow-wrap:anywhere]">{error}</p>}
         </div>
 
         <div className="flex items-center justify-between gap-2 px-5 py-3.5 border-t border-gray-100 bg-white dark:bg-[#1c1c1e] shrink-0">
@@ -554,7 +560,7 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
               <Upload size={15} /> 파일에서 선택 (.fwsl.json)
               <input type="file" accept="application/json,.json,.fwsl" className="hidden" onChange={(e) => { loadFile(e.target.files?.[0]); e.target.value = ''; }} />
             </label>
-            {error && <p className="text-[12px] text-red-500 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-line">{error}</p>}
+            {error && <p className="text-[12px] text-red-500 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-line break-keep [overflow-wrap:anywhere]">{error}</p>}
           </div>
         ) : (
           <div className="p-5 space-y-4">
@@ -853,7 +859,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
     <motion.div
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       transition={{ duration: 0.15 }}
-      className="fixed inset-0 z-[200] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 text-gray-900"
+      className="fixed inset-0 z-[200] break-keep break-words bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 text-gray-900"
       onClick={onClose}
       onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
       onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}

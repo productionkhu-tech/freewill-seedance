@@ -917,10 +917,20 @@ ipcMain.handle('open-external', async (_event, url) => {
 // highlighted, which is not what "go to my download folder" means.
 // No argument → the session download folder, resolved here so the renderer can't drift
 // out of sync with the folder main is actually saving to.
+// 있는지 묻는 건 메인 스레드를 막지 않게 한다 — 끊긴 네트워크 드라이브는 existsSync 가 수십 초를 붙잡아 앱 창 전체가 멈춘다(레퍼런스 원본 경로에 NAS 가 있다, 26.11.501).
+const pathKind = (p, ms = 5000) => Promise.race([
+  fs.promises.stat(p).then((s) => (s.isDirectory() ? 'dir' : 'file'), () => 'missing'),
+  new Promise((resolve) => setTimeout(() => resolve('timeout'), ms)),
+]);
+
 ipcMain.handle('open-folder', async (_event, dirPath) => {
   const target = (typeof dirPath === 'string' && dirPath) ? dirPath : (sessionDownloadDir || app.getPath('downloads'));
   try {
-    if (!fs.existsSync(target)) return { ok: false, reason: 'missing', path: target };
+    const kind = await pathKind(target);
+    if (kind === 'timeout') return { ok: false, reason: 'timeout', path: target };
+    if (kind === 'missing') return { ok: false, reason: 'missing', path: target };
+    // 폴더만 연다 — openPath 는 파일을 받으면 그 파일을 실행한다.
+    if (kind !== 'dir') return { ok: false, reason: 'error', error: 'not a folder' };
     const err = await shell.openPath(target); // returns '' on success, message on failure
     return err ? { ok: false, reason: 'error', error: err } : { ok: true, path: target };
   } catch (err) {
@@ -931,7 +941,9 @@ ipcMain.handle('open-folder', async (_event, dirPath) => {
 ipcMain.handle('reveal-file', async (_event, filePath) => {
   if (typeof filePath !== 'string' || !filePath) return { ok: false, reason: 'nopath' };
   try {
-    if (!fs.existsSync(filePath)) return { ok: false, reason: 'missing' };
+    const kind = await pathKind(filePath);
+    if (kind === 'timeout') return { ok: false, reason: 'timeout' };
+    if (kind !== 'file') return { ok: false, reason: 'missing' };
     shell.showItemInFolder(filePath);
     return { ok: true };
   } catch (err) {

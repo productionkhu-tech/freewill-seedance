@@ -826,6 +826,19 @@ export interface Asset {
   originalPath?: string; // Electron absolute path of the source file — last-resort
                          // recovery when both the server media-cache entry and the
                          // tmpfiles URL are gone (e.g. attached on a pre-2408 build).
+                         // 26.11.501~ '원본 폴더 열기' 도 이 값을 쓴다(lib/source-path).
+}
+
+// 캐시 id · 라이브러리 id 의 앞 12자리는 내용 md5 다 — 두 id 의 이 값이 같으면 같은 바이트다. 형식이 다른 옛 id 는 null.
+export const contentKey = (id?: string | null) => /^[0-9a-f]{12}/.exec(id || '')?.[0] || null;
+
+// 레퍼런스 교체의 한 곳. 경로 · 길이 · 썸네일은 그 바이트에서 나온 값이라, 내용이 바뀌었는데 새 값이 안 왔으면(클립보드 등 경로 없는 파일로 교체) 옛 값을 버린다 —
+// 그대로 두면 칸에 보이는 것과 다른 파일을 '원본' 으로 열어 주고, 옛 길이로 한도를 잰다. 부르는 쪽마다 지우게 하면 또 빠뜨린다(프레임 붙여넣기 · 패널 교체 · 에이전트 모두 여기를 지난다).
+export function applyAssetUpdate(a: Asset, updates: Partial<Omit<Asset, 'id'>>): Asset {
+  const next: Asset = { ...a, ...updates, id: a.id };
+  const newBytes = !!updates.cacheId && (contentKey(updates.cacheId) || updates.cacheId) !== (contentKey(a.cacheId) || a.cacheId);
+  if (newBytes) for (const k of ['originalPath', 'durationSec', 'thumbnailUrl'] as const) if (updates[k] == null) delete next[k];
+  return next;
 }
 
 /* ─── Element asset library (independent collections, mention-by-name) ───
@@ -848,6 +861,7 @@ export interface ElementImage {
   thumbnailUrl: string; // small base64 preview for the UI
   cacheId?: string;     // opportunistic media-cache id (옛 어셋의 보내기 대체 경로)
   file_name?: string;
+  originalPath?: string; // 등록할 때의 원본 파일 경로(26.11.501~). 그 전에 등록한 이미지엔 없다 — lib/source-path 가 내용으로 되찾아 본다.
 }
 
 export interface ElementAsset {
@@ -1492,6 +1506,16 @@ export const MODELS: {
   // ★ 모델을 추가하면 이 둘도 적는다 — 팀원 PC 의 에이전트는 이걸 읽고 그 모델을 쓴다(커넥터는 손댈 필요 없음).
   guide?: string; notes?: string[];
 }[] = [
+  // 이 순서가 패널 목록 순서다 — 2.5 가 맨 위(사용자 2026-11-05). 새 프로젝트 기본값은 defaultSettings.model 이 따로 정하고, 목록 첫 줄을 고르는 곳은 없다.
+  // ── Seedance 2.5 (official, 2026-08-07) ─────────────────────────────────────────────
+  // The demo endpoint that used to sit beside this row was retired 2026-08-14; projects
+  // saved on it are moved here at hydration (LEGACY_MODEL_IDS in src/lib/model-access.ts),
+  // which is safe because the two always had the identical capability set.
+  // Permission lives in MODEL_GRANTS (src/lib/model-access.ts), not here — server.ts has
+  // to read the same fact and must not import the store.
+  { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5', ...SEEDANCE_25, guide: 'sd25-pe',
+    notes: ['초안(draft)이 기본 — 480p 로 먼저 보고, 고른 것만 앱 카드의 \'본편\' 으로 1080p 를 만든다(같은 시드·구도를 키운 것). 바로 최종이면 draft:false 와 해상도를 정한다.',
+      '1080p 는 HEVC 10-bit — mov(기본)는 4:4:4 라 일부 편집기·플레이어가 못 열고, mp4 는 4:2:0 이라 더 잘 열린다.'] },
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0', guide: 'sd2-pe',
     notes: ['4K 는 과금 프로젝트에 4K 권한이 있을 때만 — 없으면 앱이 낮춰서 보낸다. 4K 는 HEVC 10-bit 라 코덱이 없는 PC 에서는 미리보기가 안 될 수 있다.'] },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast', guide: 'sd2-pe',
@@ -1558,15 +1582,6 @@ export const MODELS: {
     notes: ['첫·끝 프레임을 공식 지원한다(image_to_video 에 두 장).',
       'extend 는 30초 이하 원본에 duration 초만큼 이어 붙인다 — 한 번에 최대 40초.',
       '360p 는 1분 안팎, 1080p 는 2분 안팎, 4K 는 20분 넘게 걸리기도 한다.'] },
-  // ── Seedance 2.5 (official, 2026-08-07) ─────────────────────────────────────────────
-  // The demo endpoint that used to sit beside this row was retired 2026-08-14; projects
-  // saved on it are moved here at hydration (LEGACY_MODEL_IDS in src/lib/model-access.ts),
-  // which is safe because the two always had the identical capability set.
-  // Permission lives in MODEL_GRANTS (src/lib/model-access.ts), not here — server.ts has
-  // to read the same fact and must not import the store.
-  { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5', ...SEEDANCE_25, guide: 'sd25-pe',
-    notes: ['초안(draft)이 기본 — 480p 로 먼저 보고, 고른 것만 앱 카드의 \'본편\' 으로 1080p 를 만든다(같은 시드·구도를 키운 것). 바로 최종이면 draft:false 와 해상도를 정한다.',
-      '1080p 는 HEVC 10-bit — mov(기본)는 4:4:4 라 일부 편집기·플레이어가 못 열고, mp4 는 4:2:0 이라 더 잘 열린다.'] },
 ];
 
 // Capability lookups. Each returns the model's override when present, otherwise the
@@ -2661,7 +2676,7 @@ export const useAppStore = create<AppState>()(
               ? {
                   ...p,
                   assets: p.assets.map((a) =>
-                    a.id === assetId ? { ...a, ...updates, id: a.id } : a
+                    a.id === assetId ? applyAssetUpdate(a, updates) : a
                   ),
                   updatedAt: Date.now(),
                 }

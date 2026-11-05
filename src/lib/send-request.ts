@@ -9,7 +9,7 @@
 import { PERSONAL } from './edition';
 import { personalR2Ready, R2_NEEDED_MSG } from './personal-keys';
 import {
-  useAppStore, Asset, ElementImage, GenerationSettings,
+  useAppStore, Asset, ElementImage, GenerationSettings, applyAssetUpdate,
   clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec,
   modelAllowsAudioOnly, resolveOutputFormat, refTaskTypeFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider,
   resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor,
@@ -179,7 +179,7 @@ export function memoryAssetSink(settings: GenerationSettings): AssetSink & { lis
     settings: () => settings,
     assets: () => list,
     add: (a) => { list.push({ ...a, id: crypto.randomUUID() }); },
-    replace: (id, updates) => { const i = list.findIndex(x => x.id === id); if (i >= 0) list[i] = { ...list[i], ...updates, id }; },
+    replace: (id, updates) => { const i = list.findIndex(x => x.id === id); if (i >= 0) list[i] = applyAssetUpdate(list[i], updates); },
   };
 }
 

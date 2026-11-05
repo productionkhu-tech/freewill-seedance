@@ -6,6 +6,8 @@ import { PersonalKeysCard } from './PersonalKeys';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
+import { RevealSourceButton } from './RevealSource';
+import { sourcePathOf } from '../lib/source-path';
 import { ElementLibrary } from './ElementLibrary';
 import { sideOf } from '../lib/split';
 import { getAssetNames } from '../lib/send-request';
@@ -47,6 +49,18 @@ const acceptFor = (type: 'image_url' | 'video_url' | 'audio_url') =>
 // - `locked` (Start/End frame modes): the grip is the ONLY way a drag can start
 //   (dragListener={false}), so not rendering it makes reordering impossible — no need
 //   to also neuter Reorder.Group. The slot keeps its width so rows don't shift.
+// 긴 파일 이름은 가운데를 줄인다 — 뒤쪽(_v002.mp4)이 갈리는 부분이라 끝을 자르면 어느 파일인지 모른다. 전체는 마우스를 올리면.
+function FileName({ name }: { name: string }) {
+  const TAIL = 8;
+  const long = name.length > TAIL + 4;
+  return (
+    <span title={name} className="flex min-w-0 max-w-full overflow-hidden text-gray-500 font-normal">
+      <span className="truncate">{long ? name.slice(0, -TAIL) : name}</span>
+      {long && <span className="shrink-0 whitespace-pre">{name.slice(-TAIL)}</span>}
+    </span>
+  );
+}
+
 function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, setDragOverId }: {
   asset: Asset; name: string; locked?: boolean;
   onReplaceFile: (a: Asset, f: File) => void;
@@ -70,7 +84,7 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
       }}
       className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] dark:bg-[#242426] border-black/5 dark:border-white/10'}`}
     >
-      <div className="flex items-center gap-2 overflow-hidden">
+      <div className="flex items-center gap-2 overflow-hidden min-w-0 flex-1">
         {locked
           ? <span className="shrink-0 -ml-0.5 w-[15px]" aria-hidden />
           : <span
@@ -115,12 +129,13 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
               : <Video size={14} className="text-purple-500 shrink-0" />
         )}
         {asset.type === 'audio_url' && <Music size={14} className="text-green-500 shrink-0" />}
-        <div className="flex flex-col overflow-hidden">
-          <span className="text-xs font-medium text-gray-800">[{name}] {asset.file_name && <span className="text-gray-500 font-normal ml-1 truncate">{asset.file_name}</span>}</span>
-          <span className="text-[10px] font-medium text-gray-500">{asset.role}</span>
+        <div className="flex flex-col overflow-hidden min-w-0">
+          <span className="flex flex-wrap items-baseline gap-x-1.5 min-w-0 text-xs font-medium text-gray-800"><span className="shrink-0">[{name}]</span>{asset.file_name && <FileName name={asset.file_name} />}</span>
+          <span className="text-[10px] font-medium text-gray-500 truncate">{asset.role}</span>
         </div>
       </div>
       <div className="flex items-center gap-0.5 shrink-0">
+        <RevealSourceButton path={sourcePathOf(asset)} className="text-gray-400 hover:text-indigo-500 p-1" />
         <label title="이 에셋 교체 (클릭하거나 파일을 끌어다 놓기)" className="text-gray-400 hover:text-indigo-500 p-1 cursor-pointer">
           <RefreshCw size={14} />
           <input type="file" accept={acceptFor(asset.type)} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onReplaceFile(asset, f); e.target.value = ''; }} />
@@ -542,37 +557,9 @@ export function SettingsPanel() {
             const cacheId = await cacheFile(file);
             addAsset(project.id, { type, url: '', role, file_name: file.name, cacheId, thumbnailUrl, ...(originalPath ? { originalPath } : {}) });
           } else {
-            let vErr: string | null;
-            if (type === 'video_url' && isOmni) {
-              // Omni edit source: only size (≤50MB) + format matter. No duration/dimension
-              // caps (Seedance's 2–15s / 300–6000px rules don't apply); output is always 720p.
-              const sizeMB = file.size / (1024 * 1024);
-              const okFmt = /\.(mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv)$/i.test(file.name) || /^video\//i.test(file.type);
-              vErr = sizeMB > 50 ? `비디오 크기 초과: ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)` : !okFmt ? '지원하지 않는 형식 (mp4·mov·webm·mpeg·wmv·3gpp·flv)' : null;
-            } else {
-              vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec, refVidMin) : await validateAudioFile(file, refAudSec);
-            }
-            if (vErr) { rejected.push(`${file.name}: ${vErr}`); continue; }
-            // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s
-            // total. Read fresh assets — earlier loop iterations add to them.
-            // Omni has no 15s rule (edit source can be longer, capped only by 50MB), so skip it there.
-            const durationSec = await getMediaDurationSec(file, type === 'video_url' ? 'video' : 'audio');
-            // Extend refuses a source over 30s at the API ("Videos longer than 30s are not
-            // supported for extension") — and it is a hard INPUT cap, not an output budget:
-            // a 33s clip is refused even when asked for only +3s. So there is no shorter
-            // append that rescues it, and the honest place to say so is here, at attach.
-            if (isOmni && type === 'video_url' && resolveOmniTask(settings.model, settings.omniTask) === 'extend') {
-              const cap = modelExtendMaxSrcSec(settings.model);
-              if (cap !== undefined && typeof durationSec === 'number' && durationSec > cap) {
-                rejected.push(`${(file as File).name}: ${durationSec.toFixed(1)}초 — 이어붙일 원본은 ${cap}초까지입니다 (최대 ${modelExtendMaxOutSec(settings.model)}초까지 생성 가능)`);
-                continue;
-              }
-            }
-            if (!isOmni) {
-              const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
-              const totErr = totalDurationError(freshAssets, type, durationSec, refSecFor(type));
-              if (totErr) { rejected.push(`${file.name}: ${totErr}`); continue; }
-            }
+            const checked = await checkMediaFile(file, type);
+            if ('error' in checked) { rejected.push(`${file.name}: ${checked.error}`); continue; }
+            const { durationSec } = checked;
             const thumbnailUrl = type === 'video_url' ? await createVideoThumbnail(file).catch(() => '') : undefined;
             const cacheId = await cacheFile(file);
             addAsset(project.id, { type, url: '', role, file_name: file.name, cacheId, ...(durationSec != null ? { durationSec } : {}), ...(thumbnailUrl ? { thumbnailUrl } : {}), ...(originalPath ? { originalPath } : {}) });
@@ -587,19 +574,59 @@ export function SettingsPanel() {
     e.target.value = '';
   };
 
+  // 영상 · 오디오 검사 — 새로 넣기와 교체가 같은 규칙을 쓴다(따로 두었더니 교체만 Omni 를 몰라서, 넣을 수 있는 긴 원본이 교체로는 거절됐다).
+  // exceptId: 교체라면 나가는 레퍼런스 — 합계에서 뺀다. 통과하면 길이를, 아니면 이유를 돌려준다.
+  const checkMediaFile = async (file: File, type: 'video_url' | 'audio_url', exceptId?: string): Promise<{ error: string } | { durationSec: number | null | undefined }> => {
+    let vErr: string | null;
+    if (type === 'video_url' && isOmni) {
+      // Omni edit source: only size (≤50MB) + format matter. No duration/dimension
+      // caps (Seedance's 2–15s / 300–6000px rules don't apply); output is always 720p.
+      const sizeMB = file.size / (1024 * 1024);
+      const okFmt = /\.(mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv)$/i.test(file.name) || /^video\//i.test(file.type);
+      vErr = sizeMB > 50 ? `비디오 크기 초과: ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)` : !okFmt ? '지원하지 않는 형식 (mp4·mov·webm·mpeg·wmv·3gpp·flv)' : null;
+    } else {
+      vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec, refVidMin) : await validateAudioFile(file, refAudSec);
+    }
+    if (vErr) return { error: vErr };
+    // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s
+    // total. Read fresh assets — earlier loop iterations add to them.
+    // Omni has no 15s rule (edit source can be longer, capped only by 50MB), so skip it there.
+    const durationSec = await getMediaDurationSec(file, type === 'video_url' ? 'video' : 'audio');
+    // Extend refuses a source over 30s at the API ("Videos longer than 30s are not
+    // supported for extension") — and it is a hard INPUT cap, not an output budget:
+    // a 33s clip is refused even when asked for only +3s. So there is no shorter
+    // append that rescues it, and the honest place to say so is here, at attach.
+    if (isOmni && type === 'video_url' && resolveOmniTask(settings.model, settings.omniTask) === 'extend') {
+      const cap = modelExtendMaxSrcSec(settings.model);
+      if (cap !== undefined && typeof durationSec === 'number' && durationSec > cap) {
+        return { error: `${durationSec.toFixed(1)}초 — 이어붙일 원본은 ${cap}초까지입니다 (최대 ${modelExtendMaxOutSec(settings.model)}초까지 생성 가능)` };
+      }
+    }
+    if (!isOmni) {
+      const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
+      const totErr = totalDurationError(exceptId ? freshAssets.filter(a => a.id !== exceptId) : freshAssets, type, durationSec, refSecFor(type));
+      if (totErr) return { error: totErr };
+    }
+    return { durationSec };
+  };
+
   // Replaces an existing asset's bytes while preserving its id (so mention pills
   // referencing it stay attached). Used in modes with single-slot assets like
   // edit_video's video, so users can swap the source without deleting+re-adding.
+  // 줄마다 마지막으로 고른 교체. 검사 · 썸네일 · 캐시가 비동기라 같은 줄을 연달아 바꾸면 늦게 끝난 쪽이 덮어쓴다(큰 파일 → 작은 파일 순이면 먼저 고른 큰 파일이 남는다).
+  const replaceSeq = useRef(new Map<string, number>());
   const handleReplaceFile = async (existing: Asset, file: File) => {
     // Replace must keep the SAME media type (so the asset's role/name/mention
     // stay valid). Block obvious cross-category swaps; ambiguous cases fall
     // through to the per-type validators below.
     const isVid = file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(file.name);
-    const isAud = file.type.startsWith('audio/') || /\.(wav|mp3|mpeg|mpga)$/i.test(file.name);
+    const isAud = !isVid && (file.type.startsWith('audio/') || /\.(wav|mp3|mpeg|mpga)$/i.test(file.name));   // .mpeg 는 영상일 수도 있다 — 형식이 영상이면 영상
     const isImg = file.type.startsWith('image/') || /\.(jpe?g|png|webp|bmp|gif|tiff?|heic|heif)$/i.test(file.name);
     if (existing.type === 'image_url' && (isVid || isAud)) { alert('이미지는 이미지로만 교체할 수 있어요.'); return; }
     if (existing.type === 'video_url' && (isImg || isAud)) { alert('비디오는 비디오로만 교체할 수 있어요.'); return; }
     if (existing.type === 'audio_url' && (isImg || isVid)) { alert('오디오는 오디오로만 교체할 수 있어요.'); return; }
+    const seq = (replaceSeq.current.get(existing.id) || 0) + 1;
+    replaceSeq.current.set(existing.id, seq);
     try {
       const updates: Partial<Asset> = { file_name: file.name };
       const originalPath = getFilePath(file);
@@ -614,20 +641,17 @@ export function SettingsPanel() {
         updates.url = '';
         updates.cacheId = await cacheFile(file);
       } else {
-        const vErr = existing.type === 'video_url' ? await validateVideoFile(file, refVidSec, refVidMin) : await validateAudioFile(file, refAudSec);
-        if (vErr) { alert(vErr); return; }
         // Combined 15s cap — the asset being swapped out doesn't count
-        const durationSec = await getMediaDurationSec(file, existing.type === 'video_url' ? 'video' : 'audio');
-        const freshAssets = useAppStore.getState().projects.find(p => p.id === project.id)?.assets || [];
-        const totErr = totalDurationError(freshAssets.filter(a => a.id !== existing.id), existing.type, durationSec, refSecFor(existing.type));
-        if (totErr) { alert(totErr); return; }
-        updates.durationSec = durationSec ?? undefined;
+        const checked = await checkMediaFile(file, existing.type, existing.id);
+        if ('error' in checked) { alert(checked.error); return; }
+        updates.durationSec = checked.durationSec ?? undefined;
         if (existing.type === 'video_url') {
           updates.thumbnailUrl = await createVideoThumbnail(file).catch(() => '');
         }
         updates.url = '';
         updates.cacheId = await cacheFile(file);
       }
+      if (replaceSeq.current.get(existing.id) !== seq) return;   // 그 사이 다른 파일을 골랐다
       replaceAsset(project.id, existing.id, updates);
     } catch (e: any) {
       alert(`교체 실패: ${e.message || ''}`);
@@ -660,13 +684,13 @@ export function SettingsPanel() {
 
   // 레퍼런스 · 편집 · 연장 패널의 개수 표 — 한 모양(이름 · n/최대 · 한도). 예전엔 셋이 따로 써서 편집은 영상 줄만, 연장은 한 줄에
   // 몰아 단어 중간에서 줄이 바뀌었다(26.10.2803). 0개를 받는 종류는 부르는 쪽이 빼고 넘긴다.
-  const renderRefCounts = (rows: { label: string; n: number; max: number; note: string }[]) => (
+  const renderRefCounts = (rows: { label: string; n: number; max: number; note: string; sub?: string }[]) => (
     <div className="text-[11px] leading-snug space-y-1">
       {rows.map(r => (
         <div key={r.label} className="flex items-baseline gap-2">
           <span className="w-10 shrink-0 font-semibold text-gray-600">{r.label}</span>
-          <span className={`w-8 shrink-0 tabular-nums ${r.n > r.max ? 'text-red-500' : r.n === r.max ? 'text-amber-600' : 'text-gray-700'}`}>{r.n}/{r.max}</span>
-          <span className="text-gray-400 whitespace-nowrap">{r.note}</span>
+          <span className={`w-10 shrink-0 tabular-nums whitespace-nowrap ${r.n > r.max ? 'text-red-500' : r.n === r.max ? 'text-amber-600' : 'text-gray-700'}`}>{r.n}/{r.max}</span>
+          <span className="min-w-0 flex-1 text-gray-400 break-keep">{r.note}{r.sub && <span className="block text-gray-500">{r.sub}</span>}</span>
         </div>
       ))}
     </div>
@@ -674,7 +698,7 @@ export function SettingsPanel() {
   const countOf = (t: 'image_url' | 'video_url' | 'audio_url') => assets.filter(a => a.type === t).length;
   // 이미지는 @어셋 멘션 이미지까지 한도에 든다(보낼 때 함께 센다 — send-request).
   const imageRow = (max: number) => ({ label: '이미지', n: countOf('image_url') + mentionedElementImages, max,
-    note: `개당 30MB · 300~6000px${mentionedElementImages > 0 ? ` · @어셋 ${mentionedElementImages}` : ''}` });
+    note: '개당 30MB · 300~6000px', sub: mentionedElementImages > 0 ? `@어셋 ${mentionedElementImages}장 포함` : undefined });
   const audioRow = (max: number) => ({ label: '오디오', n: countOf('audio_url'), max, note: `개당 15MB · 2~${Math.floor(refAudSec)}초` });
 
   const renderUploadButton = (label: string, role: AssetRole, type: 'image_url' | 'video_url' | 'audio_url', accept: string, multiple: boolean = false, disabled: boolean = false) => {
@@ -702,7 +726,7 @@ export function SettingsPanel() {
   };
 
   return (
-    <div ref={panelRef} onScroll={rememberPanelScroll} className="w-80 bg-[#f5f5f7] dark:bg-[#242426] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0"
+    <div ref={panelRef} onScroll={rememberPanelScroll} className="w-80 break-keep break-words bg-[#f5f5f7] dark:bg-[#242426] border-l border-gray-200/60 flex flex-col h-full overflow-y-auto shrink-0"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => { e.preventDefault(); setDragOverAssetId(null); }}>
       <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 dark:bg-[#242426]/80 backdrop-blur-xl z-10">
