@@ -135,7 +135,7 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
         </div>
       </div>
       <div className="flex items-center gap-0.5 shrink-0">
-        <RevealSourceButton path={sourcePathOf(asset)} className="text-gray-400 hover:text-indigo-500 p-1" />
+        <RevealSourceButton path={sourcePathOf(asset)} searchId={asset.cacheId} fileName={asset.file_name} className="text-gray-400 hover:text-indigo-500 p-1" />
         <label title="이 에셋 교체 (클릭하거나 파일을 끌어다 놓기)" className="text-gray-400 hover:text-indigo-500 p-1 cursor-pointer">
           <RefreshCw size={14} />
           <input type="file" accept={acceptFor(asset.type)} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onReplaceFile(asset, f); e.target.value = ''; }} />

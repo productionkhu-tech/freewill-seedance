@@ -2271,6 +2271,94 @@ async function startServer() {
   }
   const CHANGED_MSG = '첨부한 뒤 원본 파일의 내용이 바뀌었습니다 (같은 이름의 수정본).';
 
+  // ─── 원본 찾기 (26.11.502) ──────────────────────────────────────────────────────────────
+  // 어셋 이미지 · 레퍼런스의 원본 파일을 이 PC 디스크에서 내용으로 찾는다. 어셋 이미지는 501 전엔 경로를 저장하지 않았고, 파일은 옮겨지기도 한다.
+  // 원본 바이트가 라이브러리 · 캐시 폴더에 있어 크기와 지문(id 앞 12자리 md5)을 안다 — 크기가 같은 파일만 md5 를 대조하므로 빠르고, 이름이 바뀌어도 찾는다.
+  // targets[0] 이 사람이 누른 것. 그걸 찾으면 덤으로 조금만 더 돌고 답한다(나머지는 같이 찾아 두면 다음 클릭이 바로 열린다).
+  // 볼 곳: 기록에서 파일이 많이 왔던 폴더(dirs, 화면이 준다) → 사용자 폴더 → 그 폴더들의 2단계 위. 실측(2026-11-05, 이 PC): 224개 중 214개, 33초.
+  const FIND_SKIP = /^(node_modules|\.git|\$RECYCLE\.BIN|System Volume Information|Windows|Program Files.*|ProgramData|AppData|media-cache|element-library|Freewill Seedance Backup)$/i;
+  const FIND_EXT = /\.(png|jpe?g|webp|heic|heif|bmp|gif|tiff?|mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv|wav|mp3|mpga)$/i;
+  const FIND_ID = /^[0-9a-f]{12}(\.[a-z0-9]{1,8})?$/i;
+  const FIND_BUDGET_MS = 40_000, FIND_EXTRA_MS = 3_000;
+  let findingSources = false;
+  app.post('/api/find-sources', async (req, res) => {
+    if (findingSources) return res.status(409).json({ busy: true, found: {} });
+    const raw: { id?: unknown; name?: unknown }[] = Array.isArray(req.body?.targets) ? req.body.targets.slice(0, 3000) : [];
+    const dirs: string[] = (Array.isArray(req.body?.dirs) ? req.body.dirs : []).filter((d: unknown): d is string => typeof d === 'string' && !!d).slice(0, 300);
+    const bySize = new Map<number, { id: string; hash: string }[]>();
+    const seenIds = new Set<string>();
+    let first = '', firstName = '';
+    for (const t of raw) {
+      const id = typeof t?.id === 'string' && FIND_ID.test(t.id) ? t.id : '';
+      if (!id || seenIds.has(id)) continue;
+      seenIds.add(id);
+      if (!first) { first = id; firstName = typeof t.name === 'string' ? path.basename(t.name) : ''; }
+      for (const dir of [LIB_DIR, CACHE_DIR]) {
+        try {
+          const st = await fs.promises.stat(path.join(dir, id));
+          if (!bySize.has(st.size)) bySize.set(st.size, []);
+          bySize.get(st.size)!.push({ id, hash: id.slice(0, 12).toLowerCase() });
+          break;
+        } catch { /* 다음 폴더 */ }
+      }
+    }
+    const found: Record<string, string> = {};
+    let remaining = [...bySize.values()].reduce((n, l) => n + l.length, 0);
+    if (!remaining) return res.json({ found });
+    findingSources = true;
+    const t0 = Date.now();
+    let firstAt = 0, stopped = false, files = 0;
+    const over = () => stopped || remaining <= 0 || Date.now() - t0 > FIND_BUDGET_MS || (!!firstAt && Date.now() - firstAt > FIND_EXTRA_MS);
+    const check = async (p: string, size: number) => {
+      const cand = (bySize.get(size) || []).filter(c => !found[c.id]);
+      if (!cand.length) return;
+      const h = crypto.createHash('md5');
+      for await (const chunk of fs.createReadStream(p)) { h.update(chunk as Buffer); if (stopped) return; }
+      const hash = h.digest('hex').slice(0, 12);
+      for (const c of cand) {
+        if (c.hash !== hash) continue;
+        found[c.id] = p;
+        remaining--;
+        if (c.id === first) firstAt = Date.now();
+      }
+    };
+    const seenDirs = new Set<string>();
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (over() || seenDirs.has(dir)) return;
+      seenDirs.add(dir);
+      let list: fs.Dirent[];
+      try { list = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+      const subs: string[] = [];
+      for (const e of list) {
+        if (over()) return;
+        if (e.isDirectory()) { if (depth > 0 && !FIND_SKIP.test(e.name)) subs.push(path.join(dir, e.name)); continue; }
+        if (!e.isFile() || !FIND_EXT.test(e.name)) continue;
+        files++;
+        const p = path.join(dir, e.name);
+        try { await check(p, (await fs.promises.stat(p)).size); } catch { /* 못 읽는 파일은 넘어간다 */ }
+      }
+      for (const s of subs) await walk(s, depth - 1);
+    };
+    const upTwo = (d: string) => path.dirname(path.dirname(d));
+    const run = async () => {
+      // 이름이 그대로면 폴더를 훑을 것도 없다.
+      if (firstName) for (const d of dirs) {
+        if (over() || found[first]) break;
+        const p = path.join(d, firstName);
+        try { await check(p, (await fs.promises.stat(p)).size); } catch { /* 그 폴더엔 없다 */ }
+      }
+      for (const d of dirs) await walk(d, 1);
+      for (const d of ['Downloads', 'Desktop', 'Documents', 'Pictures', 'Videos']) await walk(path.join(os.homedir(), d), 8);
+      for (const d of new Set(dirs.map(upTwo))) await walk(d, 6);
+    };
+    // 끊긴 네트워크 드라이브는 파일 시스템 호출이 답을 안 한다 — 시간이 되면 있는 것만 답한다.
+    await Promise.race([run().catch(() => {}), new Promise(r => setTimeout(r, FIND_BUDGET_MS + 1000))]);
+    stopped = true;
+    findingSources = false;
+    console.log(`[Find source] ${Object.keys(found).length}/${seenIds.size} · 파일 ${files}개 · ${Date.now() - t0}ms`);
+    res.json({ found });
+  });
+
   // Re-cache an image/audio from its on-disk original path WITHOUT touching R2.
   // The image/audio path is base64-inline to BytePlus, so R2 must not be involved
   // for these — that's the whole point of the brief's audio/image separation. The

@@ -343,6 +343,15 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, shareSec, on
   const [error, setError] = useState('');
   const [dragging, setDragging] = useState(false);
 
+  // 원본 찾기가 저장한 경로를 이 창이 들고 있는 사본에도 — 안 맞추면 저장 버튼이 찾은 경로를 지운다.
+  const syncPaths = () => {
+    const stored = useAppStore.getState().elementAssets.flatMap(a => a.images);
+    setImages(prev => prev.map(i => {
+      const p = stored.find(x => x.id === i.id)?.originalPath;
+      return p && p !== i.originalPath ? { ...i, originalPath: p } : i;
+    }));
+  };
+
   const addFiles = async (files: File[]) => {
     setError('');
     const room = MAX_ELEMENT_IMAGES - images.length;
@@ -450,8 +459,9 @@ function AssetEditor({ initial, onSave, onDelete, onShare, sharing, shareSec, on
                     className="absolute top-0.5 right-0.5 bg-black/60 hover:bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity" title="제거">
                     <X size={11} />
                   </button>
-                  <RevealSourceButton path={img.originalPath || findSourcePath(img.libId || img.cacheId, img.file_name)} size={11} onMessage={(msg, sub) => setError(`${msg}\n${sub}`)}
-                    className="absolute top-0.5 left-0.5 bg-black/60 hover:bg-[#0071e3] text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <RevealSourceButton path={img.originalPath || findSourcePath(img.libId || img.cacheId, img.file_name)} searchId={img.libId || img.cacheId} findable fileName={img.file_name} size={11}
+                    onMessage={(msg, sub, ok) => { if (!ok) setError(sub ? `${msg}\n${sub}` : msg); }} onDone={syncPaths}
+                    className="absolute top-0.5 left-0.5 bg-black/60 hover:bg-[#0071e3] text-white rounded-full p-0.5 opacity-70 group-hover:opacity-100 transition-opacity" />
                 </div>
               ))}
               {images.length < MAX_ELEMENT_IMAGES && (

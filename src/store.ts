@@ -1256,6 +1256,7 @@ interface AppState {
   deleteCollection: (id: string) => void;        // also drops its elementAssets + bindings
   addElementAsset: (asset: Omit<ElementAsset, 'id' | 'createdAt' | 'updatedAt'>) => void;
   updateElementAsset: (id: string, updates: Partial<Omit<ElementAsset, 'id' | 'collectionId' | 'createdAt'>>) => void;
+  setElementSourcePaths: (found: Record<string, string>) => void;   // 디스크에서 내용으로 찾은 원본 경로(lib/source-path). 어셋을 고친 것이 아니라 updatedAt 은 그대로
   deleteElementAsset: (id: string) => void;
   setProjectCollection: (projectId: string, collectionId: string | null) => void;
 }
@@ -2296,6 +2297,11 @@ export const useAppStore = create<AppState>()(
       })),
       // id + collectionId are pinned (a mention pill tracks the asset by id, so it
       // must never change here — same invariant as replaceAsset for panel assets).
+      setElementSourcePaths: (found) => set((state) => ({
+        elementAssets: state.elementAssets.map((a) => a.images.some((im) => im.libId && found[im.libId] && found[im.libId] !== im.originalPath)
+          ? { ...a, images: a.images.map((im) => (im.libId && found[im.libId] ? { ...im, originalPath: found[im.libId] } : im)) }
+          : a),
+      })),
       updateElementAsset: (id, updates) => set((state) => ({
         elementAssets: state.elementAssets.map((a) =>
           a.id === id ? { ...a, ...updates, id: a.id, collectionId: a.collectionId, updatedAt: Date.now() } : a

@@ -1659,7 +1659,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                         <HoverZoom className="block w-full h-full" src={asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                       )}
                       <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">{asset.role?.replace('_', ' ')}</div>
-                      <RevealSourceButton path={sourcePathOf(asset)} size={10} className={REVEAL_ON_THUMB} />
+                      <RevealSourceButton path={sourcePathOf(asset)} searchId={asset.cacheId} fileName={asset.file_name} size={10} className={REVEAL_ON_THUMB} />
                     </div>
                   ))}
                   {((msg.usedElementImages as any) || []).map((ei: any) => {
@@ -1675,7 +1675,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                         className="w-11 h-11 rounded-lg overflow-hidden shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0" style={{ border: `2px solid ${meta.border}` }}>
                         <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                         <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[7px] text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity truncate px-0.5">{ei.name}</div>
-                        <RevealSourceButton path={full?.path || findSourcePath(ei.libId || ei.cacheId)} size={10} className={REVEAL_ON_THUMB} />
+                        <RevealSourceButton path={full?.path || findSourcePath(ei.libId || ei.cacheId)} searchId={ei.libId || ei.cacheId} findable={!!full} fileName={ei.name} size={10} className={REVEAL_ON_THUMB} />
                       </div>
                     );
                   })}
@@ -1890,7 +1890,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const showToast = (msg: string, ok = false, sub?: string) => {
     setToast({ msg, ok, sub });
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToast(null), ok ? 2200 : sub ? 8000 : 5000);   // 경로까지 읽을 시간
+    toastTimerRef.current = window.setTimeout(() => setToast(null), sub ? 8000 : ok ? 2200 : 5000);   // 경로까지 읽을 시간
   };
   // 에이전트 작업(아래 '에이전트 작업함')을 보내는 동안 뜬 경고를 모아, 그 작업의 실패 이유로 돌려준다.
   // 화면 토스트는 평소처럼 뜬다 — 사용자도 왜 안 나갔는지 본다.
@@ -4515,7 +4515,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-gray-400">{a.type === 'audio_url' ? <Music size={20} /> : <Video size={20} />}</div>
                         )}
-                        <RevealSourceButton path={sourcePathOf(a)} size={12} className={REVEAL_ON_THUMB} />
+                        <RevealSourceButton path={sourcePathOf(a)} searchId={a.cacheId} fileName={a.file_name} size={12} className={REVEAL_ON_THUMB} />
                       </div>
                     ))}
                     {((previewItem.usedElementImages as any) || []).map((ei: any) => {
@@ -4530,7 +4530,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                                     ], ei.name || '이미지'); }}
                           className="w-16 h-16 rounded-lg overflow-hidden bg-gray-50 relative group" style={{ border: `2px solid ${meta.border}` }}>
                           <HoverZoom className="block w-full h-full" src={ei.url} fullSrc={full?.preview && full.preview !== ei.url ? full.preview : undefined}><img src={ei.url} className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
-                          <RevealSourceButton path={full?.path || findSourcePath(ei.libId || ei.cacheId)} size={12} className={REVEAL_ON_THUMB} />
+                          <RevealSourceButton path={full?.path || findSourcePath(ei.libId || ei.cacheId)} searchId={ei.libId || ei.cacheId} findable={!!full} fileName={ei.name} size={12} className={REVEAL_ON_THUMB} />
                         </div>
                       );
                     })}
