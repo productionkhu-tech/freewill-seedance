@@ -1782,6 +1782,8 @@ async function startServer() {
       allowedModels: agentScreen.allowedModels ?? null,   // 그 과금 프로젝트로 지금 쓸 수 있는 모델
       fourK: !!agentScreen.fourK,                         // 4K 권한
       generating: !!agentScreen.generating,
+      // false = 코드 목록(시트)을 아직 못 받아 요청을 가져가지 않는다 — 기다리는 이유를 말할 때(화면이 들른 적 없으면 null).
+      billingReady: agentScreen.billingReady ?? null,
       composer: agentScreen.composer !== false,           // false = 갤러리 화면(작성 칸이 없어 받지 못함)
       pending: openAgentJobs().length,
       // 26.10.2002~ 프로젝트 코드를 기다리는 작업 — 사람에게 시댄스의 프로젝트 코드를 골라 달라고 할 것.
@@ -1961,6 +1963,16 @@ async function startServer() {
       ...(j.warnings?.length ? { warnings: j.warnings } : {}),
       messages: j.messages || [], createdAt: j.createdAt, updatedAt: j.updatedAt, manualVersion: manualVersionNow(),
     });
+  });
+
+  // 보낸 뒤 끝을 기다리는 작업 — 화면만 다시 뜨면(렌더러 재생성 · 새로고침) 화면이 들고 있던 목록(agentActive)이 사라져 'sent' 에 굳었다.
+  // 켠 화면이 처음 한 번 물어 이어 받는다(26.11.601). 앱을 껐다 켜면 서버도 다시 떠서 여기는 빈다 — 그때는 커넥터가 카드 id 로 이어 받는다.
+  app.get('/api/agent/sent', (_req, res) => {
+    pruneAgentJobs();
+    const jobs = [...agentJobs.values()]
+      .filter(j => j.status === 'sent' && j.projectId && j.messages?.length)
+      .map(j => ({ id: j.id, projectId: j.projectId, ids: (j.messages as any[]).map(m => m?.id).filter(x => typeof x === 'string') }));
+    res.json({ jobs });
   });
 
   // ── 에이전트 명령 (26.10.305~) ───────────────────────────────────────────────
@@ -2197,10 +2209,11 @@ async function startServer() {
     // 3. 아직 보관 중이라면(큐에 남아 있다면) 그동안은 원본에서 내보낸다. 생성 직후
     //    다운로드를 누르면 보관 전이라 404 였고, 다운로드는 조용히 실패했다.
     //    ★ 프록시로 내려가지 않는다 — 여기서도 받는 건 원본이다.
+    let pendingExt = '';
     if (!url) {
       const p = pendingSource(indexId) || pendingSource(taskId);
       if (p?.localPath && fs.existsSync(p.localPath)) { touchCache(p.localPath); return res.sendFile(p.localPath); }
-      if (p?.sourceUrl) url = p.sourceUrl;
+      if (p?.sourceUrl) { url = p.sourceUrl; pendingExt = p.ext || ''; }
     }
     if (!url) return res.status(404).json({ error: 'not archived' });
 
@@ -2215,6 +2228,11 @@ async function startServer() {
         const v = upstream.headers.get(h);
         if (v) res.setHeader(h, v);
       }
+      // 형식은 우리가 아는 확장자로 답한다 — 원본 주소가 .mov 를 video/mp4 로 답하면, 보관이 끝나기 전에만 다른 형식으로 보여 커넥터가 .mp4 로 받아 적었다.
+      // 로컬 사본(sendFile)은 원래 확장자로 답한다. 어느 쪽인지 모를 때(색인도 큐도 힌트도 없음)는 원본의 답을 그대로 둔다.
+      const sureExt = (pendingExt || (row || /^\.[A-Za-z0-9]{1,5}$/.test(qExt) ? ext : '')).toLowerCase();
+      const sureType = ({ '.mov': 'video/quicktime', '.mp4': 'video/mp4', '.webm': 'video/webm' } as Record<string, string>)[sureExt];
+      if (sureType) res.setHeader('content-type', sureType);
       if (!upstream.body) return res.end();
       Readable.fromWeb(upstream.body as any).pipe(res);
     } catch (e: any) {

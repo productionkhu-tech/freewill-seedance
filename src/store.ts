@@ -1518,7 +1518,7 @@ export const MODELS: {
     notes: ['초안(draft)이 기본 — 480p 로 먼저 보고, 고른 것만 앱 카드의 \'본편\' 으로 1080p 를 만든다(같은 시드·구도를 키운 것). 바로 최종이면 draft:false 와 해상도를 정한다.',
       '1080p 는 HEVC 10-bit — mov(기본)는 4:4:4 라 일부 편집기·플레이어가 못 열고, mp4 는 4:2:0 이라 더 잘 열린다.'] },
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0', guide: 'sd2-pe',
-    notes: ['4K 는 과금 프로젝트에 4K 권한이 있을 때만 — 없으면 앱이 낮춰서 보낸다. 4K 는 HEVC 10-bit 라 코덱이 없는 PC 에서는 미리보기가 안 될 수 있다.'] },
+    notes: ['4K 는 과금 프로젝트에 4K 권한이 있을 때만 — 없으면 낮추지 않고 거절한다. 4K 는 HEVC 10-bit 라 코덱이 없는 PC 에서는 미리보기가 안 될 수 있다.'] },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast', guide: 'sd2-pe',
     notes: ['빠른 시안용 — 1080p·4K 가 없다.'] },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini', guide: 'sd2-pe' },
@@ -3171,6 +3171,17 @@ useAppStore.subscribe((state) => {
   if (state.elementAssets.some(a => a.images.some(isLegacyImage))) scheduleLibraryMigration();
 });
 
+// 켤 때 '진행 중' 인데 taskId 가 없는 카드 = 결과를 받을 주인이 없다. 진행 상황은 이 화면의 메모리(요청을 기다리는 fetch)에만 있어서 앱이나
+// 화면이 다시 뜨면 사라지는데, 폴링은 taskId 가 있는 카드만 본다(App.tsx) — Omni(요청 하나로 끝까지 기다림) 생성 중이거나, 시댄스가 태스크 id 를
+// 받기 전에 꺼지면 영원히 '생성 중' 이었다. 취소도 못 하고 커넥터의 동시 한도 자리도 계속 차지했다(26.11.601, MCP 감사).
+function closeOrphanCards(messages: ChatMessage[]): ChatMessage[] {
+  const orphan = (m: ChatMessage) => (m.status === 'running' || m.status === 'queued') && !m.taskId;
+  if (!messages?.some(orphan)) return messages;
+  const now = Date.now();
+  const error = '앱이 꺼지거나 화면이 다시 뜨는 사이에 끊겨 결과를 받지 못했습니다.\n요청이 이미 나갔다면 과금됐을 수 있어요 — 다시 만들기 전에 필요한지 확인해 주세요.';
+  return messages.map(m => orphan(m) ? { ...m, status: 'failed' as const, content: '생성 실패', error, endTime: now } : m);
+}
+
 // ─── 켜질 때 프로젝트 설정 정리 (hydration 과 백업 되살리기가 같이 쓴다) ──────────────
 function patchLoadedProject(p: Project, resetStaleDraft: boolean): Project {
   const validModelIds = MODELS.map(m => m.id);
@@ -3206,7 +3217,7 @@ function patchLoadedProject(p: Project, resetStaleDraft: boolean): Project {
   if (s.draft !== undefined && !modelSupportsDraft(s.model)) delete s.draft;
   if (resetStaleDraft && s.draft === false) delete s.draft;
   // Clear in-progress draft prompts on app restart (session-only persistence)
-  return { ...p, settings: s, draftPrompt: '' };
+  return { ...p, settings: s, draftPrompt: '', messages: closeOrphanCards(p.messages) };
 }
 
 // ─── 백업에서 프로젝트·어셋 되살리기 (26.10.201~) ──────────────────────────────────

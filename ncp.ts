@@ -642,9 +642,9 @@ async function archiveOne(job: Job) {
  * 벌어진다. 큐가 원본 주소를 이미 들고 있으니, 그동안은 그쪽에서 내보낸다.
  * ★ 프록시가 아니다. 이 경로로 나가는 것도 언제나 원본이다.
  */
-export function pendingSource(taskId: string): { localPath?: string; sourceUrl?: string } | null {
+export function pendingSource(taskId: string): { localPath?: string; sourceUrl?: string; ext?: string } | null {
   const j = queue.get(taskId);
-  return j ? { localPath: j.localPath, sourceUrl: j.sourceUrl } : null;
+  return j ? { localPath: j.localPath, sourceUrl: j.sourceUrl, ext: j.ext } : null;
 }
 export async function presignArchived(taskId: string): Promise<string | null> {
   const row = mediaIndex.get(taskId);

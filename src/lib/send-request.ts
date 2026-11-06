@@ -10,7 +10,7 @@ import { PERSONAL } from './edition';
 import { personalR2Ready, R2_NEEDED_MSG } from './personal-keys';
 import {
   useAppStore, Asset, ElementImage, GenerationSettings, applyAssetUpdate,
-  clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec,
+  clampResolution, allowedResolutions, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec,
   modelAllowsAudioOnly, resolveOutputFormat, refTaskTypeFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider,
   resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor,
   modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX, projectBilling, billingOf, boundCollectionOf,
@@ -30,6 +30,7 @@ export type SendInput = {
   assets: Asset[];
   writeBack4k?: boolean;            // 화면의 보내기만 — 4K 권한이 풀려 낮춰 보낼 때 프로젝트 설정에도 되쓴다
   expectBillingKey?: string;        // 에이전트 — 가져갈 때 본 프로젝트 코드(key). 다르면 보내지 않는다
+  strictResolution?: boolean;       // 에이전트 — 해상도를 낮춰 보내지 않고 거절한다(시킨 값과 다른 결과가 조용히 나가고 과금되지 않게, 26.11.601~)
 };
 export type SendIO = {
   warn: (msg: string) => void;
@@ -51,7 +52,9 @@ function recheckBeforePost(projectId: string, billingKey: string, model: string,
   if (!isModelAllowed(model, bo)) {
     return `보내는 사이 프로젝트 코드 "${now.project}" 의 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 풀려 보내지 않았습니다.`;
   }
-  if (resolution === '4k' && !isFourKAllowed(bo)) return `보내는 사이 4K 권한이 풀려 보내지 않았습니다.\n해상도를 낮춰 다시 보내 주세요.`;
+  // 4K 권한은 BytePlus 크레딧 규칙이다 — Omni 는 묻지 않는다(allowedResolutions 한 곳이 안다). 여기서만 따로 봐서, 권한 없는 코드의 Omni 4K 가
+  // 사람 · 에이전트 모두 "권한이 풀려" 로 실패했다(26.11.601, MCP 감사).
+  if (resolution === '4k' && !allowedResolutions(model, isFourKAllowed(bo)).includes('4k')) return `보내는 사이 4K 권한이 풀려 보내지 않았습니다.\n해상도를 낮춰 다시 보내 주세요.`;
   return '';
 }
 
@@ -554,6 +557,12 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
     const clamped = clampResolution(currentSettings.model, currentSettings.resolution, allow4k);
     if (clamped !== currentSettings.resolution) {
       const was4k = currentSettings.resolution === '4k';
+      if (input.strictResolution) {
+        warn(was4k
+          ? `프로젝트 코드 "${bill.project}" 는 4K 권한이 없어 보내지 않았습니다(낮춰 보내지 않습니다).\n해상도를 낮추거나, 4K 권한이 있는 코드로 바꿔 달라고 사람에게 말해 주세요.`
+          : `${MODELS.find(m => m.id === currentSettings.model)?.name || '이 모델'} 에 없는 해상도(${currentSettings.resolution})라 보내지 않았습니다.`);
+        return;
+      }
       currentSettings.resolution = clamped;
       // Write back ONLY now, so the panel visibly returns to the allowed tier once the
       // user actually sends — never while they're still composing.

@@ -780,6 +780,28 @@ const rebindMentionPills = (html: string, named: { id: string; name: string }[])
 // 보낸 에이전트 작업 → 카드 상태를 올릴 것(26.10.2002~ 앱에 하나). 예전에는 칸(ChatArea)마다 들고 있어서, 보낸 칸을 닫으면
 // 그 작업이 'sent' 에서 멈췄다. 이제 손대는 칸이 누구 것이든 이어서 올린다(agentReportProgress).
 const agentActive = new Map<string, { projectId: string; ids: string[]; last: string; inFlight?: boolean }>();
+// 화면만 다시 뜨면(렌더러가 죽어 창을 새로 만듦 · 새로고침) 서버는 살아 있는데 agentActive 는 비어, 보낸 작업이 'sent' 에 굳어 끝을 알리지 못했다
+// (26.11.601, MCP 감사). 켠 뒤 처음 한 번 서버에 물어 이어 받는다 — 카드는 저장본에 있고, 끝난 것은 다음 틱에 바로 올라간다.
+let agentResumed = false;
+const agentResumeSent = () => {
+  if (agentResumed) return;
+  agentResumed = true;
+  fetch('/api/agent/sent', { signal: AbortSignal.timeout(15000) })
+    .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+    .then(d => {
+      for (const j of Array.isArray(d?.jobs) ? d.jobs : []) {
+        if (typeof j?.id === 'string' && typeof j?.projectId === 'string' && Array.isArray(j?.ids) && !agentActive.has(j.id)) {
+          agentActive.set(j.id, { projectId: j.projectId, ids: j.ids, last: '' });
+        }
+      }
+    })
+    .catch(() => { agentResumed = false; });   // 서버가 잠깐 없으면 다음 틱에 다시
+};
+// 이 카드가 실제로 과금된 코드 — 보낼 때 카드에 구운 값이다(본편은 초안을 만든 코드). 지금 앱에 골라 둔 코드와 다를 수 있다. 옛 카드는 null.
+const agentCardBilling = (m: any) => {
+  const vs = m?.videoStorage;
+  return vs?.project || vs?.projectId ? { name: vs.project ?? null, id: vs.projectId || null } : null;
+};
 // '보내는 중' 잠금(26.10.2004 감사) — 칸이 아니라 프로젝트에 붙는다(store sendingProjects). 한 번 보내기에 한 번만 올리고
 // 내린다(token): sendRequest 가 busy(true/false) 를 부르고, 부르는 쪽은 끝난 뒤 1.5초에 한 번 더 release 한다 — 어느 길에서
 // 내리는 것을 빠뜨려도 잠금이 남지 않게(Omni 는 0.8초 뒤에 내려 돌기가 보이게 한다).
@@ -3703,7 +3725,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (job.billing && job.billing !== bill.project.trim()) {
       return fail(`시댄스의 프로젝트 코드는 "${bill.project}" 입니다(요청: "${job.billing}"). 과금은 사람이 정합니다 — 이 코드로 보낼지, 앱에서 코드를 바꿀지 사람에게 확인한 뒤 다시 보내 주세요.`);
     }
-    const plan = agentSettings(target.settings, job.settings && typeof job.settings === 'object' ? job.settings : {});
+    // ★ 설정은 요청과 모델 기본값으로만 — target.settings 를 읽지 않는다(사용자 결정 2026-11-06 "앱설정은 과금만 따르는 거임").
+    const plan = agentSettings(job.settings && typeof job.settings === 'object' ? job.settings : {});
     if (!plan.next) return fail(plan.error || '설정을 읽지 못했습니다');
     const next = plan.next;
     const omni = modelProvider(next.model) === 'gemini';
@@ -3712,7 +3735,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const refs = (Array.isArray(job.refs) ? job.refs : [])
       .map((r: any, i: number) => ({ path: String(r?.path || ''), role: typeof r?.role === 'string' ? r.role : undefined, i }))
       .sort((a: any, b: any) => rank(a.role) - rank(b.role) || a.i - b.i);
-    if (refs.length && !omni && next.mode === 'text_to_video') return fail('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.');
+    if (refs.length && !omni && next.mode === 'text_to_video') return fail('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.\n(mode 를 안 적으면 text_to_video 입니다 — 레퍼런스를 쓰려면 mode 를 적어 주세요)');
 
     // 레퍼런스는 메모리에 붙인다(attachFilesTo 의 검사 그대로) — 그 프로젝트의 레퍼런스 칸에는 아무것도 생기지 않는다.
     const sink = memoryAssetSink(next);
@@ -3740,7 +3763,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     let ids: string[] | undefined;
     try {
       ids = await sendRequest(
-        { projectId: target.id, promptHtml: html, settings: next, assets: sink.list, expectBillingKey: bill.key },
+        { projectId: target.id, promptHtml: html, settings: next, assets: sink.list, expectBillingKey: bill.key, strictResolution: true },
         { warn: m => { warnings.push(m); } },
       );
     } catch (e: any) { return fail(e?.message || String(e)); }
@@ -3780,6 +3803,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       settings: m.usedSettings ? { model: us.model, mode: us.mode, ...(modelProvider(us.model || '') === 'gemini' ? { omniTask: us.omniTask } : {}),
         ratio: us.ratio, duration: us.duration, resolution: us.resolution, draft: !!us.draft } : null,
       draft: !!us.draft, ...(m.draftOf ? { finalOf: m.draftOf } : {}),
+      billing: agentCardBilling(m),
       starred: !!m.starred,
       ...(m.taskId ? { taskId: m.taskId } : {}),
       ...(m.videoUrl ? { videoUrl: m.videoUrl } : {}),
@@ -3787,6 +3811,25 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       ...(m.error ? { error: String(m.error).slice(0, 500) } : {}),
     };
   };
+  // 초안 → 본편(에이전트). 시작하지 못했으면 카드 id 대신 오류로 돌려준다 — 예전엔 실패 카드의 id 를 성공처럼 돌려줘, 커넥터가 한도 · 기록을 그대로 남겼다.
+  // ★ 'BytePlus 가 거절' 과 '답을 못 받음' 을 가른다. 답을 못 받았으면 태스크가 만들어졌을 수 있다(과금) — 문구에 "응답이 없습니다" 를 넣어 커넥터가
+  //   기록을 물리지 않게 한다(send-to-seedance 의 UNSURE). 거절이면 과금이 없으니 다시 보내도 된다.
+  const agentMakeFinal = async (draftTaskId: string, base: any) => {
+    const warnings: string[] = [];
+    agentWarnRef.current = warnings;
+    try {
+      const failure: { v?: { error: string; unsure: boolean } } = {};
+      const id = await makeFinalFromDraft(draftTaskId, base, f => { failure.v = f; });
+      if (!id) throw new Error(warnings.join('\n') || '본편을 만들지 않았습니다');
+      if (failure.v) {
+        throw new Error(failure.v.unsure
+          ? `본편 요청에 응답이 없습니다 — 만들어졌는지 모릅니다(과금됐을 수 있음). 앱에서 카드를 확인한 뒤, 다시 보낼지 사람에게 물어 주세요.\n${failure.v.error}`
+          : `본편을 시작하지 못했습니다(과금 없음).\n${failure.v.error}`);
+      }
+      return id;
+    } finally { agentWarnRef.current = null; }
+  };
+  const agentCardNow = (pid: string, id?: string) => useAppStore.getState().projects.find(x => x.id === pid)?.messages.find(x => x.id === id);
   // 경로의 이미지들 → 엘리먼트 이미지(화면 등록과 같은 검사 · 썸네일 · 원본 보관, fileToElementImage).
   const agentElementImages = async (paths: unknown) => {
     const list = Array.isArray(paths) ? paths.map(String) : [];
@@ -3982,28 +4025,20 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     'card.final': async (a) => {
       const { project: p, card: m } = agentFindCard(a.id);
       if (!m.usedSettings?.draft || m.status !== 'succeeded' || !m.taskId) throw new Error('완성된 초안(Draft) 카드만 본편을 만들 수 있습니다');
-      const warnings: string[] = [];
-      agentWarnRef.current = warnings;
-      try {
-        const id = await makeFinalFromDraft(m.taskId, m);
-        if (!id) throw new Error(warnings.join('\n') || '본편을 만들지 않았습니다');
-        return { card: id, project: p.name };
-      } finally { agentWarnRef.current = null; }
+      const id = await agentMakeFinal(m.taskId, m);
+      return { card: id, project: p.name, billing: agentCardBilling(agentCardNow(p.id, id)) };
     },
     'card.regenerate': async (a) => {
       const { project: p, card: m } = agentFindCard(a.id);
       // 초안에서 만든 본편이 실패했으면 같은 초안에서 다시(카드의 재생성 버튼 handleRegenerate 와 같은 규칙).
       if (m.draftOf && m.status === 'failed') {
-        const warnings: string[] = [];
-        agentWarnRef.current = warnings;
-        try {
-          const id = await makeFinalFromDraft(m.draftOf, m);
-          if (!id) throw new Error(warnings.join('\n') || '본편을 다시 만들지 않았습니다');
-          return { cards: [id], project: p.name };
-        } finally { agentWarnRef.current = null; }
+        const id = await agentMakeFinal(m.draftOf, m);
+        return { cards: [id], project: p.name, billing: agentCardBilling(agentCardNow(p.id, id)) };
       }
       // 26.10.2002~ 카드의 재생성 버튼과 같은 값(prepareReuse)을 메모리에서 만들어 같은 함수(sendRequest)로 그 프로젝트에
       // 보낸다 — 작성 칸 · 설정 · 레퍼런스 칸을 건드리지 않고, 그 프로젝트를 열지 않아도 된다.
+      // 프로젝트의 지금 설정 · 레퍼런스는 쓰지 않는다 — 카드에 기록이 없는 값은 모델 기본, 기록이 아예 없는 옛 카드는 거절.
+      if (!m.usedSettings) throw new Error('카드에 설정 기록이 없어 다시 만들 수 없습니다(아주 옛 카드)');
       const notes: string[] = [];
       const r = await prepareReuse(m, p.id, { warn: x => { notes.push(x); } });
       if (!r.assetsOk) throw new Error(notes.join('\n') || '레퍼런스를 되살리지 못해 다시 만들지 않았습니다');
@@ -4012,12 +4047,12 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       if (!now) throw new Error('프로젝트가 사라졌습니다');
       const warnings = [...notes];
       const ids = await sendRequest(
-        { projectId: p.id, promptHtml: r.html, settings: { ...now.settings, ...r.settings, output_count: 1 }, assets: r.assets ?? now.assets },   // 늘 한 편(화면 재생성과 같다)
+        { projectId: p.id, promptHtml: r.html, settings: { ...defaultSettings, ...r.settings, output_count: 1 }, assets: r.assets ?? [], strictResolution: true },   // 늘 한 편(화면 재생성과 같다)
         { warn: x => { warnings.push(x); } },
       );
       if (!ids?.length) throw new Error(warnings.join('\n') || '다시 만들지 않았습니다');
       showToast(`[${p.name}] 에이전트가 카드를 다시 만들었어요 — 카드 ${ids.length}개`, true);
-      return { cards: ids, project: p.name, ...(warnings.length ? { warnings } : {}) };
+      return { cards: ids, project: p.name, billing: agentCardBilling(agentCardNow(p.id, ids[0])), ...(warnings.length ? { warnings } : {}) };
     },
     'card.cancel': async (a) => {
       const { project: p, card: m } = agentFindCard(a.id);
@@ -4053,7 +4088,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const agentTick = async () => {
     // ★ 손대는 칸만 한다(나누기 26.10.2001~) — 에이전트에게 '화면' 은 하나다.
     if (!activeRef.current) return;
-    // 1) 보낸 요청의 카드 상태를 올린다(앱에 하나 — 보낸 칸을 닫았어도).
+    // 1) 보낸 요청의 카드 상태를 올린다(앱에 하나 — 보낸 칸을 닫았어도). 화면이 다시 떴으면 서버에 남은 'sent' 부터 이어 받는다.
+    agentResumeSent();
     agentReportProgress();
     // 2) 새 요청 · 명령. 26.10.2002~ 작성 칸을 빌리지 않으므로 입력 중 · 생성 중 · 갤러리 화면이어도 받는다.
     //    다른 요청을 보내는 중(busy)이면 상태만 알린다(peek).
@@ -4123,7 +4159,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // base: 새 카드에 옮겨 적을 프롬프트·설정·레퍼런스를 가진 메시지 — 초안 카드 자신이거나,
   // 실패한 본편을 다시 시도할 때는 그 본편 카드.
   // 만든 본편 카드 id 를 돌려준다(에이전트 명령 card.final · card.regenerate 가 따라간다). 멈췄으면 undefined.
-  const makeFinalFromDraft = async (draftTaskId: string, base: any): Promise<string | undefined> => {
+  const makeFinalFromDraft = async (draftTaskId: string, base: any, onStartFailed?: (f: { error: string; unsure: boolean }) => void): Promise<string | undefined> => {
     const st = useAppStore.getState();
     const owner = st.projects.find(p => p.messages.some(m => m.id === base.id));
     if (!owner || !draftTaskId) return;
@@ -4188,11 +4224,15 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (outFmt) payload.output_format = outFmt;
     if (us.return_last_frame) payload.return_last_frame = true;
 
+    let refused = false;   // 거절이라는 답을 받았나(4xx · 코드) — 아니면(5xx · 끊김 · 빈 답) 태스크가 만들어졌는지 모른다
     try {
       const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const text = await res.text();
       let data; try { data = JSON.parse(text); } catch { throw new Error(`서버 응답 오류 (${res.status})`); }
-      if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
+      if (!res.ok || (data.code !== undefined && data.code !== 0)) {
+        refused = res.ok || (res.status >= 400 && res.status < 500);
+        throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
+      }
       const taskId = data.id || data.data?.task_id;
       if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
       updateMessage(owner.id, id, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now() });
@@ -4200,6 +4240,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       showToast('1080p 본편을 만들기 시작했습니다 — 맨 아래에 추가됩니다.', true);
     } catch (error: any) {
       updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
+      onStartFailed?.({ error: error.message, unsure: !refused });
     }
     return id;
   };
