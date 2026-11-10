@@ -1534,7 +1534,7 @@ export const MODELS: {
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast', guide: 'sd2-pe',
     notes: ['빠른 시안용 — 1080p·4K 가 없다.'] },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini', guide: 'sd2-pe' },
-  // ── Gemini Omni 1.2 Flash (2026-11-05 GA) — 1.1 을 대신한다(Google 이 12/3 부터 1.1 요청을 1.2 로 돌린다, 사용자 결정 11/10 "1.1 걍 없애고 1.2") ──
+  // ── Gemini Omni 1.2 Flash (2026-11-05 GA) — 1.1 · 미리보기를 대신한다(Google 이 12/3 부터 1.1 요청을 1.2 로 돌린다, 사용자 결정 11/10 "1.1 걍 없애고 1.2") ──
   // 문서 두 곳(AI Studio · Cloud)이 서로 달라서, 이 PC 의 실제 앱 서버(/api/gemini/generate, 팀 키)로 직접 보내 정했다
   // (2026-11-10, 성공한 것은 전부 360p · 합계 약 $1.3, 시험 영상은 'TA Test' 보관):
   //   길이 3~15s — "Requested video duration 16s 0ns exceeds the maximum allowed 15s 0ns" · 2s 는 "minimum allowed 3s".
@@ -1575,7 +1575,9 @@ export const MODELS: {
   // ★ This model has NO Extend: it answers "Video extension is currently not supported."
   // Schema validation does not reveal that — it accepts task:'extend' for both models
   // identically — which is the whole reason the two entries stay separate.
-  { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10,
+  // ★ retired(26.11.1002~, 사용자 11/10 "옴니 플래시, 옴니 플래시 1.1 다 없애야") — 고를 수 없다. 옛 카드를 읽으려고만 남긴다.
+  //   그때까지 이 모델로 저장된 프로젝트 · 재생성 · 에이전트 요청은 LEGACY_MODEL_IDS 가 1.2 로 옮긴다(작업 4종 모두 1.2 에 있다).
+  { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10, retired: true,
     vidMax: 3, audMax: 0, guide: 'gemini-omni-flash-api',
     notes: ['해상도 설정을 무시하고 늘 720p 로 나온다.',
       '끝 프레임은 비공식 — 참조 방식으로 유도할 뿐 정확한 보간이 아니다. 첫·끝 프레임이 필요하면 Omni 1.2.',

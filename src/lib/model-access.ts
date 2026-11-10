@@ -25,6 +25,8 @@ export const LEGACY_MODEL_IDS: Record<string, string> = {
   // 26.11.1001 — Google 이 12/3 부터 1.1 요청을 1.2 로 돌리고(값 · 요금도 1.2), 앱도 1.1 을 고를 수 없게 했다. 1.1 로 저장된 프로젝트 ·
   // 카드 재생성 · 에이전트 요청은 1.2 로 간다. 옛 카드의 이름 · 태그는 store MODELS 의 retired 줄이 그대로 읽는다.
   'gemini-omni-1.1-flash': 'gemini-omni-1.2-flash',
+  // 26.11.1002 — 미리보기도 뺐다(사용자 11/10). 미리보기는 720p 고정 · 연장 없음 · 끝 프레임 비공식이라 1.2 로 옮겨도 잃는 게 없다.
+  'gemini-omni-flash-preview': 'gemini-omni-1.2-flash',
 };
 
 /** Current id for a possibly-retired one. Unknown ids pass through untouched. */
