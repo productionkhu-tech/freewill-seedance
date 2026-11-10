@@ -14,6 +14,7 @@ import {
   resolveOmniTask, modelHasFirstLastFrame, modelExtendMaxSrcSec, ratioLockedFor, durationLockedFor, modelGrant,
   modeRefCaps, omniTaskRefCaps, settingsDefaultsFor, defaultSettings, GenerationMode, GenerationSettings,
 } from '../store';
+import { PICKABLE_MODELS } from '../store';
 import { resolveModelId } from './model-access';
 import { API_LIMITS } from './utils';
 
@@ -32,10 +33,10 @@ export const AGENT_FEATURES = ['send-any-project', 'agent_model_defaults'];
 // 비율은 일부러 검사하지 않는다 — BytePlus 가 작업을 만들기 전에 검증해 과금 없이 거절한다(HANDOFF '무과금 API 프로브').
 export function agentSettings(req: Record<string, unknown>): { next?: GenerationSettings; error?: string } {
   const has = (k: string) => req[k] !== undefined && req[k] !== null && req[k] !== '';
-  const modelList = `(있는 모델: ${MODELS.map(x => x.id).join(', ')})`;
+  const modelList = `(있는 모델: ${PICKABLE_MODELS.map(x => x.id).join(', ')})`;
   if (!has('model')) return { error: `model 이 없습니다 — 앱의 설정을 따르지 않으므로 꼭 적어 주세요.\n${modelList}` };
   const model = resolveModelId(String(req.model));
-  if (!MODELS.some(x => x.id === model)) return { error: `앱에 없는 모델입니다: ${req.model}\n${modelList}` };
+  if (!PICKABLE_MODELS.some(x => x.id === model)) return { error: `앱에 없는 모델입니다: ${req.model}\n${modelList}` };
   const omni = modelProvider(model) === 'gemini';
   if (has('mode') && !omni && !AGENT_MODES.includes(req.mode as GenerationMode)) return { error: `모르는 모드입니다: ${req.mode}\n(${AGENT_MODES.join(', ')})` };
   const mode = has('mode') && !omni ? (req.mode as GenerationMode) : defaultSettings.mode;
@@ -45,9 +46,10 @@ export function agentSettings(req: Record<string, unknown>): { next?: Generation
     const tasks = modelOmniTasks(model);
     if (has('omniTask') && !tasks.includes(String(req.omniTask))) return { error: `이 모델에 없는 작업입니다: ${req.omniTask}\n(${tasks.join(', ')})` };
     next.omniTask = resolveOmniTask(model, has('omniTask') ? String(req.omniTask) : next.omniTask);
-    // Omni 는 정해진 비율 · 3~10초만 — 모델을 Omni 로 바꿀 때 패널이 하는 정리와 같다.
+    // Omni 는 정해진 비율 · 모델 길이 범위만(자동 없음) — 모델을 Omni 로 바꿀 때 패널이 하는 정리와 같다.
+    const [oLo, oHi] = modelDurationRange(model);
     if (!OMNI_RATIO_IDS.includes(next.ratio)) next.ratio = OMNI_RATIO_IDS[0];
-    if (next.duration === -1 || next.duration < 3 || next.duration > 10) next.duration = 5;
+    if (next.duration === -1 || next.duration < oLo || next.duration > oHi) next.duration = 5;
   }
   if (has('resolution')) {
     const r = String(req.resolution);
@@ -168,7 +170,7 @@ function fingerprint(s: string): string {
 export type AgentManual = { version: string; manual: Record<string, unknown>; text: string };
 
 export function buildAgentManual(appVersion: string): AgentManual {
-  const models = MODELS.map(m => {
+  const models = PICKABLE_MODELS.map(m => {
     const id = m.id;
     const omni = modelProvider(id) === 'gemini';
     const [dMin, dMax] = modelDurationRange(id);

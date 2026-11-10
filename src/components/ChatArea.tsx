@@ -8,6 +8,7 @@ import { HoverZoom } from './HoverZoom';
 import { RevealSourceButton, REVEAL_ON_THUMB } from './RevealSource';
 import { findSourcePath, sourcePathOf } from '../lib/source-path';
 import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight, ClipboardCopy, ImageDown } from 'lucide-react';
+import { PICKABLE_MODELS, modelExtendAddRange } from '../store';
 import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink } from '../lib/send-request';
 import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from '../lib/agent-inbox';
 import { visibleProjectIds } from '../lib/split';
@@ -1107,7 +1108,8 @@ const baseSettingsTags = (us: any, videoUrl?: string): string[] => {
     if (t === 'edit' || t === 'extend') {
       // Only the RATIO came from the source clip — resolution was sent and honoured, so
       // report it. Extend's duration is what was APPENDED, not the finished length.
-      const dur = t === 'edit' ? '원본 길이' : `+${Math.max(3, Math.min(10, us.duration || 5))}s`;
+      const [aLo, aHi] = modelExtendAddRange(us.model);
+      const dur = t === 'edit' ? '원본 길이' : `+${Math.max(aLo, Math.min(aHi, us.duration || 5))}s`;
       const r = modelResolutions(us.model).length > 1
         ? (us.resolution === '4k' ? '4K' : us.resolution || '720p')
         : '720p';
@@ -1117,7 +1119,8 @@ const baseSettingsTags = (us: any, videoUrl?: string): string[] => {
     const res = modelResolutions(us.model).length > 1
       ? (us.resolution === '4k' ? '4K' : us.resolution || '720p')
       : '720p';
-    return [modelName, OMNI_TASK_LABELS[t], res, us.ratio, `${Math.max(3, Math.min(10, us.duration || 5))}s`];
+    const [dLo, dHi] = modelDurationRange(us.model);
+    return [modelName, OMNI_TASK_LABELS[t], res, us.ratio, `${Math.max(dLo, Math.min(dHi, us.duration || 5))}s`];
   }
   // API value is lowercase '4k'; display it as "4K" to match the Resolution dropdown.
   const res = us.resolution === '4k' ? '4K' : us.resolution;
@@ -3860,7 +3863,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
             cards: p.messages.filter(m => m.role !== 'user').length,
             collection: collName(st.projectCollectionId[p.id]), current: p.id === st.currentProjectId, shown: shown.has(p.id),
             billing: b ? { name: b.project, id: b.id || null } : null,
-            ...(b ? { allowedModels: MODELS.filter(m => isModelAllowed(m.id, bo)).map(m => m.id), fourK: isFourKAllowed(bo) } : {}),
+            ...(b ? { allowedModels: PICKABLE_MODELS.filter(m => isModelAllowed(m.id, bo)).map(m => m.id), fourK: isFourKAllowed(bo) } : {}),
           };
         }),
       };
@@ -4116,7 +4119,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           generating: busy,
           manual: agentManual().version,
           // 지금 과금 프로젝트로 쓸 수 있는 것 — 에이전트가 권한 없는 모델을 고르지 않게(설명서는 '무엇이 있나', 이건 '지금 되나').
-          allowedModels: MODELS.filter(m => isModelAllowed(m.id, billingOf(st, st.currentProjectId))).map(m => m.id),
+          allowedModels: PICKABLE_MODELS.filter(m => isModelAllowed(m.id, billingOf(st, st.currentProjectId))).map(m => m.id),
           fourK: isFourKAllowed(billingOf(st, st.currentProjectId)),
           // 26.10.2002~ 프로젝트마다 코드가 있는지 — 서버가 '대상 프로젝트에 코드가 없는 작업' 을 내주지 않고 기다리게 한다.
           // 처리 중(peek)에도 보낸다 — 기다림 표시가 늦지 않게. 코드 목록이 아직이면 보내지 않고 billingReady:false.

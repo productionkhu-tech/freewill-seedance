@@ -15,6 +15,7 @@ import {
   resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor,
   modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX, projectBilling, billingOf, boundCollectionOf,
 } from '../store';
+import { modelDurationRange, modelExtendAddRange, modelFirstLastMaxSec, omniRefVideoMax, modelEditMaxSrcSec } from '../store';
 import {
   validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError,
   createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, cacheFile, dataUrlToFile,
@@ -772,7 +773,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
 /* ─── Gemini Omni Flash send (separate provider, sync) ─── */
 // /api/gemini/generate holds ~30-40s and returns a cached .mp4 URL. No BytePlus
 // task/poll — the message goes running → (awaited) → succeeded. Panel images
-// (max 10) ride as inline base64; ratio→aspect(16:9|9:16), duration→"Ns"(3-10),
+// (max 10) ride as inline base64; ratio→aspect(16:9|9:16), duration→"Ns"(모델 범위 — 1.2 는 3-15),
 // thinking always high, task always explicit (no Unspecified). Seedance path untouched.
 async function sendOmni(input: SendInput, bill: { project: string; id: string; key: string }, io: SendIO): Promise<string[] | undefined> {
   const { warn } = io;
@@ -859,7 +860,18 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
     // Continuation instruction over 1 clip — no positional markers exist for this task,
     // so strip any Seedance [Image/Video/Audio N] a stray panel mention would leave behind.
     const extText = userPrompt.replace(/\[(?:Image|Video|Audio) \d+\]\s*/g, '').trim();
-    const addSec = Math.max(3, Math.min(10, Math.round(s.duration || 5)));
+    const [addLo, addHi] = modelExtendAddRange(s.model);
+    const addSec = Math.max(addLo, Math.min(addHi, Math.round(s.duration || 5)));
+    // 원본 + 붙일 길이의 상한(1.2: 30s — 27+3 됨, 28+3 · 22+10 거절, 실측). 거절은 1~2분을 기다린 뒤에야 오므로 여기서 멈춘다.
+    {
+      const outCap = modelExtendMaxOutSec(s.model);
+      const d = (video as any).durationSec;
+      if (outCap !== undefined && typeof d === 'number' && d + addSec > outCap + 0.1) {
+        const room = Math.floor(outCap - d);
+        warn(`원본 ${d.toFixed(1)}초 + ${addSec}초 = ${(d + addSec).toFixed(1)}초 — 이어붙인 결과는 ${outCap}초까지입니다.\n${room >= addLo ? `이어붙일 길이를 ${room}초 이하로 줄여주세요.` : '더 늘리려면 새로 생성해야 합니다.'}`);
+        return;
+      }
+    }
     payload = {
       model: s.model,
       input: [{ type: 'video', _uploadCacheId: video.cacheId, mime_type: videoMimeOf(video.file_name) }, { type: 'text', text: extText }],
@@ -875,6 +887,12 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
     if (!video.cacheId) { warn('소스 영상 캐시를 찾지 못했습니다. 영상을 다시 올려주세요.'); return; }
     if (!userPrompt.trim()) { warn('영상을 어떻게 편집할지 설명을 입력해주세요. (예: 화면 전체에 눈 내리는 효과 추가)'); return; }
     if (assets.some((a: any) => a.type === 'image_url')) { warn('Edit Video는 이미지를 사용하지 않습니다. 소스 영상 1개만 남겨주세요.'); return; }
+    {
+      // 1.2 는 15s 를 넘는 원본을 거절한다(실측 "exceeds maximum supported source video duration (15s)").
+      const cap = modelEditMaxSrcSec(s.model);
+      const d = (video as any).durationSec;
+      if (cap !== undefined && typeof d === 'number' && d > cap + 0.05) { warn(`편집할 원본이 ${d.toFixed(1)}초입니다 — ${cap}초까지만 편집할 수 있습니다.\n원본을 ${cap}초 이하로 잘라서 다시 넣어주세요.`); return; }
+    }
     // Edit is a plain instruction over the 1 source video — it uses no positional markers,
     // so strip any Seedance [Image/Video/Audio N] that a stray panel mention would leave in.
     const editText = userPrompt.replace(/\[(?:Image|Video|Audio) \d+\]\s*/g, '').trim();
@@ -894,6 +912,9 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
     // reference_to_video may also take a video reference — VERIFIED to work (the clip's scene
     // is reproduced, image refs restyle it). Capped at 1 (doc: multiple videos unsupported).
     const refVideos = task === 'reference_to_video' ? assets.filter((a: any) => a.type === 'video_url') : [];
+    // 결과 길이 — 모델 범위 안으로(1.2: 3~15s). 첫·끝 프레임 · 참조 영상 수가 이 길이에 따라 달라서 먼저 정한다.
+    const [durLo, durHi] = modelDurationRange(s.model);
+    const outSec = Math.max(durLo, Math.min(durHi, Math.round(s.duration || 5)));
 
     // Ordered image inputs = [firstFrame?, lastFrame?, panel refImgs…, element images…].
     // The doc's <IMAGE_REF_N> tags map 1:1 to this array order (0-based), so element
@@ -950,6 +971,8 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
       // needs none of the reference route's "do not treat these as literal frames" hedging.
       // Verified 2026-08-28 by measurement, not eyeball: a red ball at left as the first
       // image and at right as the second came back as frame 0 and the final frame.
+      const flMax = modelFirstLastMaxSec(s.model);
+      if (outSec > flMax) { warn(`시작·끝 프레임을 둘 다 넣으면 ${flMax}초까지입니다(지금 ${outSec}초).\n길이를 줄이거나 끝 프레임을 빼주세요.`); io.busy?.(false); return; }
       promptText = ('<FIRST_FRAME> ' + getPlainText(promptHtml) + ' <LAST_FRAME>').replace(/\s+/g, ' ').trim();
     } else if (task === 'image_to_video' && lastFrame) {
       // Models WITHOUT the documented feature (the Flash preview): interpolation is
@@ -985,8 +1008,13 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
         ? `${body} Use the given image(s) as style/subject references and the given video ${refVideos.length > 1 ? 'clips' : 'clip'} as the scene and motion reference; do not treat any of them as literal initial frames.`
         : `${body} Use the given image(s) as references for the video; do not treat them as literal initial frames.`).trim();
       // Optional reference video → Files API (server uploads by cacheId, appended after images).
-      const vidCap = modelVideoMax(s.model);
-      if (refVideos.length > vidCap) { warn(`Reference to Video의 참조 영상은 ${vidCap}개까지입니다.`); io.busy?.(false); return; }
+      const vidCap = omniRefVideoMax(s.model, outSec);
+      if (refVideos.length > vidCap) {
+        warn(vidCap < modelVideoMax(s.model)
+          ? `결과 길이 ${outSec}초에서는 참조 영상이 ${vidCap}개까지입니다(지금 ${refVideos.length}개).\n길이를 줄이거나 참조 영상을 ${vidCap}개로 줄여주세요.`
+          : `Reference to Video의 참조 영상은 ${vidCap}개까지입니다.`);
+        io.busy?.(false); return;
+      }
       for (const v of refVideos) {
         if (!v.cacheId) { warn(`참조 영상(${v.file_name || ''}) 캐시를 찾지 못했습니다. 다시 올려주세요.`); io.busy?.(false); return; }
         videoParts.push({ type: 'video', _uploadCacheId: v.cacheId, mime_type: videoMimeOf(v.file_name) });
@@ -1003,7 +1031,7 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
     const parts = [...imageParts, ...videoParts];
     const input = parts.length ? [...parts, { type: 'text', text: promptText }] : promptText;
     const aspect = s.ratio === '9:16' ? '9:16' : '16:9';
-    const dur = Math.max(3, Math.min(10, Math.round(s.duration || 5)));
+    const dur = outSec;
     const rf: any = { type: 'video', aspect_ratio: aspect, duration: `${dur}s`, delivery: 'uri' };
     // `resolution` is sent ONLY by models that declare more than one. The Flash preview
     // declares ['720p'], so its request stays byte-for-byte what it has always been — it

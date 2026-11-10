@@ -1,6 +1,6 @@
 # Freewill Seedance 2.0 — 인수인계
 
-> 최종 정리: **2026-11-06** / 버전 **26.11.601** (회사판 · 개인판 — 에이전트 요청은 앱 설정을 읽지 않음 · 카드의 과금 코드 · 4K 를 낮추지 않고 거절 · Omni 4K · 끊긴 카드 정리, §6 · 규칙 §7-51. 26.11.502 — 레퍼런스 · 어셋 이미지의 원본 폴더 열기 · 없으면 디스크에서 내용으로 찾기, §6 · 경로 규칙 §7-50. 26.11.401 태스크 찾기 Ctrl+F · 태그 먹통 고침 §7-49)
+> 최종 정리: **2026-11-10** / 버전 **26.11.1001** (회사판 · 개인판 — Gemini Omni 1.1 → 1.2 Flash, 실측 한도 §5-4 · 옛 모델 규칙 §7-52. 26.11.601 — 에이전트 요청은 앱 설정을 읽지 않음 · 카드의 과금 코드 · 4K 를 낮추지 않고 거절 · Omni 4K · 끊긴 카드 정리, §6 · 규칙 §7-51. 26.11.502 — 레퍼런스 · 어셋 이미지의 원본 폴더 열기 · 없으면 디스크에서 내용으로 찾기, §6 · 경로 규칙 §7-50. 26.11.401 태스크 찾기 Ctrl+F · 태그 먹통 고침 §7-49)
 > 이 문서 하나로 인수받을 수 있게 쓴다. 시간순 기록이 아니라 **주제별**이다.
 > 여기 적힌 숫자는 전부 실측이다. 확인 못 한 것은 "미확인"이라고 명시한다.
 >
@@ -543,8 +543,24 @@ BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 
 - 엔드포인트 `POST https://generativelanguage.googleapis.com/v1beta/interactions`,
   헤더 `x-goog-api-key`. 서버 프록시 `/api/gemini/generate`.
 - **동기 호출** — 한 번의 fetch 가 40~90초를 잡고 완성 URL 을 반환한다(시댄스는 비동기 폴링).
-- 출력 **720p 고정**, duration 3~10초.
-- 태스크 4종: `text_to_video` / `image_to_video` / `reference_to_video` / `edit`.
+- 해상도 · 길이 · 태스크는 **모델마다**(store.ts MODELS). 미리보기(`gemini-omni-flash-preview`)는 720p 고정 · 3~10초 · 태스크 4종
+  (`text_to_video` / `image_to_video` / `reference_to_video` / `edit`), 1.2 는 아래.
+- **Omni 1.2 Flash (`gemini-omni-1.2-flash`, 26.11.1001~)** — 2026-11-05 GA. Google 이 12/3 부터 1.1 요청을 1.2 로 돌리므로(요금도 1.2)
+  1.1 을 목록에서 빼고 1.2 로 바꿨다(사용자 2026-11-10 "1.1 걍 없애고 1.2 · 직접 날려보고 테스트해본 파라미터로"). 문서 두 곳
+  (AI Studio `/docs/omni` · Cloud `omni-1-2-flash`)이 서로 달라 **이 PC 의 실제 앱 서버로 직접 보내 정했다**(2026-11-10, 성공은 전부 360p ·
+  합계 약 $1.3 · 'TA Test' 보관 · 스크립트 scratchpad `omni12/probe.mjs`):
+  - 길이 3~15초(16 · 2 는 생성 전 400). 해상도 enum 은 1.1 과 같다(360p · 720p · 1080p · 4k — 1080p · 4K 는 업스케일). 결과에 소리가 있다.
+  - 첫 · 끝 프레임 둘 다면 10초까지("Interpolation duration 11 seconds exceeds maximum duration 10 seconds"). 시작 프레임 하나는 15초까지.
+  - 레퍼런스 이미지 11장도 받았다(AI Studio 문서 6 · Cloud 10) → 앱은 1.1 과 같은 10. 참조 영상은 결과 10초 이하면 3개, **넘으면 1개**
+    (11초에 2개는 "invalid argument"). 5초짜리 참조 영상도 받았다(문서는 3초) — 앱은 길이를 막지 않는다.
+  - 편집 원본 15초까지("exceeds maximum supported source video duration (15s)"). 연장은 한 번에 3~10초 · **원본 + 붙일 길이 30초까지**
+    (27+3 됨 · 28+3 · 22+10 거절 — 앱의 원본 상한 27). 16초 원본 연장도 됐다(AI Studio 문서의 '원본 15초' 와 다름).
+  - 거절이 생성 전이 아닌 것도 있다 — 참조 영상 · 연장 합계 · 편집 길이는 업로드 · 처리 뒤 20~120초 만에 400 이 온다. 그래서 앱이 보내기 전에 막는다
+    (패널 슬라이더 밑 빨간 줄 · 보낼 때 같은 문구, 에이전트도 같은 길). ffmpeg 테스트 패턴 영상은 "copyright/recitation" 으로 막혔다 —
+    시험 소재는 실제 생성 영상을 잘라 쓸 것.
+  - 숫자는 MODELS 의 1.2 줄 하나에(`dur` · `firstLastMaxSec` · `refVideoLong` · `editMaxSrcSec` · `extendMaxSrcSec` · `extendMaxOutSec` ·
+    `extendAddSec`) — 패널 · 보내기 · 카드 태그 · 에이전트 설명서가 같은 함수로 읽는다. 1.1 줄은 `retired`(§7-52).
+  - 시험: scratchpad `omni12/t-omni.mjs`(격리 앱, Omni 요청은 화면에서 가로챔) 32항목 + 에이전트 회귀 43항목.
 - 서버가 강제하는 플래그: `background=false`, `stream=false`, `store=true`(`delivery:"uri"` 의
   필수 조건). `edit` 은 duration/aspect 를 **스트립**한다(API 가 거부).
 - 파일은 R2 가 아니라 **Google Files API** 로 간다(`_uploadCacheId` → 서버가 업로드 후 uri 치환).
@@ -1256,6 +1272,12 @@ R2 에 올린다. 미리보기 JPG 는 화면에만 — 크기·품질을 바꾸
 51. **에이전트 요청은 앱 · 프로젝트 설정을 읽지 않는다 — 앱에서 따르는 것은 과금 코드뿐**(사용자 결정 2026-11-06 "앱설정은 과금만 따르는 거임", 26.11.601, MCP 세션 감사). `agentSettings(req)` 는 요청과 모델 기본값(`settingsDefaultsFor` · `defaultSettings`)으로만 만든다 — 인자에 프로젝트 설정을 되돌려 넣지 말 것. 예전엔 위에 얹어서, 같은 요청이 프로젝트에 남은 값에 따라 3편이 되거나 소리가 꺼진 채 나갔다. `card.regenerate` 도 같다(`now.settings` · `now.assets` 를 쓰지 않는다 — 카드에 없는 값은 모델 기본). 프로젝트에서 읽는 것은 연결된 컬렉션(`@{이름}`)뿐이다.
     에이전트 요청은 **조용히 다른 값으로 나가지 않는다** — `strictResolution` 이 4K 를 낮추는 대신 거절하고, 초안이 기본인 모델에 해상도만 적으면 거절한다. 사람의 보내기는 그대로 낮추고 알린다(패널이 미리 보여 준다).
     켤 때 `patchLoadedProject` 가 taskId 없는 진행 중 카드를 실패로 닫는다(`closeOrphanCards`) — 그 진행 상황은 화면 메모리에만 있어 다시 뜨면 주인이 없다. taskId 있는 카드는 폴링이 잇는다. 격리 시험: 가짜 BytePlus 로 진짜 작업함 API 43항목 + 진짜 렌더러 죽음(`Page.crash`) + 공개 커넥터 `--dry-run`.
+
+52. **옛 모델은 MODELS 에서 지우지 말고 `retired: true` 로 둔다**(26.11.1001, Omni 1.1). 고를 수 있는 목록은 `PICKABLE_MODELS` 하나 — 패널 ·
+    에이전트 설명서 · 권한 목록(allowedModels) · 에이전트 모델 검사가 이걸 읽는다. 그 모델로 저장된 프로젝트 · 카드 재생성 · 에이전트 요청은
+    `LEGACY_MODEL_IDS` 가 새 모델로 옮긴다(model-access.ts, 켤 때 patchLoadedProject). 표에서 지우면 옛 카드가 어느 회사 모델인지 몰라
+    (`modelProvider` → byteplus) 태그가 '2.0' 이 되고 Omni 처리를 타지 않는다(2.5 Demo 는 같은 회사라 티가 안 났을 뿐).
+    Omni 한도는 문서가 아니라 실측으로 정한다 — 1.1 · 1.2 모두 문서와 실제가 달랐다(§5-4).
 
 ---
 

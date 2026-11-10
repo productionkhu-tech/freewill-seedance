@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, modeRefCaps, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
+import { PICKABLE_MODELS, modelExtendAddRange, modelFirstLastMaxSec, omniRefVideoMax, modelEditMaxSrcSec, modelHasFirstLastFrame } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
 import { PERSONAL } from '../lib/edition';
 import { PersonalKeysCard } from './PersonalKeys';
@@ -13,7 +14,7 @@ import { sideOf } from '../lib/split';
 import { getAssetNames } from '../lib/send-request';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
-  // Gemini Omni 1.1 only — no Seedance model lists it, so allowedResolutions() filters it
+  // Gemini Omni 1.1 · 1.2 only — no Seedance model lists it, so allowedResolutions() filters it
   // straight back out for every BytePlus model and this row never renders there.
   { id: '360p', name: '360p' },
   { id: '480p', name: '480p' },
@@ -359,7 +360,7 @@ export function SettingsPanel() {
   // The stored settings.model is deliberately never rewritten to match either — that would
   // knock every saved 2.5 project down to 2.0 on restart. The placeholder below covers the
   // gap instead; the send gate (client + server) is what actually enforces this.
-  const selectableModels = MODELS.filter(m =>
+  const selectableModels = PICKABLE_MODELS.filter(m =>
     !billingProjectKey || isModelAllowed(m.id, { billingProjectKey, billingProjects }));
   // Shown when the stored model isn't in the list above, so the control reads as "not
   // available to you" instead of silently displaying the first option as if it were picked.
@@ -370,6 +371,21 @@ export function SettingsPanel() {
     ? undefined
     : `${modelLabel} (권한 없음)`;
   // Single store write on slider release (no-op if nothing is in flight).
+  // Omni 길이 — 범위는 모델에서(1.2: 3~15s, 연장은 붙일 길이 3~10s). 보이는 값 = 보내는 값(send-request 도 같은 범위로 자른다).
+  // 첫·끝 프레임 · 참조 영상 수는 길이에 따라 막히므로 슬라이더 밑에 바로 말한다(보낼 때도 같은 문구로 멈춘다).
+  const [omniDurLo, omniDurHi] = resolveOmniTask(settings.model, settings.omniTask) === 'extend' ? modelExtendAddRange(settings.model) : modelDurationRange(settings.model);
+  const omniDur = draftDuration ?? Math.max(omniDurLo, Math.min(omniDurHi, settings.duration || 5));
+  const omniDurWarn = (() => {
+    const t = resolveOmniTask(settings.model, settings.omniTask);
+    if (t === 'image_to_video' && assets.some(a => a.role === 'last_frame') && modelHasFirstLastFrame(settings.model) && omniDur > modelFirstLastMaxSec(settings.model)) {
+      return `시작·끝 프레임을 둘 다 넣으면 ${modelFirstLastMaxSec(settings.model)}초까지예요 — 길이를 줄이거나 끝 프레임을 빼 주세요`;
+    }
+    const nv = assets.filter(a => a.type === 'video_url').length;
+    if (t === 'reference_to_video' && nv > omniRefVideoMax(settings.model, omniDur)) {
+      return `${omniDur}초에서는 참조 영상이 ${omniRefVideoMax(settings.model, omniDur)}개까지예요(지금 ${nv}개) — 길이를 줄이거나 영상을 빼 주세요`;
+    }
+    return null;
+  })();
   const commitDuration = () => { if (draftDuration != null) { updateProjectSettings(project.id, { duration: draftDuration }); setDraftDuration(null); } };
   const commitOutput = () => { if (draftOutput != null) { updateProjectSettings(project.id, { output_count: draftOutput }); setDraftOutput(null); } };
   // Start/End frames are ROLE-addressed in the payload (ChatArea sets content[].role
@@ -596,6 +612,12 @@ export function SettingsPanel() {
     // supported for extension") — and it is a hard INPUT cap, not an output budget:
     // a 33s clip is refused even when asked for only +3s. So there is no shorter
     // append that rescues it, and the honest place to say so is here, at attach.
+    if (isOmni && type === 'video_url' && resolveOmniTask(settings.model, settings.omniTask) === 'edit') {
+      const cap = modelEditMaxSrcSec(settings.model);
+      if (cap !== undefined && typeof durationSec === 'number' && durationSec > cap + 0.05) {
+        return { error: `${durationSec.toFixed(1)}초 — 편집할 원본은 ${cap}초까지입니다. 잘라서 넣어 주세요` };
+      }
+    }
     if (isOmni && type === 'video_url' && resolveOmniTask(settings.model, settings.omniTask) === 'extend') {
       const cap = modelExtendMaxSrcSec(settings.model);
       if (cap !== undefined && typeof durationSec === 'number' && durationSec > cap) {
@@ -821,10 +843,10 @@ export function SettingsPanel() {
                   const dClamped = Math.max(dLo, Math.min(dHi, settings.duration));
                   if (dClamped !== settings.duration) patch.duration = dClamped;
                 }
-                // Omni only accepts 16:9/9:16 + duration 3–10s — clamp when switching in.
+                // Omni only accepts 16:9/9:16 and has no Auto — the range itself was clamped just above (1.2: 3–15s).
                 if (modelProvider(val) === 'gemini') {
                   if (settings.ratio !== '16:9' && settings.ratio !== '9:16') patch.ratio = '16:9';
-                  if (settings.duration === -1 || settings.duration < 3 || settings.duration > 10) patch.duration = 5;
+                  if (settings.duration === -1) patch.duration = 5;
                   // Task is always explicit — normalize any empty/legacy value to a real task,
                   // and against the INCOMING model (`val`), not the outgoing one. 1.1 → the
                   // Flash preview with 'extend' selected is the case that matters: the preview
@@ -958,9 +980,10 @@ export function SettingsPanel() {
                     2026-08-28: a 10s source with duration:'3s' returns 13.0s, and omitting
                     it returns 20.0s. Same slider, different meaning, so say which. */}
                 <label className="block text-[12px] font-semibold text-black/80 dark:text-white/85 tracking-[-0.12px]">{omniTask === 'extend' ? '이어붙일 길이 (s)' : 'Duration (s)'}</label>
-                <span className="text-[12px] text-gray-500">{omniTask === 'extend' ? '+' : ''}{draftDuration ?? Math.max(3, Math.min(10, settings.duration || 5))}s</span>
+                <span className="text-[12px] text-gray-500">{omniTask === 'extend' ? '+' : ''}{omniDur}s</span>
               </div>
-              <input type="range" min="3" max="10" value={draftDuration ?? Math.max(3, Math.min(10, settings.duration || 5))} onChange={(e) => setDraftDuration(parseInt(e.target.value))} onPointerUp={commitDuration} onKeyUp={commitDuration} onBlur={commitDuration} className="w-full accent-[#0071e3]" />
+              <input type="range" min={omniDurLo} max={omniDurHi} value={omniDur} onChange={(e) => setDraftDuration(parseInt(e.target.value))} onPointerUp={commitDuration} onKeyUp={commitDuration} onBlur={commitDuration} className="w-full accent-[#0071e3]" />
+              {omniDurWarn && <p className="text-[10px] text-red-500 leading-snug break-keep">{omniDurWarn}</p>}
             </div>
             )
           ) : (
@@ -1099,7 +1122,7 @@ export function SettingsPanel() {
                           <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-[11px] leading-snug">
                             <span className="w-10 shrink-0 font-semibold text-gray-600">비디오</span>
                             <span className={`w-12 shrink-0 tabular-nums ${vidCount > 1 ? 'text-red-500' : 'text-gray-700'}`}>{vidCount}/1</span>
-                            <span className="text-gray-400 min-w-0 break-keep">{omniTask === 'extend' ? '이어붙일 원본 영상 1개' : '편집할 소스 영상 1개'} · 개당 50MB · mp4·mov·webm</span>
+                            <span className="text-gray-400 min-w-0 break-keep">{omniTask === 'extend' ? '이어붙일 원본 영상 1개' : `편집할 소스 영상 1개${modelEditMaxSrcSec(settings.model) !== undefined ? ` · ${modelEditMaxSrcSec(settings.model)}초까지` : ''}`} · 개당 50MB · mp4·mov·webm</span>
                           </div>
                         );
                       })()}
@@ -1115,7 +1138,7 @@ export function SettingsPanel() {
                             const d = (v as any)?.durationSec as number | undefined;
                             const srcCap = modelExtendMaxSrcSec(settings.model);
                             const outCap = modelExtendMaxOutSec(settings.model);
-                            const add = Math.max(3, Math.min(10, settings.duration || 5));
+                            const add = omniDur;
                             const over = typeof d === 'number' && srcCap !== undefined && d > srcCap;
                             return (
                               <>
@@ -1123,7 +1146,7 @@ export function SettingsPanel() {
                                 {/* Concrete arithmetic beats a rule the user has to apply themselves —
                                     the source length is already on the asset, so just show the answer. */}
                                 {typeof d === 'number' && !over && (
-                                  <p className="text-[10px] text-gray-500 leading-snug">원본 {d.toFixed(1)}초 + {add}초 → <b>{(d + add).toFixed(1)}초</b></p>
+                                  <p className={`text-[10px] leading-snug break-keep ${outCap !== undefined && d + add > outCap + 0.1 ? 'text-red-500' : 'text-gray-500'}`}>원본 {d.toFixed(1)}초 + {add}초 → <b>{(d + add).toFixed(1)}초</b>{outCap !== undefined && d + add > outCap + 0.1 ? ` — ${outCap}초를 넘어요. 이어붙일 길이를 줄여 주세요` : ''}</p>
                                 )}
                                 {over && (
                                   <p className="text-[10px] text-red-500 leading-snug break-keep">

@@ -22,6 +22,9 @@
  */
 export const LEGACY_MODEL_IDS: Record<string, string> = {
   'seedance-2-5-demo': 'dreamina-seedance-2-5-260628',
+  // 26.11.1001 — Google 이 12/3 부터 1.1 요청을 1.2 로 돌리고(값 · 요금도 1.2), 앱도 1.1 을 고를 수 없게 했다. 1.1 로 저장된 프로젝트 ·
+  // 카드 재생성 · 에이전트 요청은 1.2 로 간다. 옛 카드의 이름 · 태그는 store MODELS 의 retired 줄이 그대로 읽는다.
+  'gemini-omni-1.1-flash': 'gemini-omni-1.2-flash',
 };
 
 /** Current id for a possibly-retired one. Unknown ids pass through untouched. */

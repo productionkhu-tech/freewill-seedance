@@ -892,7 +892,7 @@ export interface GenerationSettings {
   use_asset_id: boolean;
   mode: GenerationMode;
   // Gemini Omni only — explicit task (text_to_video|image_to_video|reference_to_video|edit). Seedance ignores it.
-  // Reuses `ratio` (aspect 16:9/9:16) and `duration` (3–10s) from above.
+  // Reuses `ratio` (aspect 16:9/9:16) and `duration` (모델 범위 — 1.2 는 3–15s) from above.
   omniTask?: string;
   // Container/codec the API renders to. Only meaningful for models that offer a choice
   // (MODELS.outputFormats); absent or unsupported falls back to the model's default, so
@@ -1497,6 +1497,18 @@ export const MODELS: {
   // Gemini Omni only — longest SOURCE clip task:'extend' will accept, in seconds.
   // Stated by the API itself: "Videos longer than 30s are not supported for extension."
   extendMaxSrcSec?: number;
+  // Gemini Omni only (26.11.1001~, 1.2 실측) — 없으면 예전 그대로다(1.1 · 미리보기는 하나도 안 적는다).
+  //   extendMaxOutSec  연장 결과(원본 + 붙일 길이)의 상한. 없으면 원본 상한 + 붙일 길이 상한(1.1: 30 + 10 = 40).
+  //   extendAddSec     한 번에 붙일 수 있는 길이. 없으면 생성 길이 범위(dur) 그대로.
+  //   firstLastMaxSec  첫 · 끝 프레임을 둘 다 줄 때의 최대 길이. 없으면 dur 의 최대.
+  //   refVideoLong     결과가 overSec 를 넘으면 참조 영상은 max 개까지. 없으면 늘 vidMax.
+  //   editMaxSrcSec    편집할 원본의 최대 길이. 없으면 앱이 막지 않는다(API 가 답한다).
+  extendMaxOutSec?: number; extendAddSec?: [number, number]; firstLastMaxSec?: number;
+  refVideoLong?: { overSec: number; max: number }; editMaxSrcSec?: number;
+  // 고를 수 없는 옛 모델(26.11.1001~). 목록 · 설명서 · 권한 목록에서 빠지고, 그 모델로 저장된 프로젝트 · 재생성 · 에이전트 요청은
+  // LEGACY_MODEL_IDS 가 새 모델로 옮긴다. 표에 남겨 두는 건 옛 카드를 제대로 읽기 위해서다 — 지우면 그 카드가 Omni 인 줄 몰라
+  // (modelProvider → byteplus) 태그가 '2.0' 이 되고 Omni 처리를 타지 않는다.
+  retired?: boolean;
   // Gemini Omni only — which `generation_config.video_config.task` values this model offers.
   // Absent → OMNI_DEFAULT_TASKS (the 4 the original Flash preview shipped with), so adding
   // this field cannot change any model that doesn't declare it.
@@ -1522,6 +1534,28 @@ export const MODELS: {
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast', guide: 'sd2-pe',
     notes: ['빠른 시안용 — 1080p·4K 가 없다.'] },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini', guide: 'sd2-pe' },
+  // ── Gemini Omni 1.2 Flash (2026-11-05 GA) — 1.1 을 대신한다(Google 이 12/3 부터 1.1 요청을 1.2 로 돌린다, 사용자 결정 11/10 "1.1 걍 없애고 1.2") ──
+  // 문서 두 곳(AI Studio · Cloud)이 서로 달라서, 이 PC 의 실제 앱 서버(/api/gemini/generate, 팀 키)로 직접 보내 정했다
+  // (2026-11-10, 성공한 것은 전부 360p · 합계 약 $1.3, 시험 영상은 'TA Test' 보관):
+  //   길이 3~15s — "Requested video duration 16s 0ns exceeds the maximum allowed 15s 0ns" · 2s 는 "minimum allowed 3s".
+  //   첫·끝 프레임은 10s 까지 — "Interpolation duration 11 seconds exceeds maximum duration 10 seconds."
+  //   레퍼런스 이미지 11장도 받았다(AI Studio 문서 6 · Cloud 문서 10) → 1.1 과 같은 10.
+  //   참조 영상: 결과 11s 에 2개는 "Request contains an invalid argument." · 1개는 됨(11.03s). 5s 짜리 참조 영상도 받았다(문서는 3s 까지).
+  //   편집 원본 15s 까지 — "Edited video duration (15.958s) exceeds maximum supported source video duration (15s)."
+  //   연장: 한 번에 3~10s("Extension duration 11 seconds exceeds maximum duration 10 seconds.") · 원본 + 붙일 길이 30s 까지
+  //     (27+3 → 30.04s 됨, 28+3 · 22+10 은 거절). 16s 원본도 됐다(AI Studio 문서의 '원본 15s 까지' 와 다름).
+  //   해상도는 1.1 과 같은 enum("Supported values: '360p', '720p', '1080p', '4k'") · 360p → 640x360 · 결과에 소리가 있다.
+  //   토큰: 360p 영상 1,931/s(문서와 같다). 연장은 원본도 입력 토큰으로 센다(27s 원본 → 52,137).
+  { id: 'gemini-omni-1.2-flash', name: 'Gemini Omni 1.2 Flash', provider: 'gemini', imgMax: 10,
+    vidMax: 3, refVideoLong: { overSec: 10, max: 1 }, audMax: 0, dur: [3, 15],
+    firstLastFrame: true, firstLastMaxSec: 10, editMaxSrcSec: 15,
+    extendMaxSrcSec: 27, extendMaxOutSec: 30, extendAddSec: [3, 10],
+    res: ['360p', '720p', '1080p', '4k'],
+    omniTasks: [...OMNI_DEFAULT_TASKS, 'extend'], guide: 'gemini-omni-flash-api',
+    notes: ['길이 3~15초. 첫·끝 프레임을 공식 지원한다(image_to_video 에 두 장) — 두 장이면 10초까지.',
+      '결과가 10초를 넘으면 참조 영상은 1개까지(10초 이하면 3개). 이미지는 10장까지.',
+      'edit 원본은 15초까지. extend 는 한 번에 3~10초를 붙이고, 원본 + 붙일 길이가 30초까지.',
+      '360p 15초가 1분 안팎, 연장은 2분 안팎. 1080p · 4K 는 업스케일이라 더 걸린다.'] },
   // Omni's reference-image cap is 10, not the Seedance default of 9. It used to live as a
   // literal `>= 10` in the panel; declaring it here is what lets the counter and the upload
   // button read the same number (they briefly disagreed — 9 vs 10 — when the literal was
@@ -1544,7 +1578,7 @@ export const MODELS: {
   { id: 'gemini-omni-flash-preview', name: 'Gemini Omni Flash', provider: 'gemini', imgMax: 10,
     vidMax: 3, audMax: 0, guide: 'gemini-omni-flash-api',
     notes: ['해상도 설정을 무시하고 늘 720p 로 나온다.',
-      '끝 프레임은 비공식 — 참조 방식으로 유도할 뿐 정확한 보간이 아니다. 첫·끝 프레임이 필요하면 Omni 1.1.',
+      '끝 프레임은 비공식 — 참조 방식으로 유도할 뿐 정확한 보간이 아니다. 첫·끝 프레임이 필요하면 Omni 1.2.',
       '생성이 한 번에 끝나는 방식이라 카드가 보통 1분 안팎 "생성 중" 으로 있다가 바로 완성된다.'] },
   // ── Gemini Omni 1.1 Flash ───────────────────────────────────────────────────────────
   // Deliberately does NOT share a capability object with the preview above. The API
@@ -1576,7 +1610,8 @@ export const MODELS: {
   // frame 0 and the final frame from the inputs. The old reference_to_video workaround
   // also reproduced them, so this is not a bug fix — it is the documented path, and it
   // drops the "don't treat these as literal frames" disclaimer that route has to carry.
-  { id: 'gemini-omni-1.1-flash', name: 'Gemini Omni 1.1 Flash', provider: 'gemini', imgMax: 10,
+  // ★ retired(26.11.1001~) — 고를 수 없다. 옛 카드를 읽으려고만 남긴다(위 retired 주석). 값은 그때 실측 그대로 둔다.
+  { id: 'gemini-omni-1.1-flash', name: 'Gemini Omni 1.1 Flash', provider: 'gemini', imgMax: 10, retired: true,
     vidMax: 3, audMax: 0, dur: [3, 10], firstLastFrame: true, extendMaxSrcSec: 30,
     res: ['360p', '720p', '1080p', '4k'],
     omniTasks: [...OMNI_DEFAULT_TASKS, 'extend'], guide: 'gemini-omni-flash-api',
@@ -1584,6 +1619,8 @@ export const MODELS: {
       'extend 는 30초 이하 원본에 duration 초만큼 이어 붙인다 — 한 번에 최대 40초.',
       '360p 는 1분 안팎, 1080p 는 2분 안팎, 4K 는 20분 넘게 걸리기도 한다.'] },
 ];
+// 고를 수 있는 모델 — 패널 목록 · 에이전트 설명서 · 권한 목록. retired 는 옛 카드를 읽으려고만 표에 남아 있다.
+export const PICKABLE_MODELS = MODELS.filter(m => !m.retired);
 
 // Capability lookups. Each returns the model's override when present, otherwise the
 // exact rule that was in force before per-model overrides existed.
@@ -1624,8 +1661,27 @@ export function modelExtendMaxSrcSec(model: string): number | undefined {
   return MODELS.find(m => m.id === model)?.extendMaxSrcSec;
 }
 export function modelExtendMaxOutSec(model: string): number | undefined {
+  const declared = MODELS.find(x => x.id === model)?.extendMaxOutSec;
+  if (declared !== undefined) return declared;
   const src = modelExtendMaxSrcSec(model);
-  return src === undefined ? undefined : src + modelDurationRange(model)[1];
+  return src === undefined ? undefined : src + modelExtendAddRange(model)[1];
+}
+// 연장 한 번에 붙일 수 있는 길이. 1.1 은 생성 길이와 같은 3~10s, 1.2 는 생성이 15s 까지 늘었지만 붙이는 건 3~10s 그대로(실측).
+export function modelExtendAddRange(model: string): [number, number] {
+  return MODELS.find(x => x.id === model)?.extendAddSec ?? modelDurationRange(model);
+}
+// 첫 · 끝 프레임을 둘 다 줄 때의 최대 길이(1.2: 10s, 실측). 선언이 없으면 그 모델의 최대 길이.
+export function modelFirstLastMaxSec(model: string): number {
+  return MODELS.find(x => x.id === model)?.firstLastMaxSec ?? modelDurationRange(model)[1];
+}
+// 참조 영상 수 — 결과가 길면 줄어드는 모델이 있다(1.2: 10s 를 넘으면 1개, 실측 11s 에 2개는 거절).
+export function omniRefVideoMax(model: string, outSec: number): number {
+  const l = MODELS.find(x => x.id === model)?.refVideoLong;
+  return l && outSec > l.overSec ? l.max : modelVideoMax(model);
+}
+// 편집할 원본의 최대 길이(1.2: 15s, 실측). 없으면 앱이 막지 않는다.
+export function modelEditMaxSrcSec(model: string): number | undefined {
+  return MODELS.find(x => x.id === model)?.editMaxSrcSec;
 }
 // Does this model do first+last frame interpolation officially (task:'image_to_video' with
 // both frames) rather than through the reference_to_video workaround?
