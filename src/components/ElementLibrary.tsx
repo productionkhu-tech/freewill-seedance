@@ -978,7 +978,9 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                     own drop behaviour (images into ONE asset / a bundle file), and they sit
                     above this. Reacting here while one of them is open would mean a drop
                     aimed at the editor quietly created new assets instead. */}
-                <div className="flex-1 overflow-y-auto p-5 relative"
+                {/* 드롭 안내는 스크롤되지 않는 바깥 틀에 붙인다. 예전엔 스크롤 상자 안의 absolute 라서
+                    목록을 내린 채 끌어오면 안내가 목록 맨 위 기준으로 그려져 화면 중간에 걸쳤다(11/12 사용자 발견). */}
+                <div className="flex-1 min-h-0 relative"
                   onDragEnter={(e) => { if (!editing && !importing && !intake && e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); setDropHint(true); } }}
                   onDragOver={(e) => { if (!editing && !importing && !intake && e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); e.stopPropagation(); setDropHint(true); } }}
                   onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropHint(false); }}
@@ -988,12 +990,13 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                     handleDropFiles(e.dataTransfer?.files || null);
                   }}>
                   {dropHint && (
-                    <div className="absolute inset-3 z-10 rounded-2xl border-2 border-dashed border-[#0071e3] bg-[#0071e3]/5 flex flex-col items-center justify-center gap-1.5 pointer-events-none">
+                    <div className="absolute inset-3 z-10 rounded-2xl border-2 border-dashed border-[#0071e3] bg-[#eff6ff]/90 dark:bg-[#0b1d33]/90 flex flex-col items-center justify-center gap-1.5 pointer-events-none">
                       <Upload size={26} className="text-[#0071e3] dark:text-[#4da3ff]" />
                       <p className="text-[13px] font-medium text-[#0071e3] dark:text-[#4da3ff]">놓으면 파일 이름 그대로 어셋이 됩니다</p>
                       <p className="text-[11px] text-[#0071e3]/70 dark:text-[#4da3ff]/70">분류(캐릭터·로케이션·프랍)만 고르면 끝</p>
                     </div>
                   )}
+                  <div className="h-full overflow-y-auto p-5">
                   {filtered.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-2">
                       <ImageIcon size={40} className="text-gray-300" />
@@ -1009,6 +1012,7 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                       ))}
                     </div>
                   )}
+                  </div>
                 </div>
               </>
             ) : (
