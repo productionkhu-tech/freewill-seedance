@@ -53,4 +53,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDownloadDir: () => ipcRenderer.invoke('get-download-dir'),
   pickDownloadDir: () => ipcRenderer.invoke('pick-download-dir'),
   saveBlob: (payload) => ipcRenderer.invoke('save-blob', payload),
+  // 미니 창(26.11.13~, electron/mini.cjs). 본창 화면 → 요약을 보낸다 / 미니 창 화면 → 요약을 받고, 할 일을 부탁한다.
+  miniSend: (snap) => ipcRenderer.send('mini:state', snap),
+  onMiniGoto: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('mini:goto', h);
+    return () => ipcRenderer.removeListener('mini:goto', h);
+  },
+  onMiniState: (cb) => {
+    const h = (_e, s) => cb(s);
+    ipcRenderer.on('mini:state', h);
+    return () => ipcRenderer.removeListener('mini:state', h);
+  },
+  onMiniPrefs: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('mini:prefs', h);
+    return () => ipcRenderer.removeListener('mini:prefs', h);
+  },
+  miniAction: (name, payload) => ipcRenderer.send('mini:action', name, payload),
 });

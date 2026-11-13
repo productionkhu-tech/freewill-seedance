@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo, type MouseEvent as ReactMouseEvent } from 'react';
+import { markAgentMessages, setAgentInLine } from '../lib/agent-origin';
 import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, draftDaysOf, DRAFT_FINAL_RESOLUTION, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
@@ -3772,6 +3773,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     } catch (e: any) { return fail(e?.message || String(e)); }
     if (!ids?.length) return fail(warnings.join('\n') || '앱이 보내지 않았습니다.');
     agentActive.set(job.id, { projectId: target.id, ids, last: '' });
+    markAgentMessages(ids);   // 미니 창이 'MCP' 표시를 단다
     showToast(`[${target.name}] 에이전트 요청을 보냈어요 — 카드 ${ids.length}개${job.name ? ` (${job.name})` : ''}`, true);
     void agentReport(job.id, { status: 'sent', project: target.name, projectId: target.id, messages: agentCards(target.id, ids), ...(warnings.length ? { warnings } : {}) });
   };
@@ -4137,6 +4139,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         for (const c of commands) if (c?.id) agentWorking.add(c.id);
         agentSyncManual(data?.manualVersion);
         agentNoteWaiting(data?.waitingBilling);
+        if (typeof data?.inLine === 'number') setAgentInLine(data.inLine);   // 미니 창 '대기'(26.11.13~)
       }
     } catch { /* 서버가 잠깐 없으면 다음 틱에 */ }
     if (busy) return;

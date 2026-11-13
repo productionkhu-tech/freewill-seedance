@@ -1924,10 +1924,13 @@ async function startServer() {
     // 화면이 그 프로젝트에 알린다(설정 패널 '프로젝트 코드' 옆) — 프로젝트 id → 기다리는 수.
     const waitingBilling: Record<string, number> = {};
     for (const j of waitingJobs()) waitingBilling[j.waitingFor!.projectId] = (waitingBilling[j.waitingFor!.projectId] || 0) + 1;
+    // 차례를 기다리는 수(코드 기다림 · 지금 내주는 것 빼고) — 화면은 2초에 하나씩 가져가므로 한꺼번에 많이 오면
+    // 카드가 되기 전까지 여기 줄 서 있다. 미니 창이 '대기' 에 더해 알린다(26.11.13~, 칸 더하기만).
+    const inLine = pending.filter(j => !j.needsBilling && j !== next).length;
     // peek: 상태만 알리고 가져가지는 않는다 — 화면이 다른 요청을 보내는 중일 때.
-    if (!next) return res.json({ job: null, manualVersion, waitingBilling });
+    if (!next) return res.json({ job: null, manualVersion, waitingBilling, inLine });
     next.status = 'taken'; next.updatedAt = now; next.takenBy = screen;
-    res.json({ job: { id: next.id, ...next.spec }, manualVersion, waitingBilling });
+    res.json({ job: { id: next.id, ...next.spec }, manualVersion, waitingBilling, inLine });
   });
 
   app.post('/api/agent/jobs/:id/report', (req, res) => {

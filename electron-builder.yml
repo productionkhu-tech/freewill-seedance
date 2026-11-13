@@ -27,6 +27,8 @@ files:
   - "electron/secrets.cjs"
   - "electron/gateway.cjs"
   - "electron/preload.cjs"
+  # 미니 창(26.11.1301~) — main.cjs 가 켤 때 require 한다. 빠지면 설치본이 켜지자마자 죽는다(여기는 파일을 하나씩 적는 목록).
+  - "electron/mini.cjs"
   - "electron/icon.png"
   # 개인판 아이콘(주황, 26.10.2005~) — 회사판 asar 에도 들어가지만 쓰지 않는다(main.cjs getIconPath).
   - "electron/icon-personal.png"

@@ -269,6 +269,7 @@ function createWindow() {
     if (!app.isQuitting) {
       e.preventDefault();
       mainWindow.hide();
+      mini?.onMainHidden();   // 돌던 작업이 있으면 미니 창으로 이어 본다
       tray?.displayBalloon({
         title: APP_TITLE,
         content: 'Running in system tray. Double-click to reopen.',
@@ -305,6 +306,8 @@ function createWindow() {
   // 숨김(X 를 눌러 트레이로 · 트레이 메뉴) · 최소화 → 화면에 "지금 저장해"(requestFlush 주석).
   mainWindow.on('hide', () => requestFlush('hide'));
   mainWindow.on('minimize', () => requestFlush('minimize'));
+  // 작업 표시줄로 내려도(트레이 숨김과 같이) 돌던 작업이 있으면 미니 창으로 이어 본다(26.11.13 시뮬레이션).
+  mainWindow.on('minimize', () => mini?.onMainHidden());
   // 윈도우 종료 · 재시작 · 로그오프 직전. 시간이 거의 없지만 해 본다 — 2026-10-07 재부팅으로 그 세션의 작업이
   // 백업에 하나도 없었다(작업 기록 자체는 IDB 에 있었다).
   mainWindow.on('query-session-end', () => requestFlush('session-end'));
@@ -391,11 +394,31 @@ function refreshTrayMenu() {
       { label: `${APP_TITLE} · v${app.getVersion()}`, enabled: false },
       { type: 'separator' },
       { label: 'Open', click: () => showOrCreateWindow() },
+      ...(mini ? [
+        { label: '미니 창', type: 'checkbox', checked: mini.visible(), click: () => mini.toggle() },
+        { label: '본창을 숨겼을 때 새 작업이 생기면 미니 창 띄우기', type: 'checkbox', checked: mini.auto(), click: () => { mini.setAuto(!mini.auto()); refreshTrayMenu(); } },
+      ] : []),
       ...(updater ? [updater.menuItem()] : []),
       { type: 'separator' },
       { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } },
     ]));
   } catch (e) { console.warn('[Tray] menu failed:', e && e.message); }
+}
+
+// ─── 미니 창(26.11.13~, electron/mini.cjs) ───
+// 본창 화면이 보내는 요약만 그리는 작은 창. 트레이 메뉴 · 본창 숨김 · 새 작업(본창이 숨어 있을 때)에서 뜬다.
+let mini = null;
+function setupMini() {
+  mini = require('./mini.cjs').initMini({
+    port: PORT,
+    preload: path.join(__dirname, 'preload.cjs'),
+    getMain: () => mainWindow,
+    showMain: () => showOrCreateWindow(),
+    onChange: () => refreshTrayMenu(),
+    // 같은 구석의 다른 Freewill 앱 미니 창과 자리 나누기(mini.cjs) — 시댄스가 모서리 쪽, 개인판은 그다음.
+    dockName: PERSONAL ? 'seedance-personal' : 'seedance',
+    dockRank: PERSONAL ? 0.5 : 0,
+  });
 }
 
 // ─── The one way back to a window ────────────────────────────────────────────
@@ -956,6 +979,7 @@ app.on('ready', () => {
   // 처음 켜는 PC 만 게이트웨이에서 키를 받을 때까지 기다린다(보관본이 있으면 바로). 창은 그동안 서버를 기다린다.
   startServer().catch((err) => console.error('[Server] start failed:', err));
   createWindow();
+  setupMini();
   createTray();
   setupAutoUpdater();
   setInterval(sampleRendererMemory, 30 * 1000);   // crash.log 에 남길 직전 메모리

@@ -7,6 +7,7 @@ import { visibleProjectIds } from './lib/split';
 import { PERSONAL } from './lib/edition';
 import { PersonalKeysDialog, PersonalKeyBanner } from './components/PersonalKeys';
 import { TaskFinder } from './components/TaskFinder';
+import { startMiniFeed } from './lib/mini-feed';
 
 export default function App() {
   const { projects, createProject, currentProjectId, _hasHydrated } = useAppStore();
@@ -24,6 +25,8 @@ export default function App() {
   useEffect(() => {
     if (_hasHydrated && projects.length === 0) createProject();
   }, [_hasHydrated, projects.length, createProject]);
+  // 미니 창에 지금 상태를 보낸다(electron/mini.cjs) — 불러오기가 끝난 뒤부터.
+  useEffect(() => (_hasHydrated ? startMiniFeed() : undefined), [_hasHydrated]);
   // 켤 때 한 번 알릴 말(공동 코드로 옮기며 코드를 비웠을 때, 26.10.2004) — 종료 안내와 같은 띠로.
   useEffect(() => {
     if (!_hasHydrated) return;
