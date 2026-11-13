@@ -15,6 +15,7 @@ const T = {
 // mini-feed 의 miniRank 와 같은 순서 — 값을 import 하면 mini-feed 가 스토어를 끌고 들어오므로(§7-54) 여기 따로 둔다.
 const RANK: Record<MiniTask['status'], number> = { running: 0, queued: 1, failed: 2, succeeded: 3 };
 const rank = (t: MiniTask) => (t.cancelled ? 3 : RANK[t.status]);
+const CARD_BOX_H = 284;   // 카드 상자 높이(창 300 = mini.cjs CARD_SLOT). 가장 꽉 찬 카드(노란 코드 막대 · MCP 대기 줄 · 두 줄 · 외 N개)가 272 라 그 위로 조금
 const mmss = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
 
 export default function MiniApp() {
@@ -63,6 +64,11 @@ export default function MiniApp() {
     : waiting ? `코드 기다림 ${waiting}${runCount ? ` · 생성 중 ${runCount}` : ''}`
     : runCount || queued ? `생성 중 ${runCount}${queued ? ` · 대기 ${queued}` : ''}`
     : '쉬는 중';
+  // 알약은 폭이 고정이라 줄여 쓴다(로고가 앱 이름을 대신한다)
+  const pillStat = !snap ? '연결 중…'
+    : waiting ? `코드 대기 ${waiting}${runCount ? ` · 생성 ${runCount}` : ''}`
+    : runCount || queued ? `생성 ${runCount}${queued ? ` · 대기 ${queued}` : ''}`
+    : '쉬는 중';
   const shown = size === 'full' ? tasks : size === 'card' ? tasks.slice(0, 2) : [];
   const hiddenCount = Math.max(0, tasks.length - shown.length) + (size === 'pill' ? 0 : snap?.more || 0);
   const pill = size === 'pill';
@@ -73,18 +79,21 @@ export default function MiniApp() {
 
   return (
     <div style={{ padding: 8, display: 'inline-block' }} onContextMenu={(e) => { e.preventDefault(); api?.miniAction?.('menu'); }}>
+      {/* 창 크기는 단계마다 고정 — 작업이 생기고 끝나도 창은 그대로, 안의 목록만 바뀐다(사용자 2026-11-13 "알림창이 점잖아야 함").
+          폭은 늘 300(창 316), 높이는 카드 CARD_BOX_H · 펼침은 쓸 수 있는 최대(room) · 알약은 한 줄. 카드 300 은 mini.cjs 의 CARD_SLOT 과 같다. */}
       <div ref={boxRef} style={{
-        width: pill ? 'auto' : 300, display: pill ? 'inline-block' : 'flex', flexDirection: 'column', maxHeight: room - 16, background: c.bg, color: c.ink, borderRadius: pill ? 999 : 12,
+        width: 300, display: 'flex', flexDirection: 'column', height: pill ? 'auto' : size === 'card' ? Math.min(CARD_BOX_H, room - 16) : room - 16, background: c.bg, color: c.ink, borderRadius: pill ? 999 : 12,
         boxShadow: `0 6px 18px rgba(0,0,0,0.22), 0 0 0 1px ${c.ring}`, overflow: 'hidden', fontSize: 12, lineHeight: 1.4, userSelect: 'none',
       }}>
         <div data-mini-head style={{ display: 'flex', flexWrap: pill ? 'nowrap' : 'wrap', alignItems: 'center', columnGap: 8, rowGap: 4, flex: 'none', padding: pill ? '6px 8px 6px 8px' : '9px 8px 8px 11px', WebkitAppRegion: 'drag' } as any}
           title="끌어서 옮기기 · 우클릭 메뉴">
-          <div style={{ width: 18, height: 18, borderRadius: 5, background: 'linear-gradient(135deg,#6366f1,#0071e3)', color: '#fff', fontSize: 10, fontWeight: 700, display: 'grid', placeItems: 'center', flex: 'none' }}>S</div>
-          <span style={{ fontSize: 12.5, fontWeight: 600, flex: 'none' }}>Seedance</span>
+          <div title="Seedance" style={{ width: 18, height: 18, borderRadius: 5, background: 'linear-gradient(135deg,#6366f1,#0071e3)', color: '#fff', fontSize: 10, fontWeight: 700, display: 'grid', placeItems: 'center', flex: 'none' }}>S</div>
+          {!pill && <span style={{ fontSize: 12.5, fontWeight: 600, flex: 'none' }}>Seedance</span>}
           {pill
-            ? <span data-mini-stat style={{ fontSize: 11.5, color: c.sub, whiteSpace: 'nowrap', flex: 'none' }}>
-                <span style={{ width: 7, height: 7, borderRadius: 7, background: dot, display: 'inline-block', marginRight: 5, verticalAlign: 1 }} />
-                {stat}{running.length ? ` · ${mmss(longest)}` : ''}
+            ? <span data-mini-stat style={{ fontSize: 11.5, color: c.sub, whiteSpace: 'nowrap', flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{ width: 7, height: 7, borderRadius: 7, background: dot, display: 'inline-block', flex: 'none' }} />
+                <span style={{ flex: 'none' }}>{pillStat}</span>
+                {running.length > 0 && <span style={{ marginLeft: 'auto', flex: 'none', fontSize: 10.5, color: c.faint, fontFamily: 'ui-monospace, Consolas, monospace', fontVariantNumeric: 'tabular-nums' }}>{mmss(longest)}</span>}
               </span>
             : <span style={{ flex: 1 }} />}
           {!pill && (
@@ -116,7 +125,7 @@ export default function MiniApp() {
                   </div>
                 : <div data-clip-ok title={`프로젝트 코드 · ${snap.billing.name}`} style={{ flex: 'none', margin: '0 10px 8px', fontSize: 11, borderRadius: 7, padding: '5px 8px', background: c.chip, color: c.sub, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>코드 · {snap.billing.name}</div>
             )}
-            <div data-mini-list style={{ borderTop: `1px solid ${c.line}`, minHeight: 0, flex: '0 1 auto', overflowY: 'auto', scrollbarWidth: 'thin' } as CSSProperties}>
+            <div data-mini-list style={{ borderTop: `1px solid ${c.line}`, minHeight: 0, flex: '1 1 auto', overflowY: 'auto', scrollbarWidth: 'thin' } as CSSProperties}>
               {inLine > 0 && <div style={{ padding: '6px 11px', fontSize: 10.5, color: c.sub, background: c.indSoft, borderBottom: `1px solid ${c.line}` }}>MCP 요청 {inLine}건이 차례를 기다려요 — 2초에 하나씩 받아요</div>}
               {shown.length === 0 && !inLine && <div style={{ padding: '7px 11px', fontSize: 11, color: c.faint, borderBottom: `1px solid ${c.line}` }}>돌고 있는 작업이 없어요</div>}
               {shown.map((t) => {
