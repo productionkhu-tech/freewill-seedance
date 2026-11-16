@@ -400,7 +400,8 @@ function refreshTrayMenu() {
       { label: 'Open', click: () => showOrCreateWindow() },
       ...(mini ? [
         { label: '미니 창', type: 'checkbox', checked: mini.visible(), click: () => mini.toggle() },
-        { label: '본창을 숨겼을 때 새 작업이 생기면 미니 창 띄우기', type: 'checkbox', checked: mini.auto(), click: () => { mini.setAuto(!mini.auto()); refreshTrayMenu(); } },
+        // '본창을 숨겼을 때 새 작업이 생기면 미니 창 띄우기' 는 26.11.1702 에 트레이에서 뺐다(사용자 "이건 뭔 의미임… 없애도 되겠네") — 동작(기본 켜짐)은
+        // 그대로고, 끄고 켜는 곳은 미니 창 우클릭 메뉴 한 곳(mini.cjs popupMenu).
       ] : []),
       ...(updater ? [updater.menuItem()] : []),
       { type: 'separator' },

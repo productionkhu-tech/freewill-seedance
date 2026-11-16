@@ -1,6 +1,6 @@
 // 미니 창 화면(26.11.13~, electron/mini.cjs). 스토어를 들이지 않는다 — 본창이 보내는 요약(MiniSnap)만 그린다.
 // 크기 셋: 알약(한 줄) · 카드(두 줄까지) · 펼침(전부). 머리를 끌면 창이 움직이고(놓으면 가까운 모서리로), 우클릭은 메뉴,
-// 줄을 누르면 본창의 그 카드로, 빈 곳을 두 번 누르면 본창. × 는 닫기(돌던 일이 끝날 때까지 다시 안 뜸 — mini.cjs).
+// 줄을 누르면 본창의 그 카드로(같은 프롬프트 · 설정을 여러 개 돌리면 '×N' 한 줄), 빈 곳을 두 번 누르면 본창. × 는 닫기(돌던 일이 끝날 때까지 다시 안 뜸 — mini.cjs).
 // 창이 쓸 수 있는 높이(room)는 본 프로세스가 알려 준다 — 넘치면 목록만 스크롤된다.
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import type { MiniSnap, MiniTask } from '../lib/mini-feed';
@@ -82,8 +82,19 @@ export default function MiniApp() {
     : waiting ? `코드 대기 ${waiting}${runCount ? ` · 생성 ${runCount}` : ''}`
     : runCount || queued ? `생성 ${runCount}${queued ? ` · 대기 ${queued}` : ''}`
     : '쉬는 중';
-  const shown = size === 'full' ? tasks : size === 'card' ? tasks.slice(0, 2) : [];
-  const hiddenCount = Math.max(0, tasks.length - shown.length) + (size === 'pill' ? 0 : snap?.more || 0);
+  // 같은 프롬프트 · 같은 설정 · 같은 상태는 한 줄로 묶고 '×N' 을 단다(mini-feed groupOf, 11/17). 줄의 얼굴은 정렬상 맨 앞 것 —
+  // 진행 중이면 가장 오래 돈 것(시간), 끝났으면 가장 최근에 끝난 것. 누르면 그중 먼저 보낸 카드로 간다(나머지가 그 아래에 이어진다).
+  const rows: (MiniTask & { n: number; goto: string; first: number })[] = [];
+  const byGroup = new Map<string, (typeof rows)[number]>();
+  for (const t of tasks) {
+    const r = byGroup.get(t.group || t.id);
+    if (!r) { const nr = { ...t, n: 1, goto: t.id, first: t.start }; byGroup.set(t.group || t.id, nr); rows.push(nr); continue; }
+    r.n++;
+    if (t.start < r.first) { r.first = t.start; r.goto = t.id; }
+  }
+  const shown = size === 'full' ? rows : size === 'card' ? rows.slice(0, 2) : [];
+  // '외 N개' 는 작업 수 — 묶음 줄 안의 작업은 보이는 것으로 센다
+  const hiddenCount = Math.max(0, tasks.length - shown.reduce((s, r) => s + r.n, 0)) + (size === 'pill' ? 0 : snap?.more || 0);
   const pill = size === 'pill';
 
   // 단추 · 칩은 줄어들지 않는다(flex: none). 잘려도 되는 건 프롬프트 · 프로젝트 이름 · 오류 문구뿐이고, 그건 data-clip-ok 를 달고 마우스를 올리면 전체가 보인다.
@@ -163,7 +174,7 @@ export default function MiniApp() {
               {shown.map((t) => {
                 const cancelled = !!t.cancelled, failed = t.status === 'failed' && !cancelled, done = t.status === 'succeeded', run = t.status === 'running';
                 return (
-                  <div key={t.id} onClick={() => api?.miniAction?.('goto', { projectId: t.projectId, msgId: t.id })} title={`${t.prompt || '(프롬프트 없음)'}\n${t.project}${t.error ? `\n${t.error}` : ''}\n— 눌러서 그 카드로${done || failed || cancelled ? ' (확인하면 목록에서 빠져요)' : ''}`}
+                  <div key={t.id} data-mini-n={t.n} onClick={() => api?.miniAction?.('goto', { projectId: t.projectId, msgId: t.goto })} title={`${t.prompt || '(프롬프트 없음)'}\n${t.project}${t.error ? `\n${t.error}` : ''}${t.n > 1 ? `\n같은 프롬프트 · 같은 설정 ${t.n}개` : ''}\n— 눌러서 ${t.n > 1 ? '첫 ' : '그 '}카드로${done || failed || cancelled ? ' (확인하면 목록에서 빠져요)' : ''}`}
                     style={{ display: 'grid', gridTemplateColumns: '38px minmax(0,1fr) auto', gap: 8, alignItems: 'center', padding: '7px 10px', borderBottom: `1px solid ${c.line}`, background: failed ? c.redSoft : 'transparent', cursor: 'pointer' }}>
                     <div style={{ width: 38, height: 24, borderRadius: 4, background: c.chip, overflow: 'hidden', display: 'grid', placeItems: 'center', position: 'relative' }}>
                       {done && <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={c.good} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ position: 'absolute' }}><path d="M20 6 9 17l-5-5" /></svg>}
@@ -171,6 +182,7 @@ export default function MiniApp() {
                       {failed && <svg data-mini-fail-icon width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={c.red} strokeWidth="2.6" strokeLinecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5M12 16.5v.01" /></svg>}
                       {done && t.taskId ? <img src={`/api/media/${encodeURIComponent(t.taskId)}/poster`} alt="" style={{ position: 'relative', width: '100%', height: '100%', objectFit: 'cover' }} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
                         : run ? <div className="animate-spin" style={{ width: 12, height: 12, borderRadius: 12, border: `2px solid ${c.indSoft}`, borderTopColor: c.ind }} /> : null}
+                      {t.n > 1 && <span data-mini-count style={{ position: 'absolute', right: 1, bottom: 1, fontSize: 9, fontWeight: 700, lineHeight: '11px', padding: '0 3px', borderRadius: 3, background: 'rgba(0,0,0,0.66)', color: '#fff', fontVariantNumeric: 'tabular-nums' }}>×{t.n}</span>}
                     </div>
                     <div style={{ minWidth: 0 }}>
                       <div data-clip-ok style={{ fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: failed ? c.red : c.ink }}>{t.prompt || '(프롬프트 없음)'}</div>

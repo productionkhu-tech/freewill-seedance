@@ -13,6 +13,7 @@ export type MiniTask = {
   status: 'queued' | 'running' | 'succeeded' | 'failed';
   start: number; end?: number; taskId?: string; error?: string;
   cancelled?: boolean;   // 사용자가 취소함 — status 는 failed 지만 실패가 아니다(빨간 줄 · 10분 · 실패 수에서 뺀다)
+  group: string;         // 같은 프롬프트 · 같은 설정 · 같은 상태 — 미니 창이 이 값이 같은 줄을 '×N' 한 줄로 묶는다(groupOf)
 };
 export type MiniSnap = {
   theme: 'light' | 'dark'; tasks: MiniTask[]; today: number; todayFail: number;
@@ -47,6 +48,18 @@ const shortModel = (id?: string) => {
   return name.replace(/^Seedance /, '').replace(/^Gemini Omni /, 'Omni ');
 };
 
+// 같은 프롬프트 · 같은 설정으로 여러 개를 한꺼번에 돌리면(보내기를 여러 번 · 에이전트가 같은 요청을 N번) 미니 창에 같은 줄이 N개
+// 늘어서 카드(두 줄)가 그것만으로 찼다(사용자 11/17 "X2 X3 이런 식으로 뜨는 거지? 낭비하지 않고"). 프로젝트 · 프롬프트 전문 ·
+// 생성 설정 · 레퍼런스 · 초안 출처가 모두 같고, 상태(진행 · 대기 · 완료 · 실패와 그 문구 · 취소)와 MCP 여부까지 같으면 한 묶음이다.
+// 상태를 열쇠에 넣는 까닭: 셋 중 하나가 끝나면 '생성 중 ×2' 와 '완료 ×1' 로 갈라져야 줄의 뜻(아이콘 · 시간)이 그대로 맞는다.
+const sortKeys = (o: Record<string, unknown>) => Object.keys(o).sort().map((k) => [k, o[k]]);
+const hash = (s: string) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
+const groupOf = (projectId: string, m: any, agent: boolean, cancelled: boolean) => hash(JSON.stringify([
+  projectId, m.promptText || '', sortKeys(m.usedSettings || {}),
+  (m.usedAssets || []).map((a: any) => a.id), (m.usedElementImages || []).map((e: any) => e.imageId), m.draftOf || '',
+  cancelled ? 'cancelled' : m.status, m.status === 'failed' ? String(m.error || '') : '', agent,
+]));
+
 export function buildMiniSnap(now = Date.now()): MiniSnap {
   const st = useAppStore.getState();
   const day = new Date(now);
@@ -69,10 +82,11 @@ export function buildMiniSnap(now = Date.now()): MiniSnap {
       if (!active && !recent) continue;
       const us: any = m.usedSettings || {};
       const prompt = (m.promptText || '').replace(/\s+/g, ' ').trim();
+      const agent = agentMessageIds.has(m.id);
       tasks.push({
         id: m.id, projectId: p.id, project: p.name, prompt: prompt.length > 90 ? prompt.slice(0, 90) + '…' : prompt,
         model: shortModel(us.model), res: us.draft ? 'Draft 480p' : String(us.resolution || ''), draft: !!us.draft,
-        agent: agentMessageIds.has(m.id), status: m.status,
+        agent, status: m.status, group: groupOf(p.id, m, agent, cancelled),
         start: m.startTime || m.timestamp, end: m.endTime, taskId: m.taskId,
         error: m.status === 'failed' ? String(m.error || '').split('\n')[0].slice(0, 80) : undefined,
         ...(cancelled ? { cancelled: true } : {}),
@@ -112,8 +126,13 @@ export function startMiniFeed(): () => void {
   const beat = window.setInterval(push, 5000);
   const offGoto = api.onMiniGoto?.(({ projectId, msgId }: { projectId: string; msgId: string }) => {
     // 미니 창에서 줄을 누름 → 본창이 그 카드로(Ctrl+F 와 같은 길). 끝난 작업이면 확인한 것 — 목록에서 뺀다.
+    // '×N' 묶음 줄이면 미니 창은 그중 먼저 보낸 카드를 보낸다(나머지는 그 아래에 이어진다) — 끝난 묶음은 통째로 확인한 것.
     const m = useAppStore.getState().projects.find((p) => p.id === projectId)?.messages.find((x) => x.id === msgId);
-    if (m && (m.status === 'succeeded' || m.status === 'failed')) seen.add(msgId);
+    if (m && (m.status === 'succeeded' || m.status === 'failed')) {
+      const all = buildMiniSnap().tasks;
+      const g = all.find((t) => t.id === msgId)?.group;
+      for (const t of all) if (t.id === msgId || (g && t.group === g)) seen.add(t.id);
+    }
     requestFindMessage(projectId, msgId);
     push();
   });
