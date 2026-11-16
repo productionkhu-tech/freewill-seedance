@@ -25,14 +25,25 @@ export const DONE_KEEP_MS = 90_000;        // 완료를 목록에 남겨 두는 
 export const FAIL_KEEP_MS = 10 * 60_000;   // 실패는 더 오래 — 자리를 비웠다 와도 보이게
 const MAX_TASKS = 50;   // 펼침은 창 높이(최대 640 · 남은 화면) 안에서 스크롤 — 그 너머는 '외 N개'
 const seen = new Set<string>();   // 미니 창에서 눌러 본 끝난 작업(이 실행 동안만)
-// 진행 중이 먼저(많이 돌려도 진행 중이 끝난 것에 밀려 빠지지 않게), 그다음 실패 · 완료. 같은 무리 안에서는 최근 것부터.
+// 진행 중이 먼저(많이 돌려도 진행 중이 끝난 것에 밀려 빠지지 않게), 그다음 실패 · 완료.
+// 진행 중 · 대기는 **먼저 온 것부터**, 끝난 것은 최근에 끝난 것부터(26.11.16~). 처음엔 모두 최근 것부터였는데, 에이전트가 몰아서 보내면
+// 2초마다 새 작업이 맨 위에 끼어 카드의 두 줄이 계속 한 칸씩 밀려 내려갔다(마지막 점검 25초에 12번 — 사용자 "칸이 움직이면서 정신
+// 사나운 건 없는지"). 먼저 온 것부터면 맨 위 줄은 그 작업이 끝날 때까지 그대로고, 새 작업은 아래에 붙는다 — 줄은 무엇이 끝날 때만 바뀐다.
+// 미니 창 화면(MiniApp.tsx)도 같은 순서로 다시 정렬한다(값을 import 하면 스토어를 끌고 들어가므로 거기 따로 둔다).
 const ORDER: Record<MiniTask['status'], number> = { running: 0, queued: 1, failed: 2, succeeded: 3 };
 export const miniRank = (t: Pick<MiniTask, 'status' | 'cancelled'>) => (t.cancelled ? 3 : ORDER[t.status]);
+export const miniOrder = (a: MiniTask, b: MiniTask) => miniRank(a) - miniRank(b)
+  || (miniRank(a) <= 1 ? a.start - b.start : (b.end || b.start) - (a.end || a.start));
 // 취소는 store cancelTask 가 status:'failed' + 이 문구로 적는다(26.11.13 시뮬레이션에서 빨간 실패로 10분 남던 것).
 const isCancelled = (m: { status?: string; error?: unknown }) => m.status === 'failed' && /작업을 취소했습니다/.test(String(m.error || ''));
 
+// 표에 없는 모델(새 판에서 만든 작업을 옛 판이 읽을 때 · 모델을 표에 넣기 전) — id 를 그대로 쓰면 'dreamina-seedance-3-0-pro-…' 가
+// 칩을 밀어 카드 밖으로 나갔다(11/16 대조 시험). 회사 접두어 · 날짜 꼬리를 떼고 버전에 점을 찍어 사람이 읽는 이름으로 만든다.
+const prettyModelId = (id: string) => id
+  .replace(/^(dreamina|bytedance)-/, '').replace(/-\d{6}$/, '').replace(/(\d+)-(\d+)/g, '$1.$2')
+  .split('-').filter(Boolean).map((w) => (/^\d/.test(w) ? w : w[0].toUpperCase() + w.slice(1))).join(' ');
 const shortModel = (id?: string) => {
-  const name = MODELS.find((m) => m.id === id)?.name || id || '';
+  const name = MODELS.find((m) => m.id === id)?.name || prettyModelId(id || '');
   return name.replace(/^Seedance /, '').replace(/^Gemini Omni /, 'Omni ');
 };
 
@@ -68,7 +79,7 @@ export function buildMiniSnap(now = Date.now()): MiniSnap {
       });
     }
   }
-  tasks.sort((a, b) => miniRank(a) - miniRank(b) || b.start - a.start);
+  tasks.sort(miniOrder);
   const bill = PERSONAL ? null : projectBilling(st);
   const waiting = Object.values(st.agentWaitingBilling || {}).reduce((n, v) => n + (Number(v) || 0), 0);
   return {

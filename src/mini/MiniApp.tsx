@@ -15,30 +15,41 @@ const T = {
 // mini-feed 의 miniRank 와 같은 순서 — 값을 import 하면 mini-feed 가 스토어를 끌고 들어오므로(§7-54) 여기 따로 둔다.
 const RANK: Record<MiniTask['status'], number> = { running: 0, queued: 1, failed: 2, succeeded: 3 };
 const rank = (t: MiniTask) => (t.cancelled ? 3 : RANK[t.status]);
-const CARD_BOX_H = 284;   // 카드 상자 높이(창 300 = mini.cjs CARD_SLOT). 가장 꽉 찬 카드(노란 코드 막대 · MCP 대기 줄 · 두 줄 · 외 N개)가 272 라 그 위로 조금
+// mini-feed 의 miniOrder 와 같은 순서 — 진행 중 · 대기는 먼저 온 것부터(맨 위 줄이 끝날 때까지 그대로), 끝난 것은 최근에 끝난 것부터.
+const order = (a: MiniTask, b: MiniTask) => rank(a) - rank(b) || (rank(a) <= 1 ? a.start - b.start : (b.end || b.start) - (a.end || a.start));
+const NEXT_SIZE: Record<Size, Size> = { full: 'card', card: 'pill', pill: 'full' };   // 최대 → 카드 → 알약 → 최대
+const SIZE_LABEL: Record<Size, string> = { full: '최대', card: '카드', pill: '알약' };
+const CARD_BOX_H = 284;   // 카드 상자 높이(창 300 = 상자 + 그림자 여백 8 × 2, mini.cjs PAD). 가장 꽉 찬 카드(노란 코드 막대 · MCP 대기 줄 · 두 줄 · 외 N개)가 272 라 그 위로 조금
 const mmss = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
 
 export default function MiniApp() {
   const [snap, setSnap] = useState<MiniSnap | null>(null);
   const [size, setSize] = useState<Size>('card');
   const [room, setRoom] = useState(640);
+  const [pinned, setPinned] = useState(true);
+  const [minH, setMinH] = useState(0);   // Windows 가 허락하는 가장 낮은 창 높이(mini.cjs 가 재서 알려 줌) — 알약 상자를 이만큼 채운다
   const [now, setNow] = useState(Date.now());
   const boxRef = useRef<HTMLDivElement>(null);
   const sizeRef = useRef<Size>('card');   // 크기를 알릴 때 '어느 크기로 그린 높이인지' 함께(mini.cjs 의 칸 계산)
   sizeRef.current = size;
 
   useEffect(() => {
-    document.documentElement.style.background = 'transparent';
-    document.body.style.background = 'transparent';
+    document.body.style.margin = '0';
     document.body.style.overflow = 'hidden';
     const off1 = api?.onMiniState?.((s: MiniSnap) => setSnap(s));
-    const off2 = api?.onMiniPrefs?.((p: { size: Size; room?: number }) => { if (p?.size) setSize(p.size); if (p?.room) setRoom(p.room); });
+    const off2 = api?.onMiniPrefs?.((p: { size: Size; room?: number; pinned?: boolean; minH?: number }) => {
+      if (p?.size) setSize(p.size);
+      if (p?.room) setRoom(p.room);
+      if (typeof p?.pinned === 'boolean') setPinned(p.pinned);
+      if (typeof p?.minH === 'number') setMinH(p.minH);
+    });
     api?.miniAction?.('ready');   // 듣기 시작했으니 마지막 요약을 달라고 한다
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => { off1?.(); off2?.(); window.clearInterval(t); };
   }, []);
 
-  // 그린 크기대로 창 크기를 맞춘다(그림자 여백 8px 씩)
+  // 그린 크기대로 창 크기를 맞춘다. 창은 카드 그대로(불투명 · 둥근 모서리와 그림자는 Windows 가 그린다, mini.cjs create)인데,
+  // 본 프로세스는 자리를 '카드 + 사방 8' 가상 창으로 계산하므로 + 16 을 붙여 알린다(mini.cjs vb · toReal).
   useLayoutEffect(() => {
     const el = boxRef.current;
     if (!el) return;
@@ -50,7 +61,9 @@ export default function MiniApp() {
   }, []);
 
   const c = T[snap?.theme === 'dark' ? 'dark' : 'light'];
-  const tasks = [...(snap?.tasks || [])].sort((a, b) => rank(a) - rank(b) || b.start - a.start);
+  // 창 바탕 = 카드 바탕(불투명 창 — 크기가 바뀌는 찰나에 다른 색이 비치지 않게)
+  useEffect(() => { document.documentElement.style.background = c.bg; document.body.style.background = c.bg; }, [c.bg]);
+  const tasks = [...(snap?.tasks || [])].sort(order);
   const running = tasks.filter((t) => t.status === 'running');
   // 머리의 수는 전체 수(snap.running/queued) — 목록은 12개까지만 오므로 목록을 세면 많이 돌릴 때 모자란다
   const runCount = snap?.running ?? running.length;
@@ -78,14 +91,16 @@ export default function MiniApp() {
   const chip = (bg: string, fg: string): CSSProperties => ({ flex: 'none', fontSize: 9.5, fontWeight: 600, borderRadius: 4, padding: '0 5px', lineHeight: '15px', background: bg, color: fg, whiteSpace: 'nowrap' });
 
   return (
-    <div style={{ padding: 8, display: 'inline-block' }} onContextMenu={(e) => { e.preventDefault(); api?.miniAction?.('menu'); }}>
+    <div style={{ display: 'inline-block', verticalAlign: 'top' }} onContextMenu={(e) => { e.preventDefault(); api?.miniAction?.('menu'); }}>
       {/* 창 크기는 단계마다 고정 — 작업이 생기고 끝나도 창은 그대로, 안의 목록만 바뀐다(사용자 2026-11-13 "알림창이 점잖아야 함").
-          폭은 늘 300(창 316), 높이는 카드 CARD_BOX_H · 펼침은 쓸 수 있는 최대(room) · 알약은 한 줄. 카드 300 은 mini.cjs 의 CARD_SLOT 과 같다. */}
+          폭은 늘 300(창 316), 높이는 카드 CARD_BOX_H · 펼침은 쓸 수 있는 최대(room) · 알약은 한 줄. 그림자 여백 8 은 mini.cjs PAD 와 같다. */}
       <div ref={boxRef} style={{
-        width: 300, display: 'flex', flexDirection: 'column', height: pill ? 'auto' : size === 'card' ? Math.min(CARD_BOX_H, room - 16) : room - 16, background: c.bg, color: c.ink, borderRadius: pill ? 999 : 12,
-        boxShadow: `0 6px 18px rgba(0,0,0,0.22), 0 0 0 1px ${c.ring}`, overflow: 'hidden', fontSize: 12, lineHeight: 1.4, userSelect: 'none',
+        width: 300, display: 'flex', flexDirection: 'column', height: pill ? 'auto' : size === 'card' ? Math.min(CARD_BOX_H, room - 16) : room - 16, background: c.bg, color: c.ink,
+        ...(pill ? { minHeight: minH || undefined, justifyContent: 'center' } : {}),
+        overflow: 'hidden', fontSize: 12, lineHeight: 1.4, userSelect: 'none',
       }}>
-        <div data-mini-head style={{ display: 'flex', flexWrap: pill ? 'nowrap' : 'wrap', alignItems: 'center', columnGap: 8, rowGap: 4, flex: 'none', padding: pill ? '6px 8px 6px 8px' : '9px 8px 8px 11px', WebkitAppRegion: 'drag' } as any}
+        {/* 머리 위 여백은 세 크기 모두 6 — 크기 단추가 화면의 같은 자리에 오게(위 구석에서는 창 위 끝이 고정이라 같은 곳을 계속 누르면 돈다) */}
+        <div data-mini-head style={{ display: 'flex', flexWrap: pill ? 'nowrap' : 'wrap', alignItems: 'center', columnGap: 8, rowGap: 4, flex: 'none', padding: pill ? '6px 8px 6px 8px' : '6px 8px 8px 11px', WebkitAppRegion: 'drag' } as any}
           title="끌어서 옮기기 · 우클릭 메뉴">
           <div title="Seedance" style={{ width: 18, height: 18, borderRadius: 5, background: 'linear-gradient(135deg,#6366f1,#0071e3)', color: '#fff', fontSize: 10, fontWeight: 700, display: 'grid', placeItems: 'center', flex: 'none' }}>S</div>
           {!pill && <span style={{ fontSize: 12.5, fontWeight: 600, flex: 'none' }}>Seedance</span>}
@@ -96,11 +111,28 @@ export default function MiniApp() {
                 {running.length > 0 && <span style={{ marginLeft: 'auto', flex: 'none', fontSize: 10.5, color: c.faint, fontFamily: 'ui-monospace, Consolas, monospace', fontVariantNumeric: 'tabular-nums' }}>{mmss(longest)}</span>}
               </span>
             : <span style={{ flex: 1 }} />}
+          {/* 핀(26.11.16~, 나노바나나와 같은 자리 · 같은 뜻) — 켜짐(강조색): 구석에 붙고 다른 앱 창과 쌓임 · 꺼짐: 놓은 자리에 그대로.
+              알약에는 두지 않는다(작게 유지 — 우클릭 메뉴 '구석에 고정' 으로 바꾼다). 크기 단추는 그대로 오른쪽에서 세 번째. */}
           {!pill && (
-            <button style={btn} title={size === 'full' ? '접기' : '펼치기'} onClick={() => api?.miniAction?.('size', size === 'full' ? 'card' : 'full')}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">{size === 'full' ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}</svg>
+            <button style={{ ...btn, color: pinned ? c.ind : c.faint, background: pinned ? c.indSoft : 'transparent' }} data-mini-pin data-pinned={pinned ? '1' : '0'}
+              title={pinned ? '구석에 고정 — 끌어 놓으면 가까운 구석에 붙고 다른 앱 창과 쌓여요 · 누르면 자유 위치' : '자유 위치 — 놓은 자리에 그대로 있어요 · 누르면 가까운 구석에 고정'}
+              onClick={() => api?.miniAction?.('pin', !pinned)}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 17v5" />
+                <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+              </svg>
             </button>
           )}
+          {/* 크기 단추 하나 — 누를 때마다 최대 → 카드 → 알약 → 최대(사용자 11/16 "한 부분 클릭이 모두 최대, 최소, 알약… 이렇게 바뀌어야").
+              그림은 '누르면 될 모양'. 세 크기 모두 같은 자리(오른쪽에서 세 번째)라 같은 곳을 계속 누르면 된다. */}
+          <button style={btn} data-mini-size data-next={NEXT_SIZE[size]} title={`크기 — 누르면 ${SIZE_LABEL[NEXT_SIZE[size]]} (최대 → 카드 → 알약 순서로 돌아요)`}
+            onClick={() => api?.miniAction?.('size', NEXT_SIZE[size])}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round">
+              {NEXT_SIZE[size] === 'pill' ? <rect x="3" y="9" width="18" height="6" rx="3" />
+                : NEXT_SIZE[size] === 'full' ? <rect x="7" y="3" width="10" height="18" rx="2" />
+                : <rect x="4" y="6" width="16" height="12" rx="2" />}
+            </svg>
+          </button>
           <button style={btn} title="본창 열기" onClick={() => api?.miniAction?.('open')}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" /></svg>
           </button>
@@ -142,10 +174,12 @@ export default function MiniApp() {
                     </div>
                     <div style={{ minWidth: 0 }}>
                       <div data-clip-ok style={{ fontSize: 11.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: failed ? c.red : c.ink }}>{t.prompt || '(프롬프트 없음)'}</div>
-                      <div style={{ display: 'flex', gap: 5, alignItems: 'center', marginTop: 2, fontSize: 10, color: c.faint, whiteSpace: 'nowrap', minWidth: 0 }}>
-                        {failed ? <span data-clip-ok style={{ overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{t.error || '생성 실패'}</span> : <>
+                      {/* 둘째 줄은 높이 15 로 고정 — 오류 글(칩 없음)인 실패 줄만 1px 낮아 펼침 목록의 줄 높이가 들쭉날쭉했다(11/16 대조 시험).
+                          모델 칩은 170 까지만 — 표에 없는 긴 모델 이름이 와도 카드 밖으로 안 나가고 끝이 '…'(마우스를 올리면 전체). */}
+                      <div style={{ display: 'flex', gap: 5, alignItems: 'center', marginTop: 2, height: 15, fontSize: 10, color: c.faint, whiteSpace: 'nowrap', minWidth: 0 }}>
+                        {failed ? <span data-clip-ok style={{ overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, lineHeight: '15px' }}>{t.error || '생성 실패'}</span> : <>
                           {t.agent && <span style={chip(c.indSoft, c.ind)}>MCP</span>}
-                          <span style={chip(t.draft ? c.amberSoft : c.chip, t.draft ? c.amber : c.sub)}>{[t.model, t.res].filter(Boolean).join(' · ')}</span>
+                          <span data-clip-ok title={[t.model, t.res].filter(Boolean).join(' · ')} style={{ ...chip(t.draft ? c.amberSoft : c.chip, t.draft ? c.amber : c.sub), maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis' }}>{[t.model, t.res].filter(Boolean).join(' · ')}</span>
                           <span data-clip-ok style={{ overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{t.project}</span>
                         </>}
                       </div>

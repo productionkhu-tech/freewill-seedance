@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, Fragment, type RefObject, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw, Sun, Moon, PanelLeft, PanelRight } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Edit2, Search, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles, BarChart3, FolderDown, FolderOpen, Folder, FolderPlus, ChevronRight, AlertTriangle, LayoutGrid, Upload, RotateCcw, Sun, Moon, PanelLeft, PanelRight, PictureInPicture2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppStore, groupTree, requestFindMessage, type Project, type ProjectGroup } from '../store';
 import { taskIdMatches } from '../lib/search-match';
@@ -430,6 +430,16 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   const { projects, currentProjectId, setCurrentProjectId, createProject, deleteProject, renameProject, setProjectIcon,
     projectGroups, createProjectGroup, renameProjectGroup, deleteProjectGroup, deleteProjectGroupWithProjects, toggleProjectGroup, setProjectGroup, setGroupParent, moveProjectBefore, moveProjectToEnd, moveGroupBefore, moveGroupToEnd,
     autoDownload, setAutoDownload, theme, setTheme, split, openInPane } = useAppStore();
+  // 미니 창 켜기/끄기(26.11.16~, electron/mini.cjs) — 트레이에만 있으면 불편하다(사용자 11/16). 트레이로 켜고 꺼도 ON/OFF 가 따라온다.
+  const miniApi = (window as any).electronAPI;
+  const hasMini = !!miniApi?.miniToggle;
+  const [miniOn, setMiniOn] = useState(false);
+  useEffect(() => {
+    if (!miniApi?.miniToggle) return;
+    miniApi.miniVisible?.().then((v: boolean) => setMiniOn(!!v)).catch(() => {});
+    return miniApi.onMiniVisible?.((v: boolean) => setMiniOn(!!v));
+  }, [miniApi]);
+  const miniTitle = '미니 창 — 본창을 숨기거나 최소화해도 지금 작업을 화면 구석에서 봅니다(트레이 메뉴의 \'미니 창\' 과 같음)';
   // 작업창에 떠 있는 프로젝트(나누기 26.10.2001~) — 둘 다 '보고 있는' 것이라 새 완성 배지를 달지 않는다.
   const shown = visibleProjectIds({ split, currentProjectId });
   // 나눠 보는 중이면 그 프로젝트가 떠 있는 쪽.
@@ -1356,6 +1366,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
         <button onClick={() => setGalleryOpen(true)} className="p-2 text-white/60 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors" title="전체 갤러리">
           <LayoutGrid size={18} />
         </button>
+        {hasMini && <button onClick={() => miniApi.miniToggle()} data-mini-toggle
+          className={cn('p-2 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors', miniOn ? 'text-[#5aa9ff]' : 'text-white/60')}
+          title={`${miniTitle} — 지금 ${miniOn ? '켜짐' : '꺼짐'}`}>
+          <PictureInPicture2 size={18} />
+        </button>}
         <div className="flex-1" />
         <button onClick={pickDownloadFolder}
           className="p-2 text-white/40 hover:text-white hover:bg-[#2a2a2d] rounded-[8px] transition-colors"
@@ -1480,6 +1495,15 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           {/* 받은 영상에는 늘 생성 설정을 암호화해 넣는다(26.10.801~ settings-box). 끄는 칸은 802 에서 뺐다 —
               사용자 2026-10-08: "당연히 다 넣어주는 거지". */}
         </div>
+        {hasMini && <button onClick={() => miniApi.miniToggle()} data-mini-toggle
+          className="w-full flex items-center justify-between gap-2 px-3 py-2 bg-[#2a2a2d]/60 hover:bg-[#2a2a2d] text-white/70 hover:text-white rounded-[8px] transition-colors text-[12px]"
+          title={miniTitle}>
+          <div className="flex items-center gap-2">
+            <PictureInPicture2 size={14} />
+            <span className="font-medium">미니 창</span>
+          </div>
+          <span className={cn('text-[10px]', miniOn ? 'text-[#5aa9ff] font-semibold' : 'text-white/40')}>{miniOn ? 'ON' : 'OFF'}</span>
+        </button>}
         {/* Theme. Lives beside the other app-wide switches (not per project) because it
             is a property of this installation, and it is persisted so a restart keeps it. */}
         <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}

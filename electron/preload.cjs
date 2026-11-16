@@ -71,4 +71,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('mini:prefs', h);
   },
   miniAction: (name, payload) => ipcRenderer.send('mini:action', name, payload),
+  // 본창 사이드바의 '미니 창' 단추 — 켜고 끄기 · 지금 보이는지(트레이로 켜고 꺼도 따라온다)
+  miniToggle: () => ipcRenderer.send('mini:toggle'),
+  miniVisible: () => ipcRenderer.invoke('mini:visible'),
+  onMiniVisible: (cb) => {
+    const h = (_e, v) => cb(v);
+    ipcRenderer.on('mini:visible', h);
+    return () => ipcRenderer.removeListener('mini:visible', h);
+  },
 });
