@@ -44,7 +44,7 @@ const DOCK_BEAT_MS = 2000;
 const CLAIM_MS = 250;
 const TIE_MS = 300;
 
-function initMini({ port, preload, getMain, showMain, onChange, dockName = 'seedance', dockRank = 0 }) {
+function initMini({ port, preload, getMain, showMain, hideMain, onChange, dockName = 'seedance', dockRank = 0 }) {
   const dockDir = path.join(app.getPath('appData'), 'Freewill', 'mini-dock');
   const dockFile = path.join(dockDir, `${dockName}.json`);
   let win = null;
@@ -395,12 +395,21 @@ function initMini({ port, preload, getMain, showMain, onChange, dockName = 'seed
     win.on('closed', () => { win = null; since = 0; writeDock(false); changed(); });
   };
 
-  // auto=true 는 새 작업 · 본창 숨김으로 저절로 뜬 것, false 는 사용자가 트레이에서 켠 것.
+  // auto=true 는 새 작업 · 본창 숨김으로 저절로 뜬 것, false 는 사용자가 켠 것(본창 단추 · 트레이).
+  // ★ 미니 창은 본창 **대신** 뜬다(26.11.17~ 사용자 "미니창을 띄우면 본창은 없고, 미니창에서 본창 띄우면 미니창은 사라지고 — 보통 다른
+  // 프로그램들도 이 로직"). 사람이 켜면 미니 창이 화면에 나오는 순간 본창을 트레이로 숨기고(hideMain, 풍선 없음), 본창이 다시 보이면
+  // 미니 창은 사라진다(onMainShown). 미니 창을 닫으면 본창은 숨은 채라 트레이에만 남는다. 저절로 뜨는 것은 본창이 이미 숨어 있을 때뿐이다.
+  // 그 전(1602)에는 둘이 같이 떠 있을 수 있었다.
+  let pending = false;          // 켜기를 기다리는 중(CLAIM_MS) — 그 사이 온 켜기는 새로 예약하지 않는다
+  let switchOnReveal = false;   // 나오는 순간 본창을 숨길지(사람이 켠 것)
   const show = (auto = false) => {
-    if (visible()) { if (!auto) autoShown = false; return; }
+    if (!auto) { autoShown = false; dismissed = false; }
+    if (visible()) { if (!auto) hideMain?.(); return; }
+    if (pending) { if (!auto) switchOnReveal = true; return; }   // 저절로 뜨려던 참에 사람이 켰으면 사람이 켠 것으로 올리기만
     autoShown = auto;
-    if (!auto) dismissed = false;
-    // 자리부터 알린다 — 켜진 시각을 적고(visible) CLAIM_MS 뒤 남을 보고 앉는다. 이미 켜기를 기다리는 중이면 그대로 둔다.
+    switchOnReveal = !auto;
+    pending = true;
+    // 자리부터 알린다 — 켜진 시각을 적고(visible) CLAIM_MS 뒤 남을 보고 앉는다.
     if (!since) since = Date.now();
     const my = ++showSeq;
     writeDock(true);
@@ -410,10 +419,12 @@ function initMini({ port, preload, getMain, showMain, onChange, dockName = 'seed
   // 자리를 잡고 내놓는다. 그 사이 닫혔거나(since 0) 다른 켜기가 왔으면 버린다.
   function reveal(my) {
     if (my !== showSeq || !since || !alive() || win.isVisible()) return;
+    pending = false;
     restoreFree(); restorePinned(); place(); win.showInactive(); writeDock(true); changed();
+    if (switchOnReveal) { switchOnReveal = false; hideMain?.(); }
   }
   const hide = () => {
-    ++showSeq; since = 0;   // 기다리던 켜기도 버린다
+    ++showSeq; since = 0; pending = false; switchOnReveal = false;   // 기다리던 켜기도 버린다
     if (alive() && win.isVisible()) { win.hide(); writeDock(false); changed(); } else writeDock(false);
   };
   // 사용자가 닫음(× · 우클릭 메뉴 · 트레이). 돌고 있는 일이 있으면 그 일이 끝날 때까지 다시 안 띄운다.
@@ -459,7 +470,8 @@ function initMini({ port, preload, getMain, showMain, onChange, dockName = 'seed
     ]).popup({ window: win });
   };
 
-  // 본창 사이드바의 '미니 창' 단추(26.11.16~) — 트레이 메뉴 '미니 창' 과 같다: 켜면 직접 켠 창(비어도 그대로), 끄면 사용자가 닫은 것.
+  // 본창의 '미니 창으로' 단추(26.11.16~ 사이드바, 26.11.17~ Settings 머리줄) — 트레이 메뉴 '미니 창' 과 같다: 켜면 직접 켠 창(비어도 그대로)
+  // 이고 본창은 트레이로 숨는다, 끄면 사용자가 닫은 것.
   ipcMain.on('mini:toggle', (e) => {
     const m = getMain();
     if (!m || m.isDestroyed() || e.sender !== m.webContents) return;   // 본창 화면만
@@ -474,9 +486,9 @@ function initMini({ port, preload, getMain, showMain, onChange, dockName = 'seed
       const h = Math.max(40, Math.min(MAX_H, Math.round(Number(p.h) || 0)));
       if (w !== size.w || h !== size.h) { size = { w, h }; place(); }
     } else if (name === 'open') {
-      showMain();
+      showMain(); hide();   // 본창으로 돌아가면 미니 창은 사라진다(본창 'show' 로도 오지만, 이미 떠 있던 본창이면 그 신호가 없다)
     } else if (name === 'goto' && p && typeof p.projectId === 'string' && typeof p.msgId === 'string') {
-      showMain();
+      showMain(); hide();
       const m = getMain();
       if (m && !m.isDestroyed()) m.webContents.send('mini:goto', { projectId: p.projectId, msgId: p.msgId });
     } else if (name === 'size' && SIZES.includes(p)) {
@@ -502,6 +514,8 @@ function initMini({ port, preload, getMain, showMain, onChange, dockName = 'seed
     // 본창을 트레이로 숨겼을 때 — 돌고 있는 작업이 있으면 바로 띄운다. 닫아 둠(dismissed)은 '새 요청이 와서 저절로 뜨는 것' 만
     // 막는다. 본창을 숨기는 건 사용자가 직접 한 일이고 미니 창이 있는 이유라, 닫아 둠을 풀고 띄운다(11/13 손 작업 시험에서 발견).
     onMainHidden: () => { dismissed = false; if (prefs.auto && hasActive(latest)) show(true); },
+    // 본창이 다시 보였다(트레이 Open · ↗ · 줄 누름 · 작업 표시줄에서 되살림) — 미니 창은 물러난다. 닫아 둠(dismissed)은 건드리지 않는다.
+    onMainShown: () => { if (visible() || pending) hide(); },
   };
 }
 

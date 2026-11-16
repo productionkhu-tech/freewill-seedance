@@ -4,6 +4,7 @@ import { PICKABLE_MODELS, modelExtendAddRange, modelFirstLastMaxSec, omniRefVide
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
 import { PERSONAL } from '../lib/edition';
 import { PersonalKeysCard } from './PersonalKeys';
+import { MiniToggle } from './MiniToggle';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import { copyImageToClipboard, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, getFilePath, cacheFile } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
@@ -754,14 +755,18 @@ export function SettingsPanel() {
       <div className="p-4 border-b border-gray-200/60 flex items-center gap-2 sticky top-0 bg-[#f5f5f7]/80 dark:bg-[#242426]/80 backdrop-blur-xl z-10">
         <Settings size={18} className="text-gray-500" />
         <h2 className="text-[21px] font-semibold text-[#1d1d1f] dark:text-gray-900 tracking-tight">Settings</h2>
-        {/* 나눠 보는 중(26.10.2001~)이면 이 설정이 어느 칸 것인지 — 손대는 칸(위쪽 파란 띠)의 프로젝트다. */}
-        {split && (
-          <span className="ml-auto min-w-0 flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/15 rounded-md px-1.5 py-0.5"
-            title={`${sideOf(split, paneFocus) === 'left' ? '왼쪽' : '오른쪽'} 칸 · ${project.name}`}>
-            {sideOf(split, paneFocus) === 'left' ? <PanelLeft size={12} className="shrink-0" /> : <PanelRight size={12} className="shrink-0" />}
-            <span className="truncate">{project.name}</span>
-          </span>
-        )}
+        <div className="ml-auto min-w-0 flex items-center gap-2">
+          {/* 나눠 보는 중(26.10.2001~)이면 이 설정이 어느 칸 것인지 — 손대는 칸(위쪽 파란 띠)의 프로젝트다. */}
+          {split && (
+            <span className="min-w-0 flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/15 rounded-md px-1.5 py-0.5"
+              title={`${sideOf(split, paneFocus) === 'left' ? '왼쪽' : '오른쪽'} 칸 · ${project.name}`}>
+              {sideOf(split, paneFocus) === 'left' ? <PanelLeft size={12} className="shrink-0" /> : <PanelRight size={12} className="shrink-0" />}
+              <span className="truncate">{project.name}</span>
+            </span>
+          )}
+          {/* 미니 창 ON/OFF(26.11.17~ 여기 — 왼쪽 사이드바가 좁아서 옮김, MiniToggle.tsx) */}
+          <MiniToggle compact={!!split} />
+        </div>
       </div>
 
       {/* 프로젝트마다 새로 그린다(key, 26.10.2001~). 작업창을 나눠 칸을 오가면 프로젝트가 바뀔 때마다 모드별 칸이 접혔다

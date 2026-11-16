@@ -308,6 +308,10 @@ function createWindow() {
   mainWindow.on('minimize', () => requestFlush('minimize'));
   // 작업 표시줄로 내려도(트레이 숨김과 같이) 돌던 작업이 있으면 미니 창으로 이어 본다(26.11.13 시뮬레이션).
   mainWindow.on('minimize', () => mini?.onMainHidden());
+  // 본창이 다시 보이면(트레이 Open · 미니 창의 ↗ · 줄 누름 · 작업 표시줄에서 되살림 · 다시 실행) 미니 창은 사라진다 —
+  // 둘 중 하나만 보이는 것이 다른 프로그램들의 미니 모드와 같다(사용자 26.11.17).
+  mainWindow.on('show', () => mini?.onMainShown());
+  mainWindow.on('restore', () => mini?.onMainShown());
   // 윈도우 종료 · 재시작 · 로그오프 직전. 시간이 거의 없지만 해 본다 — 2026-10-07 재부팅으로 그 세션의 작업이
   // 백업에 하나도 없었다(작업 기록 자체는 IDB 에 있었다).
   mainWindow.on('query-session-end', () => requestFlush('session-end'));
@@ -414,6 +418,8 @@ function setupMini() {
     preload: path.join(__dirname, 'preload.cjs'),
     getMain: () => mainWindow,
     showMain: () => showOrCreateWindow(),
+    // 미니 창으로 바꿀 때 본창을 숨긴다 — X 와 같은 길이지만 '트레이에서 돌고 있다' 풍선은 띄우지 않는다(사용자가 방금 바꾼 것).
+    hideMain: () => { if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) mainWindow.hide(); },
     onChange: () => refreshTrayMenu(),
     // 같은 구석의 다른 Freewill 앱 미니 창과 자리 나누기(mini.cjs) — 시댄스가 모서리 쪽, 개인판은 그다음.
     dockName: PERSONAL ? 'seedance-personal' : 'seedance',
