@@ -16,6 +16,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // Shared with the client store — see src/lib/model-access.ts for why these two facts
 // live outside both files.
 import { MODEL_GRANTS, FOUR_K_GRANTS, brandOf } from './src/lib/model-access';
+import { AgentInputError, agentText, findPowerShellObject, kindOf, AGENT_LIMITS, POWERSHELL_HINT } from './src/lib/agent-input';
 import { PERSONAL_BILLING } from './src/lib/edition';
 // 생성 결과물의 장기 보관소. R2(입력 임시 저장)와 역할이 겹치지 않는다 — ncp.ts 참고.
 import {
@@ -556,6 +557,15 @@ async function startServer() {
       return res.status(403).json({ error: 'cross-origin request refused' });
     }
     next();
+  });
+  // 에이전트 입구(/api/agent/*)는 몸통 1MB 까지(26.11.1802~) — 프롬프트 5만 자(한글이면 약 150KB)를 넉넉히 넘는다. 200MB 를 그대로 받던 때는
+  // PowerShell 객체 프롬프트(-Depth 6, 4,700만 자)도 다 읽은 뒤에야 거절했다(나노바나나 11/18 사고, 격리 시험 minitestps-probe.ps1).
+  // 여기서 먼저 읽으면 아래 전역 express.json 은 이미 읽은 몸통을 건너뛴다(req._body).
+  app.use('/api/agent', express.json({ limit: '1mb' }));
+  app.use('/api/agent', (err: any, _req: any, res: any, next: any) => {
+    if (err?.type === 'entity.too.large') return res.status(413).json({ error: `요청이 너무 큽니다(1MB 까지) — 프롬프트는 ${AGENT_LIMITS.prompt.toLocaleString()}자까지입니다. ${POWERSHELL_HINT}`, code: 'body_too_large' });
+    if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: '요청 몸통을 JSON 으로 읽지 못했습니다.', code: 'bad_json' });
+    next(err);
   });
   app.use(express.json({ limit: '200mb' }));
 
@@ -1819,20 +1829,37 @@ async function startServer() {
       return res.status(400).json({ error: '설명서 버전(manual)이 없습니다 — 설명서를 먼저 읽고(GET /api/agent/manual · send-to-seedance.mjs --manual) 그 version 을 manual 에 적어 보내 주세요.', needManual: true, manualVersion: manualVersionNow() });
     }
     if (b.manual !== agentManual.version) return res.status(409).json({ error: staleNotice(b.manual), stale: true, manualVersion: manualVersionNow() });
-    const prompt = typeof b.prompt === 'string' ? b.prompt : '';
-    if (!prompt.trim()) return res.status(400).json({ error: 'prompt 가 비었습니다' });
+    // 글자 칸은 글자만 · 길이 상한 — 받아서 고치지 않고 거절 + 이유(26.11.1802~, src/lib/agent-input.ts). 예전엔 글자가 아니면 '' 로 보고
+    // "prompt 가 비었습니다" 라고 해서 PowerShell 객체를 보낸 쪽이 이유를 알 수 없었다.
+    const ps = findPowerShellObject(b);
+    if (ps) return res.status(400).json({ error: `${ps} 칸이 PowerShell 객체입니다 — 글자로 보내 주세요. ${POWERSHELL_HINT}`, code: 'powershell_object' });
+    let prompt = '';
+    let refs: { path: string; role?: string }[] = [];
+    try {
+      prompt = agentText(b.prompt, 'prompt', { max: AGENT_LIMITS.prompt, required: true, code: 'bad_prompt' })!;
+      agentText(b.project, 'project', { max: AGENT_LIMITS.name });
+      agentText(b.projectId, 'projectId', { max: 80 });
+      agentText(b.billing, 'billing', { max: AGENT_LIMITS.name });
+      agentText(b.name, 'name', { max: 120 });
+      if (b.settings !== undefined && b.settings !== null && (typeof b.settings !== 'object' || Array.isArray(b.settings))) throw new AgentInputError('bad_field', `settings 는 객체여야 합니다(받은 것: ${kindOf(b.settings)}).`);
+      if (b.refs !== undefined && b.refs !== null && !Array.isArray(b.refs)) throw new AgentInputError('bad_field', `refs 는 배열이어야 합니다(받은 것: ${kindOf(b.refs)}).`);
+      const rawRefs: unknown[] = Array.isArray(b.refs) ? b.refs : [];
+      if (rawRefs.length > 50) throw new AgentInputError('too_long', '레퍼런스는 50개까지입니다');
+      refs = rawRefs.map((r: any, i) => {
+        if (typeof r === 'string') return { path: agentText(r, `refs[${i}]`, { max: AGENT_LIMITS.path, required: true })! };
+        if (!r || typeof r !== 'object' || Array.isArray(r)) throw new AgentInputError('bad_field', `refs[${i}] 는 경로 글자 또는 { path, role } 이어야 합니다(받은 것: ${kindOf(r)}).`);
+        const role = agentText(r.role, `refs[${i}].role`, { max: AGENT_LIMITS.short });
+        return { path: agentText(r.path, `refs[${i}].path`, { max: AGENT_LIMITS.path, required: true })!, ...(role ? { role } : {}) };
+      });
+    } catch (e: any) {
+      if (e instanceof AgentInputError) return res.status(400).json({ error: e.message, code: e.code });
+      throw e;
+    }
     // 보낼 프로젝트는 꼭 — 26.10.2002~ 열린 프로젝트로 대신 가지 않는다.
     const hasProjectId = typeof b.projectId === 'string' && !!b.projectId.trim();
     const hasProject = typeof b.project === 'string' && !!b.project.trim();
     if (!hasProjectId && !hasProject) return res.status(400).json({ error: '보낼 프로젝트가 없습니다 — projectId(projects.list 의 id) 또는 project(사이드바 이름 그대로)를 적어 주세요.' });
-    if (prompt.length > 50000) return res.status(400).json({ error: 'prompt 가 너무 깁니다 (5만 자까지)' });
     const settings = b.settings && typeof b.settings === 'object' && !Array.isArray(b.settings) ? b.settings : {};
-    const rawRefs: unknown[] = Array.isArray(b.refs) ? b.refs : [];
-    if (rawRefs.length > 50) return res.status(400).json({ error: '레퍼런스는 50개까지입니다' });
-    const refs = rawRefs.map((r: any) => typeof r === 'string'
-      ? { path: r }
-      : { path: String(r?.path || ''), ...(typeof r?.role === 'string' ? { role: r.role } : {}) });
-    if (refs.some(r => !r.path)) return res.status(400).json({ error: 'path 가 없는 레퍼런스가 있습니다' });
     pruneAgentJobs();
     if (openAgentJobs().length >= 30) return res.status(429).json({ error: '아직 보내지 않은 작업이 30개입니다 — 앱이 처리할 때까지 기다려 주세요' });
     const id = crypto.randomUUID();
@@ -2028,6 +2055,10 @@ async function startServer() {
     if (b.manual !== agentManual.version) return res.status(409).json({ error: staleNotice(b.manual), stale: true, manualVersion: manualVersionNow() });
     const command = typeof b.command === 'string' ? b.command.trim() : '';
     if (!command || command.length > 60) return res.status(400).json({ error: 'command 가 없습니다' });
+    // 인자 — 객체여야 하고, 어디든 PowerShell 객체가 있으면 거절(26.11.1802~). 칸마다의 글자 검사는 화면의 명령 처리(agentText)가 한다.
+    if (b.args !== undefined && b.args !== null && (typeof b.args !== 'object' || Array.isArray(b.args))) return res.status(400).json({ error: `args 는 객체여야 합니다(받은 것: ${kindOf(b.args)}).`, code: 'bad_field' });
+    const psAt = findPowerShellObject(b.args, 'args');
+    if (psAt) return res.status(400).json({ error: `${psAt} 칸이 PowerShell 객체입니다 — 글자로 보내 주세요. ${POWERSHELL_HINT}`, code: 'powershell_object' });
     const args = b.args && typeof b.args === 'object' && !Array.isArray(b.args) ? b.args : {};
     pruneAgentCmds();
     if ([...agentCmds.values()].filter(c => c.status === 'pending' || c.status === 'taken').length >= 50) {
@@ -2780,6 +2811,9 @@ async function startServer() {
 
     // Pull the app-only `project` / `project_id` (billing/tracking) out — BytePlus must never
     // receive them (unknown top-level fields can 400). The rest is forwarded as-is.
+    // 화면만 쓰는 길이지만 이 PC 에서 누구나 부를 수 있다 — PowerShell 객체가 섞이면 BytePlus 로 넘기지 않는다(26.11.1802~).
+    const psIn = findPowerShellObject(req.body);
+    if (psIn) return res.status(400).json({ error: { message: `${psIn} 칸이 PowerShell 객체입니다 — 글자로 보내 주세요. ${POWERSHELL_HINT}`, code: 'powershell_object' } });
     const { project: billingProject, project_id: rawProjectId, ...byteplusBody } = (req.body && typeof req.body === 'object') ? req.body : {};
     const billingProjectId = typeof rawProjectId === 'string' ? rawProjectId.trim() : '';
     if (PERSONAL && !ensurePersonalKeys()) {

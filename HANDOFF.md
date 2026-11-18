@@ -249,7 +249,7 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 | 대상 | 위치 |
 |---|---|
-| 작업 기록(프로젝트·메시지·그룹) | IndexedDB `seedance-app-storage` |
+| 작업 기록(프로젝트·메시지·그룹) | IndexedDB DB `seedance-records` / 저장소 `kv` — 카드마다 한 칸(키 `["프로젝트 id","카드 id"]`) + `root`(카드를 뺀 나머지 · 카드 순서). 26.11.1802~, 그 전의 한 덩어리 `keyval-store` / `seedance-app-storage` 는 처음 켤 때 옮기고 지운다(§7-56) |
 | 엘리먼트 라이브러리 **목록** | IndexedDB `seedance-elements-manifest` + `…-chunk-N` (26.9.3001~ 원본 없이 `libId` 만) |
 | 엘리먼트 라이브러리 **원본** | userData/`element-library/<md5 12자리><확장자>` · 화면용 `element-library/preview/<id>.jpg` (26.9.3001~) |
 | 재난복구 백업 | `~/Documents/Freewill Seedance Backup/` (양 플랫폼 **같은 폴더·같은 파일명**) · 라이브러리 원본은 그 안 `element-library/` |
@@ -260,6 +260,20 @@ IPC/HTTP 를 골라준다. Electron 전용 기능을 새로 붙일 때는 같은
 
 IndexedDB 는 **1.5초 디바운스**. IDB 가 비어 있으면 다음 실행 때 백업 파일에서 **자동 복원**된다
 (빈 프로필에서 실측: 18 프로젝트 / 503 메시지 / 엘리먼트 청크 19개 전부 복귀).
+
+**바뀐 카드만 쓴다(26.11.1802~).** 실측(2026-11-18, 사용자 데이터 사본 86MB · 카드 2,771장, 격리 개발 모드):
+
+| | 한 덩어리(~1801) | 카드마다(1802~) |
+|---|---|---|
+| 카드 하나 바꿈 | 86MB 다시 씀 · 화면 555ms 멈춤 (배포판 ≈265ms) | root 0.2MB + 카드 하나 · 멈춤 0 |
+| MCP 20건 · 60초 | 86MB × 34번 · 멈춤 합 27초 · 가장 긴 1초 | 작은 쓰기 79번 8MB · 쓰기가 붙든 시간 합 48ms · 남은 멈춤은 화면 그리기(개발 모드 React) |
+| 켤 때 읽기 | 한 덩어리 | 2,807칸 76.6MB 읽기 395ms + 해석 74ms |
+
+root 는 생성 상태가 바뀔 때마다 그 프로젝트의 `updatedAt` 때문에 다시 써진다(0.2MB · ≈1ms — 그대로 둠). 마지막 저장이 화면을 150ms 넘게
+붙들었으면 다음 저장은 4초 뒤(통째 저장 직후 몰아칠 때). 깨진 칸은 원본을 백업 폴더에 `UNREADABLE` 로 남기고 백업에서 되살린다(예전과 같은 길).
+보낸 문장(`apiPrompt`)이 보이는 프롬프트와 같으면 카드에 넣지 않는다(1,019장 · 9.7MB 가 그냥 사본이었다 — 켤 때 한 번 정리).
+시험: scratchpad `split\test-records.mts`(실제 백업으로 나누기 · 모으기 · 바꿈마다 쓰는 칸) · `split\t-split.mjs`(격리 앱: 백업에서 되살림 → 옮김 ·
+카드 하나 · MCP 20건 · 다시 켜기 · 1801 로 되돌림 → 다시 1802 · root 깨뜨림).
 
 백업 미러를 **언제** 쓰나(26.10.701~, `src/lib/backup-clock.ts`):
 
@@ -1418,6 +1432,20 @@ R2 에 올린다. 미리보기 JPG 는 화면에만 — 크기·품질을 바꾸
     `src/main.tsx` 가 `?mini` 면 `App` 대신 `MiniApp` 만 동적으로 들인다. 미니 창이 알아야 할 것은 본창이 `mini-feed.ts` 로 추려 보내고,
     미니 창이 하는 일(그 카드로 · 본창 열기 · 크기)은 `mini:action` 으로 본 프로세스에 맡긴다. 보내기 · 과금 코드 · 백업은 계속 본창 화면이 한다
     (숨겨도 `backgroundThrottling:false`). 자리 나누기 파일(`mini-dock`)의 칸은 나노바나나도 읽으므로 **지우거나 뜻을 바꾸지 말고 더하기만**.
+55. **밖(에이전트 · 로컬 API · MCP)에서 오는 글자 칸은 `src/lib/agent-input.ts` 한 곳에서 보고, 틀리면 고쳐 받지 말고 거절 + 이유**(26.11.1802~).
+    2026-11-18 나노바나나 사고: 에이전트가 PowerShell 5.1 로 `Get-Content` 한 글자를 그대로 `ConvertTo-Json` 하자 글자에 숨어 붙은
+    PSPath · PSProvider … 까지 객체로 나가(-Depth 4 면 40자 → 38만 자, -Depth 6 이면 4,700만 자) 프로젝트 파일이 2GB 가 됐다. 시댄스는
+    프롬프트는 막혀 있었지만 설정 ratio · 작업 name · 명령의 이름 · 설명은 `String()` 으로 받아 '[object Object]' 가 실제로 생겼다.
+    지금: 코드 `bad_prompt` · `prompt_too_long`(5만 자) · `bad_field` · `too_long` · `powershell_object`(몸통 어디든 — 그 자리 +
+    `[string]` 힌트) · `body_too_large`(`/api/agent` 1MB, 전역 200MB 보다 **먼저** 등록) · `bad_json`. 숫자를 글자로 바꿔 주지도 않는다.
+    서버(`server.ts`)와 화면(ChatArea 에이전트 명령 · agent-inbox `agentSettings`)이 같은 함수를 쓴다 — 그 파일은 서버 번들에도 들어가니
+    UI · 스토어를 들이지 말 것. 화면 작성 칸은 막지 않는다(사람이 친 5만 자 넘는 프롬프트가 실제로 있다). 시험 scratchpad `minitest\ps-probe2.ps1`.
+56. **작업 기록은 카드마다 한 칸**(26.11.1802~, `src/lib/state-records.ts` · store.ts `writeState`). 한 덩어리(`seedance-app-storage`)로
+    쓸 때는 무엇이 바뀌든 86MB 를 다시 써 MCP 로 몰아 보내면 1분에 ≈9초 멈췄다(§4-1 실측). 지킬 것:
+    - 옛 키가 있으면 **그쪽이 더 새 것**이다(옛 판으로 되돌렸다 온 PC) — 읽고 통째로 다시 옮긴 뒤 지운다. 옛 키를 지우는 곳은 통째 저장이 **끝난 뒤** 한 곳.
+    - 한 저장 = 한 트랜잭션(바뀐 카드 + root + 지운 카드). 저장은 한 줄로(`stateWriteChain`) — `written` 이 맞아야 다음 '바뀐 것' 을 고른다.
+    - 바뀐 카드는 **참조로** 안다 — 위 '제자리 수정 금지' 가 여기서도 전제다.
+    - 문서 폴더 백업 파일은 모양 그대로(`persistJson` = `JSON.stringify` 와 바이트까지 같음). 그래서 옛 판으로 되돌리면 그 판은 백업에서 되살린다.
 
 ---
 

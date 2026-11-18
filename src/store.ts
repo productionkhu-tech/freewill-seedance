@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
-import { get, set, del, keys } from 'idb-keyval';
+import { get, set, del, keys, createStore, promisifyRequest, entries as idbEntries, clear as idbClear } from 'idb-keyval';
+import { RECORDS_DB, RECORDS_STORE, planRecords, assembleRecords, type Written } from './lib/state-records';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail, makeJpegPreview } from './lib/utils';
 import { MODEL_GRANTS, FOUR_K_GRANTS, resolveModelId , brandOf } from './lib/model-access';
 import { PERSONAL, PERSONAL_BILLING, BACKUP_FOLDER } from './lib/edition';
@@ -79,6 +80,83 @@ export function persistJson(value: StorageValue<unknown>): string {
     }
   }
   return out;
+}
+// 26.11.1802~ 앱 안 저장(IDB)은 아래 카드별 칸으로 간다. persistJson 은 문서 폴더 백업(한 파일 — 모양 그대로)이 쓴다.
+
+// ─── 앱 안 저장 = 카드마다 한 칸 (26.11.1802~, 이유는 lib/state-records.ts 머리말) ──────────────────────────────
+const recordsStore = createStore(RECORDS_DB, RECORDS_STORE);
+// 디스크의 칸이 지금 무엇인가. 읽어 온 칸(getItem)이나 마지막으로 끝난 저장이 채운다.
+let written: Written = { root: null, msgs: new Map() };
+// 디스크의 칸이 지금 기록과 맞는지 모름 — 처음 켬 · 옛 한 덩어리 키에서 읽음 · 백업에서 되살림 · 칸을 못 읽음. 그러면 다음 저장은
+// 칸을 비우고 통째로 쓴 뒤 옛 키를 지운다(한 번).
+let recordsNeedFull = true;
+// 읽을 때 본, root 가 가리키지 않는 칸 — 다음 저장 때 지운다.
+let strayKeys: string[] = [];
+// 통째 저장이 끝났는데 옛 한 덩어리 키를 아직 못 지움 — 저장마다 다시 지운다.
+let legacyKeyPending = false;
+// 저장은 한 줄로 — 앞 저장이 끝나야(written 이 맞아야) 다음 저장의 '바뀐 것' 을 고를 수 있다.
+let stateWriteChain: Promise<void> = Promise.resolve();
+// 마지막 저장이 화면(메인 스레드)을 붙든 시간. 느렸으면 다음 저장을 늦춘다(setItem).
+let lastSaveSyncMs = 0;
+const SLOW_SAVE_MS = 150;
+const SLOW_DEBOUNCE_MS = 4000;
+let lastSaveFailNoticeAt = 0;
+
+function writeState(name: string, value: StorageValue<unknown>): Promise<void> {
+  stateWriteChain = stateWriteChain.catch(() => {}).then(() => writeStateNow(name, value));
+  return stateWriteChain;
+}
+
+async function writeStateNow(name: string, value: StorageValue<unknown>): Promise<void> {
+  if (persistBlocked) return;   // 읽지 못한 기록을 지키는 중
+  const full = recordsNeedFull;
+  const t0 = performance.now();
+  let plan;
+  try {
+    plan = planRecords(value, written, cachedMsgJson, full);
+  } catch (err: any) {
+    // 카드 하나가 512MB(V8 글자 한도)를 넘을 일은 없다 — 이상한 프로젝트를 통째로 root 에 넣는 길에서만 가능. 조용히 멎지 않게 알린다.
+    console.error('[Persist] state serialize failed — NOT SAVED:', err?.message || err);
+    window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { ok: false,
+      msg: '기록이 너무 커져서 저장하지 못했습니다. 오래된 프로젝트를 정리해 주세요 — 지금 작업분이 다음 실행 때 사라질 수 있습니다.' } }));
+    return;
+  }
+  const dels = full ? [] : [...plan.dels, ...strayKeys];
+  if (!full && !plan.puts.length && !dels.length) { written = { root: plan.rootJson, msgs: plan.next }; return; }
+  const strays = new Set(strayKeys);
+  let syncMs = performance.now() - t0;
+  try {
+    await recordsStore('readwrite', (s) => {
+      const t1 = performance.now();
+      if (full) s.clear();
+      for (const [k, v] of plan.puts) s.put(v, k);
+      for (const k of dels) s.delete(k);
+      syncMs += performance.now() - t1;
+      return promisifyRequest(s.transaction);
+    });
+  } catch (err: any) {
+    // 한 트랜잭션이라 실패하면 아무것도 안 들어갔다. written 을 그대로 두니 다음 저장이 같은 것을 다시 고른다.
+    lastSaveSyncMs = syncMs;
+    console.error('[Persist] 저장 실패 — 다음 저장 때 다시:', err?.name || '', err?.message || err);
+    if (Date.now() - lastSaveFailNoticeAt > 10 * 60 * 1000) {
+      lastSaveFailNoticeAt = Date.now();
+      window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { ok: false,
+        msg: `작업 기록을 앱 안에 저장하지 못했어요(${String(err?.name || err?.message || err).slice(0, 60)}). 디스크 공간을 확인해 주세요 — 계속 다시 시도합니다.` } }));
+    }
+    return;
+  }
+  lastSaveSyncMs = syncMs;
+  written = { root: plan.rootJson, msgs: plan.next };
+  strayKeys = full ? [] : strayKeys.filter((k) => !strays.has(k));
+  if (full) {
+    recordsNeedFull = false;
+    legacyKeyPending = true;
+    console.log(`[Persist] 카드별 칸으로 통째 저장: ${plan.puts.length}칸, ${Math.round(syncMs)}ms`);
+  }
+  // 옛 한 덩어리 키는 이제 낡았다 — 남겨 두면 다음에 켤 때 '더 새 것' 으로 읽힌다(getItem). 칸이 다 들어간 뒤에만 지운다.
+  if (legacyKeyPending) {
+    try { await del(name); legacyKeyPending = false; } catch (e) { console.warn('[Persist] 옛 키를 지우지 못함(다음 저장 때 다시):', e); }
+  }
 }
 
 // 작성 중 글(draftPrompt)만 바뀐 저장인가 — 그러면 늦게(DRAFT_DEBOUNCE_MS) 써서 타자 중에 저장이 끼지 않게. 창을 숨기거나 끌 때는
@@ -380,8 +458,8 @@ async function loadElementAssets(legacy: ElementAsset[]): Promise<ElementAsset[]
 // entire partialized blob synchronously inside every set() — the debounce only
 // covered the IDB write, not the stringify — so each slider commit / send / poll
 // write blocked the main thread for the full stringify of a multi-MB blob.
-// On-disk format is unchanged (same JSON string under the same key), so this is
-// fully backward/forward compatible with data written by older versions.
+// ★ 26.11.1802~ 앱 안 저장은 카드마다 한 칸(lib/state-records.ts) — 옛 키는 읽어서 옮기고 지운다(한 방향). 문서 폴더 백업 파일의
+//   모양은 그대로라 옛 판으로 되돌리면 그 판은 백업에서 되살린다(getItem 의 백업 길).
 // ── Where the disaster-recovery mirror goes ─────────────────────────────────
 // Same four operations, two transports. On Windows the packaged app talks to Electron
 // over IPC; in a browser (the Mac build runs as a local web app) there is no IPC, so it
@@ -475,7 +553,8 @@ function runBackup() {
   // Separated, the irreplaceable part is ~19MB and cannot be dragged over the
   // cliff by the library growing.
   try {
-    api.backupSave(JSON.stringify(v), 'state')
+    // persistJson = JSON.stringify(v) 와 바이트까지 같은 글을, 안 바뀐 카드는 캐시에서 이어 만든다(86MB 실측 458ms → 50ms).
+    api.backupSave(persistJson(v), 'state')
       .then((r: any) => {
         if (r?.ok) {
           backupFailures = 0; lastBackupError = ''; backupClock.ok();
@@ -619,27 +698,53 @@ const idbPersistStorage: PersistStorage<unknown> = {
     const parse = (raw: string): StorageValue<unknown> | null => {
       try { return JSON.parse(raw); } catch (e) { console.error('[Persist] stored state is unreadable:', e); return null; }
     };
+    // 읽는 차례(26.11.1802~): ① 옛 한 덩어리 키 — 있으면 그것이 가장 새 기록이다(1802 로 처음 켬, 또는 옛 판으로 되돌렸다 다시 옴).
+    // 다음 저장이 카드 칸으로 통째 옮기고 그 키를 지운다. ② 카드 칸. ③ 둘 다 없으면 문서 폴더 백업(아래, 예전 그대로).
     let fromIdb: string | undefined;
+    let records: [IDBValidKey, unknown][] = [];
+    recordsNeedFull = true;
     try {
       fromIdb = await get(name);
+      if (!fromIdb) records = await idbEntries(recordsStore);
     } catch (err) {
       console.error('[Persist] IndexedDB read failed:', err);
       blockPersist('작업 기록을 읽지 못했어요. 기록을 지키려고 이번 실행에서는 저장을 멈췄어요 — 트레이 아이콘에서 Quit 으로 완전히 끄고 다시 켜 주세요.');
       return null;
     }
     let unreadable = false, keptUnreadable = false;
+    // 읽지 못한 원본을 백업 폴더에 남긴다 — 아래에서 백업으로 덮기 전에(실패해도 백업 복원은 한다 — 백업은 같은 기록의 몇 분 전 사본이다).
+    const keepUnreadable = async (body: string) => {
+      try {
+        const r = await fetch('/api/backup/unreadable', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body });
+        keptUnreadable = r.ok;
+        if (!r.ok) console.warn('[Persist] could not keep the unreadable copy: HTTP', r.status);
+      } catch (e) { console.warn('[Persist] could not keep the unreadable copy:', e); }
+    };
     if (fromIdb) {
       const parsed = parse(fromIdb);
       if (parsed) return parsed;
       unreadable = true;
-      // 아래에서 백업으로 덮기 전에, 읽지 못한 원본을 백업 폴더에 남긴다(실패해도 백업 복원은 한다 —
-      // 백업은 같은 기록의 몇 분 전 사본이다).
+      await keepUnreadable(fromIdb);
+    } else if (records.length) {
       try {
-        const r = await fetch('/api/backup/unreadable', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: fromIdb });
-        keptUnreadable = r.ok;
-        if (!r.ok) console.warn('[Persist] could not keep the unreadable copy: HTTP', r.status);
-      } catch (e) { console.warn('[Persist] could not keep the unreadable copy:', e); }
+        const got = assembleRecords(records, (m, j) => { msgJson.set(m, j); });
+        if (got) {
+          written = got.written;
+          strayKeys = got.strays;
+          recordsNeedFull = false;
+          if (got.missing.length) console.error(`[Persist] root 가 가리키는 카드 칸 ${got.missing.length}개가 없어 빼고 열었다:`, got.missing.slice(0, 20));
+          if (got.strays.length) console.warn(`[Persist] 아무도 가리키지 않는 칸 ${got.strays.length}개 — 다음 저장 때 지운다`);
+          return got.value;
+        }
+      } catch (e) {
+        console.error('[Persist] 카드 칸 기록을 읽지 못함:', e);
+        unreadable = true;
+        let body = '';
+        try { body = JSON.stringify({ unreadableRecords: String(e), records: Object.fromEntries(records.map(([k, v]) => [String(k), v])) }); } catch { /* 너무 큼 — 아래 빈 글 */ }
+        if (body) await keepUnreadable(body);
+      }
     }
+    records = [];
     // IDB empty (fresh install / userData wiped) or unreadable — try external backup.
     try {
       const api = getBackupApi();
@@ -719,30 +824,10 @@ const idbPersistStorage: PersistStorage<unknown> = {
     writeTimer = setTimeout(() => {
       const w = pendingWrite; pendingWrite = null; pendingDraftOnly = false;
       if (!w) return;
-      // ★ try/catch, and it is not decoration. This is the SAME shape that killed the
-      // backup for a week: JSON.stringify throws RangeError SYNCHRONOUSLY once the string
-      // passes V8's 512MB ceiling, and a throw inside a setTimeout goes nowhere — no
-      // rejection to catch, no error boundary, nothing on screen. The write just stops
-      // happening while the app carries on looking perfectly healthy, and everything since
-      // is gone at the next launch.
-      // Measured on the real library (2026-07-31): 39.5KB per message → the ceiling lands
-      // at 13,581 messages, confirmed by binary search (20x fine at 389MB, 27x throws).
-      // At the current pace (503 in 3.5 months) that is ~7.7 years away — far, but the
-      // backup's version of this bug was also "years away" until the element library grew.
-      // So: never let it be silent. Tell the user, because the only real fix at that point
-      // is theirs — archive or delete old projects.
-      try {
-        set(w.name, persistJson(w.value));
-      } catch (err: any) {
-        console.error('[Persist] state serialize failed — NOT SAVED:', err?.message || err);
-        window.dispatchEvent(new CustomEvent('seedance:toast', {
-          detail: {
-            ok: false,
-            msg: '기록이 너무 커져서 저장하지 못했습니다. 오래된 프로젝트를 정리해 주세요 — 지금 작업분이 다음 실행 때 사라질 수 있습니다.',
-          },
-        }));
-      }
-    }, draftOnly ? DRAFT_DEBOUNCE_MS : DEBOUNCE_MS);
+      // 바뀐 카드만 쓴다(writeState — 실패 · 직렬화 오류는 안에서 알린다. 예전 한 덩어리 저장은 타이머 안에서 조용히 멎은 적이 있다).
+      void writeState(w.name, w.value);
+    // 마지막 저장이 화면을 오래 붙들었으면(통째 저장 · 아주 큰 카드) 몰아칠 때 횟수를 줄이려 늦게 쓴다.
+    }, draftOnly ? DRAFT_DEBOUNCE_MS : lastSaveSyncMs > SLOW_SAVE_MS ? SLOW_DEBOUNCE_MS : DEBOUNCE_MS);
 
     // 외부 백업 파일로 미러링.
     //
@@ -760,6 +845,9 @@ const idbPersistStorage: PersistStorage<unknown> = {
   removeItem: async (name: string): Promise<void> => {
     if (persistBlocked) return;   // 읽지 못한 기록을 지키는 중
     await del(name);
+    await idbClear(recordsStore);
+    written = { root: null, msgs: new Map() };
+    recordsNeedFull = true;
   },
 };
 
@@ -770,11 +858,12 @@ const idbPersistStorage: PersistStorage<unknown> = {
 export function flushPersist(): Promise<void> {
   if (persistBlocked) return Promise.resolve();   // 읽지 못한 기록을 지키는 중
   if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
-  if (!pendingWrite) return Promise.resolve();
+  // 기다리는 것이 없어도 쓰는 중인 저장은 기다린다(끄기 직전 · 받기 표시 직후 — 반쯤에서 끊기지 않게).
+  if (!pendingWrite) return stateWriteChain.catch(() => {});
   const w = pendingWrite;
   pendingWrite = null;
   pendingDraftOnly = false;
-  return set(w.name, persistJson(w.value));
+  return writeState(w.name, w.value);
 }
 
 // Safety net: flush whenever the window hides (minimize/tray) or unloads
@@ -934,6 +1023,7 @@ export interface ChatMessage {
   promptHtml?: string; // innerHTML snapshot (with mention pills) for exact 재사용 — element mentions are stored as bare names in promptText and can't be re-pillified from it
   apiPrompt?: string;  // BytePlus·구글에 실제로 보낸 문장(@hero → [Image 3], 옴니는 <IMAGE_REF_N>). 26.10.801~ 카드만 — 받은 영상의
                        // 설정(settings-box)에 참고로 싣는다. 되살리기는 promptHtml 로 한다.
+                       // 26.11.1802~ promptText 와 같으면 넣지 않는다(없음 = 같음, 801 이전 카드는 모름) — dropSameApiPrompt.
   usedElementImages?: { id: string; elementId: string; imageId: string; name: string; category: string; url: string }[]; // element-mention images shown on the card reference strip (url = thumbnail; full-res for hover-zoom is looked up live by elementId+imageId)
   usedCollection?: { id: string; name: string }; // 보낼 때 이 채팅에 연결돼 있던 어셋 컬렉션(26.10.801~) — 받은 영상에서 '그때 설정 그대로' 가 다시 연결한다
   downloadedAt?: number; // last time the user downloaded this video — flips the
@@ -3311,7 +3401,16 @@ function patchLoadedProject(p: Project, resetStaleDraft: boolean): Project {
   if (s.draft !== undefined && !modelSupportsDraft(s.model)) delete s.draft;
   if (resetStaleDraft && s.draft === false) delete s.draft;
   // Clear in-progress draft prompts on app restart (session-only persistence)
-  return { ...p, settings: s, draftPrompt: '', messages: closeOrphanCards(p.messages) };
+  return { ...p, settings: s, draftPrompt: '', messages: dropSameApiPrompt(closeOrphanCards(p.messages)) };
+}
+
+// 보낸 문장이 보이는 프롬프트와 똑같은 카드의 apiPrompt 를 뺀다(26.11.1802~). 2026-11-18 실측 1,019장 · 9.7MB 가 그냥 사본이었다.
+// 다를 때(@멘션 → [Image N] · <IMAGE_REF_N>)만 남아 '실제로 보낸 문장' 에 보인다. 새 카드는 send-request 가 처음부터 안 넣는다.
+// 바뀐 카드만 새 객체 — 첫 저장이 그 카드들만 한 번 고쳐 쓴다.
+function dropSameApiPrompt(messages: ChatMessage[]): ChatMessage[] {
+  const same = (m: ChatMessage) => typeof m?.apiPrompt === 'string' && m.apiPrompt === m.promptText;
+  if (!messages?.some(same)) return messages;
+  return messages.map(m => { if (!same(m)) return m; const { apiPrompt: _same, ...rest } = m; return rest; });
 }
 
 // ─── 백업에서 프로젝트·어셋 되살리기 (26.10.201~) ──────────────────────────────────

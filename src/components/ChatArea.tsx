@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fra
 import { markAgentMessages, setAgentInLine } from '../lib/agent-origin';
 import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, draftDaysOf, DRAFT_FINAL_RESOLUTION, DRAFT_FINAL_RESOLUTIONS, draftFinalLabel, allowedResolutions, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
+import { agentText, agentTextList, AGENT_LIMITS, AgentInputError, kindOf } from '../lib/agent-input';
 import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
 import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
@@ -891,8 +892,9 @@ const agentReportProgress = () => {
 // ★ server.ts 의 작업함(claim)도 같은 규칙으로 대상을 찾는다(코드가 없는 프로젝트의 작업은 내주지 않으려고) — 같이 고칠 것.
 const agentResolveProject = (projectId: unknown, name: unknown, what = '보낼 프로젝트') => {
   const st = useAppStore.getState();
-  const id = typeof projectId === 'string' ? projectId.trim() : '';
-  const n = typeof name === 'string' ? name.trim() : '';
+  // 글자가 아니면 '없다' 고 하지 않고 이유를(26.11.1802~, src/lib/agent-input.ts)
+  const id = (agentText(projectId, 'projectId', { max: AGENT_LIMITS.id }) || '').trim();
+  const n = (agentText(name, 'project', { max: AGENT_LIMITS.name }) || '').trim();
   if (id) {
     const p = st.projects.find(x => x.id === id);
     if (!p) throw new Error(`프로젝트를 찾지 못했습니다(id ${id}) — 지워졌을 수 있습니다. projects.list 로 다시 확인해 주세요.`);
@@ -3823,14 +3825,13 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
 
   const agentFindCollection = (ref: unknown) => {
     const st = useAppStore.getState();
-    const s = String(ref ?? '').trim();
-    if (!s) throw new Error('collection 이 비었습니다');
+    const s = agentText(ref, 'collection', { max: AGENT_LIMITS.name, required: true })!.trim();
     const c = st.assetCollections.find(x => x.id === s) || st.assetCollections.find(x => mentionKey(x.name) === mentionKey(s));
     if (!c) throw new Error(`컬렉션을 찾지 못했습니다: ${s}\n(있는 컬렉션: ${st.assetCollections.map(x => x.name).join(', ') || '없음'})`);
     return c;
   };
   const agentFindCard = (ref: unknown) => {
-    const s = String(ref ?? '');
+    const s = agentText(ref, 'id', { max: AGENT_LIMITS.id, required: true })!;
     for (const p of useAppStore.getState().projects) {
       const m = p.messages.find(x => x.id === s);
       if (m) return { project: p, card: m as any };
@@ -3875,7 +3876,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const agentCardNow = (pid: string, id?: string) => useAppStore.getState().projects.find(x => x.id === pid)?.messages.find(x => x.id === id);
   // 경로의 이미지들 → 엘리먼트 이미지(화면 등록과 같은 검사 · 썸네일 · 원본 보관, fileToElementImage).
   const agentElementImages = async (paths: unknown) => {
-    const list = Array.isArray(paths) ? paths.map(String) : [];
+    const list = agentTextList(paths, 'images', { max: AGENT_LIMITS.path, maxItems: 50 });
     const out = [];
     for (const p of list) {
       const { file } = await agentFileFromPath(p);
@@ -3914,12 +3915,13 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       return { project: p.name };
     },
     'project.create': async (a) => {
-      const name = String(a.name || '').trim();
-      if (!name) throw new Error('name 이 비었습니다');
+      // 이름 · 그룹은 글자만(26.11.1802~) — String() 으로 받던 때 객체가 오면 '[object Object]' 라는 프로젝트가 생겼다(11/18 격리 시험).
+      const name = agentText(a.name, 'name', { max: AGENT_LIMITS.name, required: true })!.trim();
+      const group = agentText(a.group, 'group', { max: AGENT_LIMITS.name });
       const st = useAppStore.getState();
       let gid: string | undefined;
-      if (a.group) {
-        const g = st.projectGroups.find(x => x.id === a.group || mentionKey(x.name) === mentionKey(String(a.group)));
+      if (group) {
+        const g = st.projectGroups.find(x => x.id === group || mentionKey(x.name) === mentionKey(group));
         if (!g) throw new Error(`그룹을 찾지 못했습니다: ${a.group}\n(있는 그룹: ${st.projectGroups.map(x => x.name).join(', ') || '없음'})`);
         gid = g.id;
       }
@@ -3965,8 +3967,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       }));
     },
     'collection.create': async (a) => {
-      const name = String(a.name || '').trim();
-      if (!name) throw new Error('name 이 비었습니다');
+      const name = agentText(a.name, 'name', { max: AGENT_LIMITS.name, required: true })!.trim();
       const st = useAppStore.getState();
       const have = st.assetCollections.find(c => mentionKey(c.name) === mentionKey(name));
       if (have) return { id: have.id, name: have.name, existed: true };
@@ -3981,12 +3982,18 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     },
     'elements.add': async (a) => {
       const c = agentFindCollection(a.collection);
+      if (a.items !== undefined && !Array.isArray(a.items)) throw new AgentInputError('bad_field', `items 칸은 배열이어야 합니다(받은 것: ${kindOf(a.items)}).`);
       const items: any[] = Array.isArray(a.items) ? a.items : [];
       if (!items.length) throw new Error('items 가 비었습니다');
       const added: unknown[] = [], skipped: unknown[] = [], failed: unknown[] = [];
       for (const it of items) {
-        const name = String(it?.name || '').trim();
-        const category = String(it?.category || 'character');
+        // 이름 · 종류 · 설명은 글자만 · 길이 상한(26.11.1802~). 한 개가 틀리면 그 개만 실패로 돌려준다(예전과 같은 모양).
+        let name = '', category = 'character', description = '';
+        try {
+          name = (agentText(it?.name, 'name', { max: AGENT_LIMITS.name }) || '').trim();
+          category = agentText(it?.category, 'category', { max: AGENT_LIMITS.short }) || 'character';
+          description = agentText(it?.description, 'description', { max: AGENT_LIMITS.description }) || '';
+        } catch (e: any) { failed.push({ name: typeof it?.name === 'string' ? it.name.slice(0, 80) : '(이름 아님)', error: e?.message || String(e) }); continue; }
         if (!name) { failed.push({ name: '(이름 없음)', error: 'name 이 없습니다' }); continue; }
         if (!(category in CATEGORY_META)) { failed.push({ name, error: `category 는 ${Object.keys(CATEGORY_META).join(' / ')}` }); continue; }
         // 컬렉션 안에서 이름은 하나 — 멘션이 이름으로 찾기 때문이다(ElementLibrary 의 등록 규칙과 같다).
@@ -3997,7 +4004,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         if (paths.length > MAX_ELEMENT_IMAGES) { failed.push({ name, error: `이미지는 ${MAX_ELEMENT_IMAGES}장까지` }); continue; }
         try {
           const images = await agentElementImages(paths);
-          useAppStore.getState().addElementAsset({ collectionId: c.id, category: category as AssetCategory, name, description: String(it?.description || ''), images });
+          useAppStore.getState().addElementAsset({ collectionId: c.id, category: category as AssetCategory, name, description, images });
           const made = useAppStore.getState().elementAssets.find(e => e.collectionId === c.id && mentionKey(e.name) === mentionKey(name));
           added.push({ name, id: made?.id, images: images.length });
         } catch (e: any) { failed.push({ name, error: e?.message || String(e) }); }
@@ -4007,21 +4014,24 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     'element.update': async (a) => {
       const c = agentFindCollection(a.collection);
       const st = useAppStore.getState();
-      const key = String(a.name || '');
+      const key = agentText(a.name, 'name', { max: AGENT_LIMITS.name, required: true })!;
       const e = st.elementAssets.find(x => x.collectionId === c.id && (x.id === key || mentionKey(x.name) === mentionKey(key)));
       if (!e) throw new Error(`엘리먼트를 찾지 못했습니다: ${key} (컬렉션 "${c.name}")`);
       const upd: Record<string, unknown> = {};
-      if (a.newName) {
-        const nn = String(a.newName).trim();
+      const newName = agentText(a.newName, 'newName', { max: AGENT_LIMITS.name });
+      const category = agentText(a.category, 'category', { max: AGENT_LIMITS.short });
+      const description = agentText(a.description, 'description', { max: AGENT_LIMITS.description, allowEmpty: true });
+      if (newName) {
+        const nn = newName.trim();
         const clash = st.elementAssets.find(x => x.collectionId === c.id && x.id !== e.id && mentionKey(x.name) === mentionKey(nn));
         if (clash) throw new Error(`컬렉션에 같은 이름이 있습니다: ${nn}`);
         upd.name = nn;
       }
-      if (a.category) {
-        if (!(String(a.category) in CATEGORY_META)) throw new Error(`category 는 ${Object.keys(CATEGORY_META).join(' / ')}`);
-        upd.category = a.category;
+      if (category) {
+        if (!(category in CATEGORY_META)) throw new Error(`category 는 ${Object.keys(CATEGORY_META).join(' / ')}`);
+        upd.category = category;
       }
-      if (a.description !== undefined) upd.description = String(a.description);
+      if (description !== undefined) upd.description = description;
       if (a.replaceImages) upd.images = await agentElementImages(a.replaceImages);
       else if (a.addImages) {
         const more = await agentElementImages(a.addImages);
@@ -4069,7 +4079,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       const { project: p, card: m } = agentFindCard(a.id);
       if (!m.usedSettings?.draft || m.status !== 'succeeded' || !m.taskId) throw new Error('완성된 초안(Draft) 카드만 본편을 만들 수 있습니다');
       // resolution: '1080p'(기본) | '4k'(26.11.1801~, 2.5 4K 권한이 있을 때만 — 없으면 makeFinalFromDraft 가 낮추지 않고 거절)
-      const r = a.resolution === undefined || a.resolution === null || a.resolution === '' ? undefined : String(a.resolution).toLowerCase();
+      const r = agentText(a.resolution, 'resolution', { max: AGENT_LIMITS.short })?.toLowerCase() || undefined;
       if (r !== undefined && !(DRAFT_FINAL_RESOLUTIONS as readonly string[]).includes(r)) throw new Error(`resolution 은 ${DRAFT_FINAL_RESOLUTIONS.join(' 또는 ')} 입니다`);
       const id = await agentMakeFinal(m.taskId, m, r);
       return { card: id, project: p.name, billing: agentCardBilling(agentCardNow(p.id, id)) };

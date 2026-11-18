@@ -757,7 +757,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
         if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
         const taskId = data.id || data.data?.task_id;
         if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-        useAppStore.getState().updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, apiPrompt: apiText });
+        useAppStore.getState().updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, ...(apiText !== plainText ? { apiPrompt: apiText } : {}) });
         useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
       } catch (error: any) {
         useAppStore.getState().updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
@@ -1061,9 +1061,11 @@ async function sendOmni(input: SendInput, bill: { project: string; id: string; k
     // 과금 프로젝트는 보낼 때 한 번 정한다(sendRequest 가 읽고 바로 위에서 다시 확인한 그 코드). 이름은 NCP 폴더,
     // id·key 는 이름이 바뀌어도 같은 프로젝트를 가리키는 값.
     const omniStorage = { project: bill.project, projectId: bill.id, projectKey: bill.key };
+    // 실제로 보낸 문장 — 보이는 프롬프트와 같으면 카드에 넣지 않는다(26.11.1802~, store.ts dropSameApiPrompt 주석).
+    const omniApiText: string | undefined = typeof payload?.input === 'string' ? payload.input : (payload?.input?.find?.((x: any) => x?.type === 'text')?.text ?? undefined);
     for (let i = 0; i < count; i++) {
       const id = crypto.randomUUID(); ids.push(id);
-      useAppStore.getState().addMessage(projectId, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, apiPrompt: typeof payload?.input === 'string' ? payload.input : (payload?.input?.find?.((x: any) => x?.type === 'text')?.text ?? undefined), usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, usedCollection: boundCollectionOf(projectId), videoStorage: omniStorage } as any);
+      useAppStore.getState().addMessage(projectId, { id, role: 'system', content: `Omni 생성 중... (${i + 1}/${count})`, status: 'running', startTime: Date.now(), promptText: userPrompt, promptHtml, ...(omniApiText !== undefined && omniApiText !== userPrompt ? { apiPrompt: omniApiText } : {}),usedSettings: settingsSnapshot, usedAssets: usedImgAssets, usedElementImages, usedCollection: boundCollectionOf(projectId), videoStorage: omniStorage } as any);
     }
     sentIds = ids;
     io.sent?.();

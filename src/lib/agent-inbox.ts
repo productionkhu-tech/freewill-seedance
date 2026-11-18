@@ -15,6 +15,7 @@ import {
   modeRefCaps, omniTaskRefCaps, settingsDefaultsFor, defaultSettings, GenerationMode, GenerationSettings,
 } from '../store';
 import { PICKABLE_MODELS } from '../store';
+import { kindOf, isPowerShellObject, POWERSHELL_HINT, AGENT_LIMITS } from './agent-input';
 import { resolveModelId } from './model-access';
 import { API_LIMITS } from './utils';
 
@@ -33,6 +34,15 @@ export const AGENT_FEATURES = ['send-any-project', 'agent_model_defaults'];
 // 비율은 일부러 검사하지 않는다 — BytePlus 가 작업을 만들기 전에 검증해 과금 없이 거절한다(HANDOFF '무과금 API 프로브').
 export function agentSettings(req: Record<string, unknown>): { next?: GenerationSettings; error?: string } {
   const has = (k: string) => req[k] !== undefined && req[k] !== null && req[k] !== '';
+  // 글자 칸은 글자만 · 숫자 칸은 숫자만(26.11.1802~) — String() 으로 받던 때 객체가 '[object Object]' 로 바뀌어 BytePlus 까지 나가고 카드에
+  // 남았다(ratio, 2026-11-18 격리 시험 minitestps-probe.ps1). 고쳐 받지 않고 거절 + 이유(src/lib/agent-input.ts).
+  for (const k of ['model', 'mode', 'omniTask', 'resolution', 'ratio', 'output_format']) {
+    if (has(k) && typeof req[k] !== 'string') return { error: `${k} 칸은 글자여야 합니다(받은 것: ${kindOf(req[k])}).${isPowerShellObject(req[k]) ? ' ' + POWERSHELL_HINT : ''}` };
+    if (has(k) && (req[k] as string).length > AGENT_LIMITS.short) return { error: `${k} 칸이 너무 깁니다(${(req[k] as string).length}자 — ${AGENT_LIMITS.short}자까지).` };
+  }
+  for (const k of ['duration', 'output_count']) {
+    if (has(k) && typeof req[k] !== 'number' && typeof req[k] !== 'string') return { error: `${k} 칸은 숫자여야 합니다(받은 것: ${kindOf(req[k])}).` };
+  }
   const modelList = `(있는 모델: ${PICKABLE_MODELS.map(x => x.id).join(', ')})`;
   if (!has('model')) return { error: `model 이 없습니다 — 앱의 설정을 따르지 않으므로 꼭 적어 주세요.\n${modelList}` };
   const model = resolveModelId(String(req.model));
