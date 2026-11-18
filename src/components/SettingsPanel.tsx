@@ -265,8 +265,9 @@ export function SettingsPanel() {
   // resolution:'1080p' returned 1920x1080). OMITTING it is what caps the output at 720p,
   // which is why extending a 4K clip came back 720p. Ratio picker hides; resolution stays.
   const omniRatioFromSource = isOmni && (omniTask === 'edit' || omniTask === 'extend');
-  // Live 4k permission for the selected billing project (sheet column F). Derived every
-  // render, so a grant/revoke lands as soon as the poll updates billingProjects.
+  // Live 2.5 4K permission for the selected billing project (sheet column F, 26.11.1801~ — allowedResolutions applies it
+  // only to gated models, so 2.0/Omni 4K never ask). Derived every render, so a grant/revoke lands as soon as the poll
+  // updates billingProjects.
   const allow4k = isFourKAllowed({ billingProjectKey, billingProjects });
   const resOptions = RESOLUTIONS.filter(r => allowedResolutions(settings.model, allow4k).includes(r.id));
   // '4k' is still the saved setting but isn't currently permitted. We deliberately do NOT
@@ -950,18 +951,18 @@ export function SettingsPanel() {
             <p className="text-[11px] text-amber-600 leading-snug -mt-2">
               {fourKBlockedReason === 'no-project'
                 ? '프로젝트 코드를 고르면 4K가 복원됩니다.'
-                : '이 프로젝트 코드는 4K 권한이 없습니다 · 전송 시 1080p'}
+                : '이 프로젝트 코드는 2.5 4K 권한이 없습니다 · 전송 시 1080p'}
             </p>
           )}
           {fourKHidden && (
             <p className="text-[11px] text-gray-400 leading-snug -mt-2">
               {fourKBlockedReason === 'no-project'
                 ? '프로젝트 코드를 고르면 4K가 목록에 나옵니다.'
-                : '4K는 이 프로젝트에 권한이 없어 목록에 없습니다 (크레딧 시트 · 4K 허용)'}
+                : '2.5 4K는 이 프로젝트 코드에 권한이 없어 목록에 없습니다 (크레딧 시트 F열 · 2.5 4K 허용)'}
             </p>
           )}
           {draftOn && (
-            <p className="text-[11px] text-gray-500 leading-snug -mt-2">Draft (480p) → 1080p</p>
+            <p className="text-[11px] text-gray-500 leading-snug -mt-2">Draft (480p) → 1080p{fourKAvailable ? ' · 4K' : ''}</p>
           )}
 
           {durationLockedToSource ? (

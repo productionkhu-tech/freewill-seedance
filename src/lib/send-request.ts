@@ -55,7 +55,7 @@ function recheckBeforePost(projectId: string, billingKey: string, model: string,
   }
   // 4K 권한은 BytePlus 크레딧 규칙이다 — Omni 는 묻지 않는다(allowedResolutions 한 곳이 안다). 여기서만 따로 봐서, 권한 없는 코드의 Omni 4K 가
   // 사람 · 에이전트 모두 "권한이 풀려" 로 실패했다(26.11.601, MCP 감사).
-  if (resolution === '4k' && !allowedResolutions(model, isFourKAllowed(bo)).includes('4k')) return `보내는 사이 4K 권한이 풀려 보내지 않았습니다.\n해상도를 낮춰 다시 보내 주세요.`;
+  if (resolution === '4k' && !allowedResolutions(model, isFourKAllowed(bo)).includes('4k')) return `보내는 사이 2.5 4K 권한이 풀려 보내지 않았습니다.\n해상도를 낮춰 다시 보내 주세요.`;
   return '';
 }
 
@@ -547,8 +547,8 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   const currentSettings = applyTaskConstraints(settings.model, settings.mode, { ...settings });
   // Clamp resolution up-front so the payload, the stored usedSettings, the card tag,
   // and 재사용 all agree on the value actually sent. Two things are enforced here:
-  //   · model capability (Fast/Mini have no 1080p; 4k is flagship-only)
-  //   · the live per-project 4k permission from the tracker sheet
+  //   · model capability (Fast/Mini/Flash have no 1080p/4k)
+  //   · the live per-project 2.5 4K permission from the tracker sheet (column F, 26.11.1801~ — 2.0 4K is open to all)
   // This is the ONLY place the 4k grant is enforced. The settings panel deliberately
   // never rewrites the setting when permission disappears — doing that mid-typing
   // would yank the config out from under the user. Instead it shows a locked chip and
@@ -560,7 +560,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
       const was4k = currentSettings.resolution === '4k';
       if (input.strictResolution) {
         warn(was4k
-          ? `프로젝트 코드 "${bill.project}" 는 4K 권한이 없어 보내지 않았습니다(낮춰 보내지 않습니다).\n해상도를 낮추거나, 4K 권한이 있는 코드로 바꿔 달라고 사람에게 말해 주세요.`
+          ? `프로젝트 코드 "${bill.project}" 는 2.5 4K 권한이 없어 보내지 않았습니다(낮춰 보내지 않습니다).\n해상도를 낮추거나, 2.5 4K 권한(크레딧 시트 F열)이 있는 코드로 바꿔 달라고 사람에게 말해 주세요.`
           : `${MODELS.find(m => m.id === currentSettings.model)?.name || '이 모델'} 에 없는 해상도(${currentSettings.resolution})라 보내지 않았습니다.`);
         return;
       }
@@ -568,7 +568,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
       // Write back ONLY now, so the panel visibly returns to the allowed tier once the
       // user actually sends — never while they're still composing.
       if (input.writeBack4k) useAppStore.getState().updateProjectSettings(project.id, { resolution: clamped });
-      if (was4k) warn(`4K 권한이 해제되어 ${clamped}로 전송합니다.`);
+      if (was4k) warn(`이 프로젝트 코드는 2.5 4K 권한이 없어 ${clamped}로 전송합니다.`);
     }
   }
   const currentAssets = [...assets];

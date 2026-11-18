@@ -189,7 +189,8 @@ export default function App() {
           .map((p: any) => {
             const id = String(p.id ?? p.project_id ?? '').trim();
             const project = String(p.project);
-            return { key: billingKeyOf({ id, project }), id, project, status: String(p.status), allow4k: p.allow4k === true, allow25: p.allow25 === true };
+            // allow4k25 = F열 '2.5 4K 허용'(26.11.1801~, GAS 가 정확 일치일 때만 true — 기본 꺼짐). 옛 GAS 는 이 필드가 없어 false(fail-closed).
+            return { key: billingKeyOf({ id, project }), id, project, status: String(p.status), allow4k: p.allow4k === true, allow25: p.allow25 === true, allow4k25: p.allow4k25 === true };
           });
         // Skip the store write (re-renders subscribers + re-serializes the persisted
         // blob) when the active list is unchanged — this runs every 60s.
@@ -205,7 +206,8 @@ export default function App() {
             || p.project !== prev[i]?.project
             || p.status !== prev[i]?.status
             || p.allow4k !== prev[i]?.allow4k
-            || p.allow25 !== prev[i]?.allow25);
+            || p.allow25 !== prev[i]?.allow25
+            || p.allow4k25 !== prev[i]?.allow4k25);
         if (changed) useAppStore.getState().setBillingProjects(active);
         // 선택은 이름이 아니라 key 로 유지한다. 이름만 바뀐 프로젝트는 선택된 채로 남고(알림만),
         // 목록에서 정말 사라졌을 때(종료)만 풀린다. 규칙은 store.ts / reconcileBillingSelection.

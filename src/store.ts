@@ -3,7 +3,7 @@ import { persist, type PersistStorage, type StorageValue } from 'zustand/middlew
 import { v4 as uuidv4 } from 'uuid';
 import { get, set, del, keys } from 'idb-keyval';
 import { showNotification, setCachedBlob, getCachedBlob, downloadViaProxy, buildDownloadFilename, API_LIMITS, storeLibraryImage, syncLibraryBackup, createThumbnail, makeJpegPreview } from './lib/utils';
-import { MODEL_GRANTS, resolveModelId , brandOf } from './lib/model-access';
+import { MODEL_GRANTS, FOUR_K_GRANTS, resolveModelId , brandOf } from './lib/model-access';
 import { PERSONAL, PERSONAL_BILLING, BACKUP_FOLDER } from './lib/edition';
 import { createBackupClock } from './lib/backup-clock';
 import { buildSettingsPayload, type SettingsPayload } from './lib/settings-box';
@@ -1333,7 +1333,11 @@ export function applyTheme(t: Theme) {
 //   · reference video AND audio ≤30.2s, per-clip and summed (API states both verbatim)
 const SEEDANCE_25 = {
   // 1080p added 2026-08-18 (BytePlus opened it; the 08-07 datasheet still said "not
-  // currently supported"). 4k remains 2.0-only, so nothing here needs the allow4k gate.
+  // currently supported").
+  // 4k added 26.11.1801. 2026-10-26 엔 "not supported for this account" 로 막혔고, 2026-11-17 무료 확인(해상도 통과 → 비율에서 거절)으로
+  // 우리 계정에 열린 것을 봤다. 문서: 4k = 10-bit H.265/HEVC(1080p 와 같은 계열), 초안 본편도 1080p 또는 4k.
+  // 4K 는 과금 프로젝트의 시트 F열('2.5 4K 허용', 기본 꺼짐)이 허락해야 한다 — FOUR_K_GRANTS(model-access.ts).
+  // Flash 는 아래에서 res 를 480/720 으로 덮어쓰므로 여기에 4k 를 더해도 Flash 엔 생기지 않는다.
   // ★ 1080p is NOT just a bigger 720p on this model. Measured on the real output:
   //   480p/720p → H.264 8-bit,           1080p → HEVC, profile Rext, yuv444p10le
   // The doc only promises "10-bit + H.265"; it is actually 4:4:4 Rext, a profile most
@@ -1342,7 +1346,7 @@ const SEEDANCE_25 = {
   // without HEVC support ever turns up, the failure is preview-only: the .mov still
   // downloads and opens in a real player. Do not "simplify" this back into a plain
   // resolution list without re-measuring playback.
-  res: ['480p', '720p', '1080p'],
+  res: ['480p', '720p', '1080p', '4k'],
   dur: [4, 30] as [number, number],
   imgMax: 30, vidMax: 10, audMax: 10,
   // BytePlus doc 2607688, video editing: "The reference video must be 4-30 seconds long."
@@ -1527,8 +1531,9 @@ export const MODELS: {
   // Permission lives in MODEL_GRANTS (src/lib/model-access.ts), not here — server.ts has
   // to read the same fact and must not import the store.
   { id: 'dreamina-seedance-2-5-260628', name: 'Seedance 2.5', ...SEEDANCE_25, guide: 'sd25-pe',
-    notes: ['초안(draft)이 기본 — 480p 로 먼저 보고, 고른 것만 앱 카드의 \'본편\' 으로 1080p 를 만든다(같은 시드·구도를 키운 것). 바로 최종이면 draft:false 와 해상도를 정한다.',
-      '1080p 는 HEVC 10-bit — mov(기본)는 4:4:4 라 일부 편집기·플레이어가 못 열고, mp4 는 4:2:0 이라 더 잘 열린다.'] },
+    notes: ['초안(draft)이 기본 — 480p 로 먼저 보고, 고른 것만 앱 카드의 \'본편\' 으로 1080p(또는 4K)를 만든다(같은 시드·구도를 키운 것). 바로 최종이면 draft:false 와 해상도를 정한다.',
+      '4K 는 과금 프로젝트에 2.5 4K 권한(크레딧 시트 F열 \'2.5 4K 허용\', 기본 꺼짐)이 있을 때만 — 없으면 낮추지 않고 거절한다. 4K 는 같은 길이 1080p 의 약 1.6배 값이다.',
+      '1080p · 4K 는 HEVC 10-bit — mov(기본)는 4:4:4 라 일부 편집기·플레이어가 못 열고, mp4 는 4:2:0 이라 더 잘 열린다.'] },
   // ── Seedance 2.5 Flash (BytePlus 정식 출시 2026-11-15) — 2.5 와 같은 기능을 더 싸게, 대신 720p 까지 · 초안 없음 · 레퍼런스 적게 ──
   // 문서(seedance-2-5 튜토리얼 · model-list · model-pricing, 2026-11-16 확인):
   //   해상도 480p · 720p 만(8-bit) — 1080p ✗ · 초안(draft) ✗ · 레퍼런스 이미지 10 · 영상 5 · 오디오 5(2.5 는 30 · 10 · 10)
@@ -1551,7 +1556,7 @@ export const MODELS: {
       '초안(draft)이 없다 — 바로 최종이다. 레퍼런스는 이미지 10 · 영상 5 · 오디오 5 까지(2.5 는 30 · 10 · 10).',
       '2.5 보다 약 2배 빠르다(720p 5초 실측 68초 vs 142초). 카메라 연출 · 장면 짜임은 2.5 가 낫다 — 시안 · 많이 뽑기는 Flash, 1080p 최종은 2.5 초안 → 본편.'] },
   { id: 'dreamina-seedance-2-0-260128', name: 'Seedance 2.0', guide: 'sd2-pe',
-    notes: ['4K 는 과금 프로젝트에 4K 권한이 있을 때만 — 없으면 낮추지 않고 거절한다. 4K 는 HEVC 10-bit 라 코덱이 없는 PC 에서는 미리보기가 안 될 수 있다.'] },
+    notes: ['4K 는 누구나 쓸 수 있다(26.11.1801~ 권한 없음). 4K 는 HEVC 10-bit 라 코덱이 없는 PC 에서는 미리보기가 안 될 수 있다.'] },
   { id: 'dreamina-seedance-2-0-fast-260128', name: 'Seedance 2.0 Fast', guide: 'sd2-pe',
     notes: ['빠른 시안용 — 1080p·4K 가 없다.'] },
   { id: 'dreamina-seedance-2-0-mini-260615', name: 'Seedance 2.0 Mini', guide: 'sd2-pe' },
@@ -1787,7 +1792,10 @@ export function omniTaskRefCaps(model: string, task: string): { image: number; v
 // ── 초안 모드 ────────────────────────────────────────────────────────────────────────
 // 두 해상도는 문서가 못 박은 값이다 — 둘 다 "다른 값을 넣으면 에러" 라고 적혀 있다.
 export const DRAFT_RESOLUTION = '480p';
-export const DRAFT_FINAL_RESOLUTION = '1080p';
+export const DRAFT_FINAL_RESOLUTION = '1080p';   // 본편 기본
+// 본편으로 고를 수 있는 해상도(문서: "1080p or 4K. Setting another resolution causes an error"). 4k 는 FOUR_K_GRANTS 권한이 있을 때만(26.11.1801~).
+export const DRAFT_FINAL_RESOLUTIONS = ['1080p', '4k'] as const;
+export const draftFinalLabel = (res: string) => (res === '4k' ? '4K' : res);
 // 초안 task id 를 본편에 쓸 수 있는 기간은 '만든 때' 로 정해진다.
 // 처음엔 created_at 부터 7일(문서 명시). 2026-10-28 BytePlus 담당자 알림: 그날 저녁부터 만든 초안은 14일, 그 전에 만든 것은
 // 소급 없이 7일 그대로. 바뀌는 시각을 넉넉하게 2026-10-29 09:00 KST 로 잡는다(사용자: "내일 아침에 맞춰서") — 그 사이 몇 시간치는
@@ -2103,7 +2111,7 @@ export function modelProvider(model: string): 'byteplus' | 'gemini' {
 // Structural capability. Verified live against the API 2026-07-27 (BytePlus validates
 // `resolution` before creating a task, so this was probed at zero cost):
 //   flagship 2.0 → 480p/720p/1080p/4k   ·   fast → no 4k   ·   mini → no 1080p
-// The docs also state "4k: Only supported by Seedance 2.0".
+// The docs then stated "4k: Only supported by Seedance 2.0" — 2.5 got 4k later (its own res list, 26.11.1801).
 //
 // ★ The hydration clamp MUST use this one, never allowedResolutions. Hydration runs at
 // boot, before the tracker list has been checked (and a project may have no code yet) → the 4k
@@ -2118,14 +2126,19 @@ export function modelResolutions(model: string): string[] {
   return ['480p', '720p', '1080p', '4k'];
 }
 
-// Structural ∩ policy. 4k is gated on the billing project's "4K 허용" column in the
-// tracker sheet — but that column is a BYTEPLUS credit control, and Gemini Omni bills to
-// Google on a different key entirely, so the gate does not apply to it (owner's call,
-// 2026-08-28). Among BytePlus models only the flagship 2.0 has '4k' structurally, so
-// Fast/Mini still can't gain it no matter what allow4k says.
-export function allowedResolutions(model: string, allow4k: boolean): string[] {
-  if (modelProvider(model) === 'gemini') return modelResolutions(model);
-  return modelResolutions(model).filter(r => r !== '4k' || allow4k);
+// Structural ∩ policy. 4k is gated only for models in FOUR_K_GRANTS (model-access.ts) — 26.11.1801~ that is Seedance 2.5,
+// on the billing project's sheet column F ('2.5 4K 허용', default off). Every other model with 4k structurally (2.0, Omni)
+// offers it to everyone: 2.0 4K was opened to all (사용자 11/18 "2.0 4k 는 이제 그냥 풀고"), and Omni bills to Google on a
+// different key so the BytePlus credit gate never applied to it (owner's call, 2026-08-28). Fast/Mini/Flash still can't
+// gain 4k — it isn't in their structural list.
+// allow4k25 = 그 과금 프로젝트의 '2.5 4K' 권한(isFourKAllowed). 이름은 옛 그대로 두고 뜻만 좁혔다 — 부르는 곳이 여럿이라.
+export function allowedResolutions(model: string, allow4k25: boolean): string[] {
+  const gated = !!FOUR_K_GRANTS[resolveModelId(model)];
+  return modelResolutions(model).filter(r => r !== '4k' || !gated || allow4k25);
+}
+// 이 모델의 4K 가 시트 권한을 따지는가(2.5 → true · 2.0/Omni → false). 화면 문구 · 에이전트 설명서가 쓴다.
+export function fourKNeedsGrant(model: string): boolean {
+  return !!FOUR_K_GRANTS[resolveModelId(model)] && modelResolutions(model).includes('4k');
 }
 
 // Step DOWN to the nearest allowed tier (4k→1080p→720p→480p) rather than snapping to a
@@ -2164,8 +2177,9 @@ export interface BillingProject {
   id: string;           // '' = POS 밖의 트래커 전용 프로젝트
   project: string;      // 지금 이름
   status: string;
-  allow4k?: boolean;
+  allow4k?: boolean;    // 옛 필드(2.0 4K 권한) — 26.11.1801~ 읽지 않는다. GAS 는 옛 앱을 위해 늘 true 로 준다
   allow25?: boolean;
+  allow4k25?: boolean;  // 2.5 4K 권한 — 시트 F열 '2.5 4K 허용'(기본 꺼짐, 26.11.1801~)
 }
 export function billingKeyOf(p: { id?: string; project: string }): string {
   return p.id ? String(p.id) : 'name:' + p.project;
@@ -2240,15 +2254,16 @@ export function billingProjectOfDraft(
   return { hasOrigin, bill };
 }
 
-// Is 4k unlocked for this billing project(프로젝트 코드 — 부르는 쪽이 그 프로젝트의 key 를 넣는다, billingOf)? Always derived, never
-// stored — so a grant/revoke in the sheet takes effect the moment the poll lands, with
-// no second copy of the truth to keep in sync. Fail-closed: no project selected, project
-// missing from the list, or field absent (older tracker) → false.
+// Is GATED 4k (FOUR_K_GRANTS — 26.11.1801~ Seedance 2.5 only) unlocked for this billing project(프로젝트 코드 — 부르는 쪽이 그 프로젝트의
+// key 를 넣는다, billingOf)? The answer is fed to allowedResolutions / clampResolution, which apply it only to gated models — 2.0 4K
+// no longer asks. Always derived, never stored — so a grant/revoke in the sheet takes effect the moment the poll lands, with
+// no second copy of the truth to keep in sync. Fail-closed: no project selected, project missing from the list, or field
+// absent (GAS older than the 2.5 4K change) → false.
 export function isFourKAllowed(state: {
   billingProjectKey: string;
   billingProjects: BillingProject[];
 }): boolean {
-  return findBillingProject(state.billingProjects, state.billingProjectKey)?.allow4k === true;
+  return findBillingProject(state.billingProjects, state.billingProjectKey)?.allow4k25 === true;
 }
 
 // Is this model permitted for the selected billing project? Models without a grant are

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment, memo, type MouseEvent as ReactMouseEvent } from 'react';
 import { markAgentMessages, setAgentInLine } from '../lib/agent-origin';
-import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, draftDaysOf, DRAFT_FINAL_RESOLUTION, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
+import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, draftDaysOf, DRAFT_FINAL_RESOLUTION, DRAFT_FINAL_RESOLUTIONS, draftFinalLabel, allowedResolutions, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
@@ -1066,8 +1066,17 @@ export function draftLeftLabel(expiresAt: number, now = Date.now()): string {
 // Draft → 본편 버튼. 카드는 memo 라 앱을 켜 둔 채로는 다시 그려지지 않는다 — 남은 기간 글자('11/12까지' →
 // '5시간 남음')와 만료(버튼 → '본편 불가')가 제때 바뀌게, 다음에 글자가 바뀌는 때에 맞춰 스스로 다시 그린다.
 // 잠자기에서 깨면 타이머가 늦을 수 있어 길어도 1시간마다 다시 본다. 누를 때도 makeFinalFromDraft 가 한 번 더 막는다.
-function DraftFinalButton({ msg, onMake }: { msg: ChatMessage; onMake: () => void }) {
+function DraftFinalButton({ msg, made = [], onMake }: { msg: ChatMessage; made?: string[]; onMake: (res: string) => void }) {
   const exp = draftExpiresAt(msg);
+  // 4K 본편(26.11.1801~): 이 초안을 만든 과금 프로젝트(없으면 지금 코드)에 2.5 4K 권한(시트 F열)이 있을 때만 보인다 — makeFinalFromDraft 와 같은 규칙.
+  // 카드는 memo 지만 이 버튼은 스토어를 직접 구독하므로, 시트에서 권한을 켜고 끄면 60초 확인이 닿는 대로 나타나고 사라진다.
+  const can4k = useAppStore(s => {
+    const model = resolveModelId(msg.usedSettings?.model || '');
+    if (!modelResolutions(model).includes('4k')) return false;
+    const origin = billingProjectOfDraft(s.billingProjects, msg.videoStorage);
+    const bill = origin.hasOrigin ? origin.bill : projectBilling(s);
+    return !!bill && allowedResolutions(model, isFourKAllowed({ billingProjectKey: bill.key, billingProjects: s.billingProjects })).includes('4k');
+  });
   const [tick, setTick] = useState(0);
   const left = exp - Date.now();
   useEffect(() => {
@@ -1080,13 +1089,27 @@ function DraftFinalButton({ msg, onMake }: { msg: ChatMessage; onMake: () => voi
   if (left <= 0) return (
     <span title={`이 Draft는 만든 뒤 ${draftDaysOf(msg)}일까지만 본편으로 만들 수 있었습니다`} className="text-[12px] text-gray-400 whitespace-nowrap shrink-0 px-1">Draft 만료 · 본편 불가</span>
   );
+  // 두 버튼은 같은 모양(사용자 11/18 "4k 본편 버튼이랑 1080p 버튼 UI 가 너무 다르다" → "버튼은 같되 색은 좀 달라도") — 색만 다르고(4K 는 주황),
+  // 남은 기간은 버튼 밖에 한 번만.
+  const btn = 'flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border transition-all whitespace-nowrap shrink-0 text-white active:scale-95';
+  const btn1080 = `${btn} border-indigo-500 bg-indigo-500 hover:bg-indigo-600`;
+  const btn4k = `${btn} border-orange-500 bg-orange-500 hover:bg-orange-600`;
   return (
-    <button onClick={onMake}
-      title={`구도·길이·비율은 이 Draft 그대로 두고 1080p 로 다시 그립니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
-      className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-lg border border-indigo-500 transition-all whitespace-nowrap shrink-0 text-white bg-indigo-500 hover:bg-indigo-600 active:scale-95">
-      <Sparkles size={14} /> 1080p 본편 만들기
-      <span className="text-[11px] font-normal text-white/75">{draftLeftLabel(exp)}</span>
-    </button>
+    <div className="flex items-center gap-1.5 shrink-0">
+      {!made.includes('1080p') && <button onClick={() => onMake(DRAFT_FINAL_RESOLUTION)} data-draft-final="1080p"
+        title={`구도·길이·비율은 이 Draft 그대로 두고 1080p 로 다시 그립니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
+        className={btn1080}>
+        <Sparkles size={14} /> 1080p 본편
+      </button>}
+      {can4k && !made.includes('4k') && (
+        <button onClick={() => onMake('4k')} data-draft-final="4k"
+          title={`구도·길이·비율은 이 Draft 그대로 두고 4K 로 다시 그립니다 — 같은 길이 1080p 의 약 1.6배 값입니다.\n4K 는 HEVC 10-bit 라 일부 플레이어에서 안 열릴 수 있습니다.\n이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다.`}
+          className={btn4k}>
+          <Sparkles size={14} /> 4K 본편
+        </button>
+      )}
+      <span className="text-[11px] text-gray-400 whitespace-nowrap shrink-0" title={`이 Draft는 ${formatStampFull(exp)} 까지 본편으로 만들 수 있습니다`}>{draftLeftLabel(exp)}</span>
+    </div>
   );
 }
 
@@ -1217,7 +1240,8 @@ function PairLink({ toDraft, other, onGo }: { toDraft: boolean; other: any; onGo
         : 'border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100/70'}`}>
       <PairThumb m={other} />
       <span className={`text-[12px] font-semibold whitespace-nowrap ${toDraft ? 'text-amber-700' : 'text-indigo-600'}`}>
-        {toDraft ? '원본 Draft' : running ? '본편 만드는 중' : '본편'}
+        {/* 본편은 해상도를 붙인다 — 한 초안에 1080p · 4K 본편이 둘 다 있을 수 있다(26.11.1801~) */}
+        {toDraft ? '원본 Draft' : `${draftFinalLabel(other.usedSettings?.resolution || DRAFT_FINAL_RESOLUTION)} 본편${running ? ' 만드는 중' : ''}`}
       </span>
       <span className="text-[11px] text-gray-400 tabular-nums whitespace-nowrap">{formatStamp(other.timestamp)}</span>
       {toDraft ? <ArrowUp size={13} className="text-amber-500 shrink-0" /> : !running && <ArrowDown size={13} className="text-indigo-500 shrink-0" />}
@@ -1619,10 +1643,10 @@ export type CardActions = {
   toggleStar: (id: string, next: boolean) => void;
   handleVideoDownload: (id: string, url: string, taskId: string) => unknown;
   revealDownloaded: (p?: string) => void;
-  makeFinalFromDraft: (taskId: string, m: any) => unknown;
+  makeFinalFromDraft: (taskId: string, m: any, onStartFailed?: (f: { error: string; unsure: boolean }) => void, finalRes?: string) => unknown;
 };
-const MessageCard = memo(function MessageCard({ msg, projectId, divider, dividerCount, draftOther, finalOther, elementImageUrlById, isGenerating, actions }: {
-  msg: any; projectId: string; divider: boolean; dividerCount: number; draftOther?: any; finalOther?: any;
+const MessageCard = memo(function MessageCard({ msg, projectId, divider, dividerCount, draftOther, finals, elementImageUrlById, isGenerating, actions }: {
+  msg: any; projectId: string; divider: boolean; dividerCount: number; draftOther?: any; finals?: any[];
   elementImageUrlById: Map<string, { preview: string; original: string; path?: string }>; isGenerating: boolean; actions: { current: CardActions };
 }) {
   const isDraft = !!msg.usedSettings?.draft;
@@ -1654,8 +1678,15 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
               {draftOther && (
                 <PairLink toDraft other={draftOther} onGo={() => actions.current.scrollToMessage(draftOther.id)} />
               )}
-              {isDraft && msg.taskId && finalOther && (
-                <PairLink toDraft={false} other={finalOther} onGo={() => actions.current.scrollToMessage(finalOther.id)} />
+              {isDraft && msg.taskId && !!finals?.length && (
+                // 1080p · 4K 본편이 둘 다 있으면 한 줄에 나란히(좁으면 아래로)
+                <div className="flex flex-wrap gap-2">
+                  {finals.map(f => (
+                    <div key={f.id} className="contents">
+                      <PairLink toDraft={false} other={f} onGo={() => actions.current.scrollToMessage(f.id)} />
+                    </div>
+                  ))}
+                </div>
               )}
               {(msg.usedAssets?.length > 0 || (msg.usedElementImages as any)?.length > 0) && (
                 <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
@@ -1818,10 +1849,11 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                   {/* Draft → 본편 만들기 버튼. 이미 만든 본편으로 가는 길(과 본편에서 Draft 로
                       돌아가는 길)은 카드 맨 위의 짝 줄(PairLink)이 맡는다. */}
                   {isDraft && msg.taskId && (() => {
-                    // 본편이 이미 있으면(만드는 중 포함) 여기엔 아무것도 없다 — 카드 맨 위의
-                    // 짝 줄(PairLink)이 그 본편을 썸네일로 보여 주고 데려간다.
-                    if (finalOther) return null;
-                    return <DraftFinalButton msg={msg} onMake={() => { void actions.current.makeFinalFromDraft(msg.taskId!, msg); }} />;
+                    // 이미 만든(만드는 중 포함) 해상도의 버튼은 없다 — 카드 맨 위의 짝 줄(PairLink)이 그 본편을 썸네일로 보여 주고 데려간다.
+                    // 1080p 만 만들었으면 4K 버튼만 남는다(26.11.1801~). 둘 다 있으면 아무것도 없다.
+                    const made = (finals || []).map((f: any) => f.usedSettings?.resolution || DRAFT_FINAL_RESOLUTION);
+                    if (DRAFT_FINAL_RESOLUTIONS.every(r => made.includes(r))) return null;
+                    return <DraftFinalButton msg={msg} made={made} onMake={(res) => { void actions.current.makeFinalFromDraft(msg.taskId!, msg, undefined, res); }} />;
                   })()}
                 </div>
                 {/* Just the duration. The start/finish timestamps used to sit here
@@ -2615,14 +2647,20 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     [displayMessages, newDividerIdx]);
 
   // 초안 ↔ 본편 연결. 초안 카드는 자기 본편을, 본편 카드는 자기 초안을 여기서 찾는다.
-  // 한 초안에 본편이 여럿이면(실패 뒤 재시도) 실패하지 않은 것 중 가장 나중 것을 쓴다.
+  // 26.11.1801~ 한 초안에 본편이 해상도마다 하나씩(1080p · 4K) 있을 수 있다 — 실패하지 않은 것을 해상도마다 가장 나중 것으로, 1080p → 4K 순서로.
   const { finalOfDraft, draftByTaskId } = useMemo(() => {
-    const finalOfDraft = new Map<string, any>();
+    const byRes = new Map<string, Map<string, any>>();
     const draftByTaskId = new Map<string, any>();
     for (const m of project.messages) {
       if (m.usedSettings?.draft && m.taskId) draftByTaskId.set(m.taskId, m);
-      if (m.draftOf && m.status !== 'failed') finalOfDraft.set(m.draftOf, m);
+      if (m.draftOf && m.status !== 'failed') {
+        const r = byRes.get(m.draftOf) || new Map<string, any>();
+        r.set(m.usedSettings?.resolution || DRAFT_FINAL_RESOLUTION, m);
+        byRes.set(m.draftOf, r);
+      }
     }
+    const finalOfDraft = new Map<string, any[]>();
+    for (const [k, r] of byRes) finalOfDraft.set(k, DRAFT_FINAL_RESOLUTIONS.map(x => r.get(x)).filter(Boolean));
     return { finalOfDraft, draftByTaskId };
   }, [project.messages]);
 
@@ -3819,12 +3857,12 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // 초안 → 본편(에이전트). 시작하지 못했으면 카드 id 대신 오류로 돌려준다 — 예전엔 실패 카드의 id 를 성공처럼 돌려줘, 커넥터가 한도 · 기록을 그대로 남겼다.
   // ★ 'BytePlus 가 거절' 과 '답을 못 받음' 을 가른다. 답을 못 받았으면 태스크가 만들어졌을 수 있다(과금) — 문구에 "응답이 없습니다" 를 넣어 커넥터가
   //   기록을 물리지 않게 한다(send-to-seedance 의 UNSURE). 거절이면 과금이 없으니 다시 보내도 된다.
-  const agentMakeFinal = async (draftTaskId: string, base: any) => {
+  const agentMakeFinal = async (draftTaskId: string, base: any, finalRes?: string) => {
     const warnings: string[] = [];
     agentWarnRef.current = warnings;
     try {
       const failure: { v?: { error: string; unsure: boolean } } = {};
-      const id = await makeFinalFromDraft(draftTaskId, base, f => { failure.v = f; });
+      const id = await makeFinalFromDraft(draftTaskId, base, f => { failure.v = f; }, finalRes);
       if (!id) throw new Error(warnings.join('\n') || '본편을 만들지 않았습니다');
       if (failure.v) {
         throw new Error(failure.v.unsure
@@ -3865,7 +3903,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
             cards: p.messages.filter(m => m.role !== 'user').length,
             collection: collName(st.projectCollectionId[p.id]), current: p.id === st.currentProjectId, shown: shown.has(p.id),
             billing: b ? { name: b.project, id: b.id || null } : null,
-            ...(b ? { allowedModels: PICKABLE_MODELS.filter(m => isModelAllowed(m.id, bo)).map(m => m.id), fourK: isFourKAllowed(bo) } : {}),
+            ...(b ? { allowedModels: PICKABLE_MODELS.filter(m => isModelAllowed(m.id, bo)).map(m => m.id), fourK: true, fourK25: isFourKAllowed(bo) } : {}),
           };
         }),
       };
@@ -3912,7 +3950,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         projects: st.billingProjects.map(b => {
           const u = usage.find(x => (b.id && String(x.id || x.project_id || '') === b.id) || x.project === b.project) || {};
           return { name: b.project, status: b.status, videos: u.videoCount ?? null, tokens: u.tokens ?? null,
-            allow25: !!b.allow25, allow4k: !!b.allow4k, selected: !!sel && sel.key === b.key };
+            allow25: !!b.allow25, allow4k: true, allow4k25: !!b.allow4k25, selected: !!sel && sel.key === b.key };
         }),
         note: '프로젝트 코드(과금)는 앱 전체에 하나고, 고르는 건 사람이 앱 설정 패널 맨 위 "프로젝트 코드" 에서 한다',
       };
@@ -4030,7 +4068,10 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     'card.final': async (a) => {
       const { project: p, card: m } = agentFindCard(a.id);
       if (!m.usedSettings?.draft || m.status !== 'succeeded' || !m.taskId) throw new Error('완성된 초안(Draft) 카드만 본편을 만들 수 있습니다');
-      const id = await agentMakeFinal(m.taskId, m);
+      // resolution: '1080p'(기본) | '4k'(26.11.1801~, 2.5 4K 권한이 있을 때만 — 없으면 makeFinalFromDraft 가 낮추지 않고 거절)
+      const r = a.resolution === undefined || a.resolution === null || a.resolution === '' ? undefined : String(a.resolution).toLowerCase();
+      if (r !== undefined && !(DRAFT_FINAL_RESOLUTIONS as readonly string[]).includes(r)) throw new Error(`resolution 은 ${DRAFT_FINAL_RESOLUTIONS.join(' 또는 ')} 입니다`);
+      const id = await agentMakeFinal(m.taskId, m, r);
       return { card: id, project: p.name, billing: agentCardBilling(agentCardNow(p.id, id)) };
     },
     'card.regenerate': async (a) => {
@@ -4122,7 +4163,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           manual: agentManual().version,
           // 지금 과금 프로젝트로 쓸 수 있는 것 — 에이전트가 권한 없는 모델을 고르지 않게(설명서는 '무엇이 있나', 이건 '지금 되나').
           allowedModels: PICKABLE_MODELS.filter(m => isModelAllowed(m.id, billingOf(st, st.currentProjectId))).map(m => m.id),
-          fourK: isFourKAllowed(billingOf(st, st.currentProjectId)),
+          // fourK = 2.0 4K(26.11.1801~ 누구나 — 옛 커넥터가 이 값을 보고 4K 를 거르므로 true 로 둔다) · fourK25 = 2.5 4K(시트 F열 권한)
+          fourK: true,
+          fourK25: isFourKAllowed(billingOf(st, st.currentProjectId)),
           // 26.10.2002~ 프로젝트마다 코드가 있는지 — 서버가 '대상 프로젝트에 코드가 없는 작업' 을 내주지 않고 기다리게 한다.
           // 처리 중(peek)에도 보낸다 — 기다림 표시가 늦지 않게. 코드 목록이 아직이면 보내지 않고 billingReady:false.
           billingReady,
@@ -4165,17 +4208,11 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   // base: 새 카드에 옮겨 적을 프롬프트·설정·레퍼런스를 가진 메시지 — 초안 카드 자신이거나,
   // 실패한 본편을 다시 시도할 때는 그 본편 카드.
   // 만든 본편 카드 id 를 돌려준다(에이전트 명령 card.final · card.regenerate 가 따라간다). 멈췄으면 undefined.
-  const makeFinalFromDraft = async (draftTaskId: string, base: any, onStartFailed?: (f: { error: string; unsure: boolean }) => void): Promise<string | undefined> => {
+  // finalRes: '1080p' | '4k'(26.11.1801~). 없으면 실패한 본편을 다시 할 때는 그 카드의 해상도, 아니면 1080p.
+  const makeFinalFromDraft = async (draftTaskId: string, base: any, onStartFailed?: (f: { error: string; unsure: boolean }) => void, finalRes?: string): Promise<string | undefined> => {
     const st = useAppStore.getState();
     const owner = st.projects.find(p => p.messages.some(m => m.id === base.id));
     if (!owner || !draftTaskId) return;
-    // 같은 초안으로 이미 만드는 중이거나 다 만들었으면 또 보내지 않는다 (더블클릭 등).
-    // 실패한 본편만 있으면 다시 만들 수 있다. 스토어를 새로 읽으므로 같은 틱의 두 번째
-    // 클릭도 첫 클릭이 붙인 카드를 본다.
-    if (owner.messages.some(m => m.draftOf === draftTaskId && m.status !== 'failed')) {
-      warn('이 Draft로 만든 본편이 이미 있습니다.\n(Draft 카드의 "본편 보기" 로 이동할 수 있습니다.)');
-      return;
-    }
     const draftMsg = owner.messages.find(m => m.taskId === draftTaskId);
     if (draftMsg && Date.now() > draftExpiresAt(draftMsg)) {
       warn(`이 Draft는 만든 뒤 ${draftDaysOf(draftMsg)}일까지만 본편으로 만들 수 있습니다.\n같은 설정으로 다시 뽑으려면 Draft 카드의 재생성(✦)을 누르세요.`);
@@ -4184,6 +4221,17 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const us = base.usedSettings || {};
     const model = resolveModelId(us.model || '');
     if (!modelSupportsDraft(model)) { warn('이 모델은 Draft → 본편을 지원하지 않습니다.'); return; }
+    const finals = DRAFT_FINAL_RESOLUTIONS as readonly string[];
+    const target = finalRes && finals.includes(finalRes) ? finalRes
+      : (!us.draft && finals.includes(us.resolution) ? us.resolution : DRAFT_FINAL_RESOLUTION);
+    const label = draftFinalLabel(target);
+    // 같은 초안 · 같은 해상도로 이미 만드는 중이거나 다 만들었으면 또 보내지 않는다(더블클릭 등). 26.11.1801~ 해상도가 다르면 된다 —
+    // 1080p 를 본 뒤 4K 를 또 만들 수 있다(사용자 11/18 "1080p 보냈다가 4k 보낼 수 있다면 꼬이지 않게"). 실패한 본편만 있으면 다시 만들 수 있다.
+    // 스토어를 새로 읽으므로 같은 틱의 두 번째 클릭도 첫 클릭이 붙인 카드를 본다. 해상도 기록이 없는 옛 본편은 1080p 다.
+    if (owner.messages.some(m => m.draftOf === draftTaskId && m.status !== 'failed' && (m.usedSettings?.resolution || DRAFT_FINAL_RESOLUTION) === target)) {
+      warn(`이 Draft로 만든 ${label} 본편이 이미 있습니다.\n(Draft 카드 맨 위의 '본편' 줄로 이동할 수 있습니다.)`);
+      return;
+    }
     // 과금 프로젝트는 Draft 가 나간 곳을 따른다 — 같은 컷의 연장이다. 그 사이 드롭다운에서
     // 다른 프로젝트를 골라 두었어도 본편만 엉뚱한 프로젝트에 찍히지 않게.
     // ★ 이름이 아니라 key 로 찾는다. Draft 를 만든 뒤 프로젝트 이름이 바뀌어도(POS) 같은 프로젝트를
@@ -4205,13 +4253,19 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       warn(`프로젝트 코드 "${bill.project}" 는 ${MODELS.find(m => m.id === model)?.name || '이 모델'} 권한이 없습니다.`);
       return;
     }
+    // 4K 본편은 그 코드의 2.5 4K 권한(시트 F열)이 있어야 한다 — 낮춰 1080p 로 보내지 않는다(값이 다르다). 서버도 한 번 더 막는다.
+    if (target === '4k' && !allowedResolutions(model, isFourKAllowed({ billingProjectKey: bill.key, billingProjects: st.billingProjects })).includes('4k')) {
+      warn(`프로젝트 코드 "${bill.project}" 는 2.5 4K 권한이 없어 4K 본편을 만들지 않았습니다.
+(크레딧 시트 F열 · 2.5 4K 허용)`);
+      return;
+    }
 
     // 카드에는 '실제로 나오는 것' 을 적는다. 비율·길이·오디오는 초안 그대로라 초안의 기록을
-    // 그대로 쓰고, 해상도만 1080p 로, 초안 표시는 끈다.
-    const usedSettings = { ...us, model, resolution: DRAFT_FINAL_RESOLUTION, draft: false };
+    // 그대로 쓰고, 해상도만 본편 해상도(1080p · 4K)로, 초안 표시는 끈다.
+    const usedSettings = { ...us, model, resolution: target, draft: false };
     const id = crypto.randomUUID();
     // apiPrompt 도 초안 것 — 본편 요청은 초안 태스크만 가리키고, 모델이 본 글은 초안 때 보낸 그 글이다.
-    addMessage(owner.id, { id, role: 'system', content: '본편 생성 시작... (Draft → 1080p)', status: 'queued',
+    addMessage(owner.id, { id, role: 'system', content: `본편 생성 시작... (Draft → ${label})`, status: 'queued',
       promptText: base.promptText, promptHtml: base.promptHtml, apiPrompt: base.apiPrompt, usedSettings,
       usedAssets: base.usedAssets, usedElementImages: base.usedElementImages, usedCollection: usedCollectionOf(base),
       videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key }, draftOf: draftTaskId } as any);
@@ -4221,7 +4275,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const payload: any = {
       model,
       content: [{ type: 'draft_task', draft_task: { id: draftTaskId } }],
-      resolution: DRAFT_FINAL_RESOLUTION,
+      resolution: target,
       watermark: false,
       // app-only — server.ts 가 둘 다 떼어내 과금 프로젝트로 쓴다 (handleSend 와 같다)
       project: bill.project, project_id: bill.id,
@@ -4243,7 +4297,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
       updateMessage(owner.id, id, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now() });
       useAppStore.getState().pollTask(owner.id, id, taskId);
-      showToast('1080p 본편을 만들기 시작했습니다 — 맨 아래에 추가됩니다.', true);
+      showToast(`${label} 본편을 만들기 시작했습니다 — 맨 아래에 추가됩니다.`, true);
     } catch (error: any) {
       updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
       onStartFailed?.({ error: error.message, unsure: !refused });
@@ -4726,7 +4780,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                 <MessageCard key={msg.id} msg={msg} projectId={project.id}
                   divider={idx === newDividerIdx} dividerCount={idx === newDividerIdx ? newDividerCount : 0}
                   draftOther={msg.draftOf ? draftByTaskId.get(msg.draftOf) : undefined}
-                  finalOther={isDraftClip(msg) && msg.taskId ? finalOfDraft.get(msg.taskId) : undefined}
+                  finals={isDraftClip(msg) && msg.taskId ? finalOfDraft.get(msg.taskId) : undefined}
                   elementImageUrlById={elementImageUrlById}
                   isGenerating={isGenerating && (msg.status === 'succeeded' || msg.status === 'failed')}
                   actions={cardActions} />

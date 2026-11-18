@@ -46,6 +46,19 @@ export const MODEL_GRANTS: Record<string, 'allow25'> = {
 };
 
 /**
+ * model id → the tracker field that must be true for the SELECTED billing project before this model may render 4K.
+ * Absent = 4K is open to everyone on that model (if the model has 4K at all).
+ *
+ * 26.11.1801~ (사용자 11/18 "2.0 4k 는 이제 그냥 풀고 2.5 4k 는 우리 시트에서 관리"): 시트 Project_Status F열이 '2.5 4K' 스위치다.
+ * GAS 는 F 가 정확히 '2.5 4K 허용' 일 때만 allow4k25:true 를 준다 — 기본 꺼짐(빈칸 · '-' · 옛 값 '4K 허용' 모두 꺼짐).
+ * 옛 필드 allow4k 는 GAS 가 늘 true 로 준다 — 업데이트 안 한 앱(≤26.11.1702)은 그 값으로 2.0 4K 를 막았으므로 그 앱들도 2.0 4K 가 풀린다.
+ * 새 앱은 allow4k 를 읽지 않는다. 화면(allowedResolutions)과 서버(server.ts 생성 전 확인)가 이 표 하나를 읽는다.
+ */
+export const FOUR_K_GRANTS: Record<string, 'allow4k25'> = {
+  'dreamina-seedance-2-5-260628': 'allow4k25',
+};
+
+/**
  * 모델 상징 id — 그 모델을 만든 곳을 한 단어로 부르는 이름.
  *
  * 저장되는 모든 이름이 여기서 나온다. 두 곳 다 같은 값을 쓴다:

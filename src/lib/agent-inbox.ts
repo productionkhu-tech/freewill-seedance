@@ -8,7 +8,7 @@
 // 화면(ChatArea)이 만들어 서버에 올린다 — 서버는 store 를 import 하지 않는다.
 import {
   MODELS, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL,
-  RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX, OMNI_VIDEO_MAX_MB, DRAFT_RESOLUTION, DRAFT_FINAL_RESOLUTION,
+  RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX, OMNI_VIDEO_MAX_MB, DRAFT_RESOLUTION, DRAFT_FINAL_RESOLUTION, DRAFT_FINAL_RESOLUTIONS, fourKNeedsGrant,
   modelProvider, modelDurationRange, modelResolutions, modelSupportsDraft, draftEffective, modelOutputFormats,
   modelOutputFormat, modelRefVideoSec, modelRefAudioSec, refVideoMinSecFor, modelAllowsAudioOnly, modelOmniTasks,
   resolveOmniTask, modelHasFirstLastFrame, modelExtendMaxSrcSec, ratioLockedFor, durationLockedFor, modelGrant,
@@ -124,7 +124,7 @@ const SETTING_DOCS: Record<string, string> = {
 // ★ 지우기(카드·엘리먼트·컬렉션·프로젝트)와 과금 프로젝트 고르기는 일부러 없다(사용자 결정 2026-10-03 — 되돌리기
 //   어렵거나 돈이 가는 곳을 정하는 일은 사람이 앱에서). costs = 과금되는 명령(확인 카드를 받은 뒤에만).
 export const AGENT_COMMANDS: { name: string; args: string; does: string; costs?: boolean; composer?: boolean }[] = [
-  { name: 'projects.list', args: '{}', does: '프로젝트(사이드바) 목록 — id · 이름 · 그룹 · 카드 수 · 연결된 컬렉션 · 그 프로젝트로 보낼 때의 프로젝트 코드(billing: { name, id } — 없으면 null. 앱 전체에 하나라 모두 같다) · 그 코드로 쓸 수 있는 모델(allowedModels) · 4K(fourK) · 화면에 떠 있나(shown) · 지금 손대는 것(current)' },
+  { name: 'projects.list', args: '{}', does: '프로젝트(사이드바) 목록 — id · 이름 · 그룹 · 카드 수 · 연결된 컬렉션 · 그 프로젝트로 보낼 때의 프로젝트 코드(billing: { name, id } — 없으면 null. 앱 전체에 하나라 모두 같다) · 그 코드로 쓸 수 있는 모델(allowedModels) · 4K(fourK = 2.0 4K 늘 true · fourK25 = 2.5 4K 권한) · 화면에 떠 있나(shown) · 지금 손대는 것(current)' },
   { name: 'project.open', args: '{ "projectId"?: "id", "project"?: "이름" }', does: '그 프로젝트를 연다(사이드바 클릭과 같음) — 보내는 데는 필요 없다. 사람에게 보여 주고 싶을 때만' },
   { name: 'project.create', args: '{ "name": "이름", "group"?: "그룹 이름", "open"?: false }', does: '새 프로젝트를 만든다. open:false 면 열지 않는다(화면 그대로 — 에이전트는 이걸 쓴다). 같은 이름이 있으면 앱 규칙대로 (1) 이 붙는다' },
   { name: 'billing.list', args: '{ "projectId"?: "id", "project"?: "이름" }', does: '과금 프로젝트(프로젝트 코드) 목록과 앱에 골라 둔 코드(앱 전체에 하나) — 코드별 영상 수 · 토큰 · 2.5/4K 권한(크레딧 대시보드의 숫자). 고르는 건 사람이 앱에서' },
@@ -137,8 +137,8 @@ export const AGENT_COMMANDS: { name: string; args: string; does: string; costs?:
   { name: 'card.get', args: '{ "id": "카드 id" }', does: '카드 하나의 지금 상태 — 진행을 지켜볼 때. 실제로 과금된 코드(billing)도 — 지금 앱에 골라 둔 코드와 다를 수 있다' },
   { name: 'card.star', args: '{ "id": "카드 id", "on": true }', does: '채택(★)을 켜거나 끈다' },
   { name: 'card.download', args: '{ "id": "카드 id" }', does: '영상을 다운로드 폴더에 저장한다(카드의 다운로드 버튼과 같음) — 저장한 경로를 돌려준다' },
-  { name: 'card.final', args: '{ "id": "초안 카드 id" }', does: '초안(480p) 카드로 1080p 본편을 만든다(같은 시드 · 구도) — 과금된다. 과금은 초안을 만든 코드다(결과의 billing — 지금 코드와 다를 수 있다). 시작하지 못하면 오류로 돌아온다("응답이 없습니다" 가 들어 있으면 만들어졌는지 모르는 것 — 앱에서 카드를 확인)', costs: true },
-  { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 한 편 다시 만든다(묶음 개수는 따르지 않는다) — 그 카드의 프로젝트로(열지 않아도 됨) · 앱의 프로젝트 코드로 과금된다(결과의 billing). 그 코드에 4K 권한이 없으면 낮추지 않고 거절한다', costs: true },
+  { name: 'card.final', args: '{ "id": "초안 카드 id", "resolution"?: "1080p" | "4k" }', does: '초안(480p) 카드로 본편을 만든다(같은 시드 · 구도, 기본 1080p · 4k 는 그 코드에 2.5 4K 권한이 있을 때만 — 없으면 낮추지 않고 거절) — 과금된다. 과금은 초안을 만든 코드다(결과의 billing — 지금 코드와 다를 수 있다). 시작하지 못하면 오류로 돌아온다("응답이 없습니다" 가 들어 있으면 만들어졌는지 모르는 것 — 앱에서 카드를 확인)', costs: true },
+  { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 한 편 다시 만든다(묶음 개수는 따르지 않는다) — 그 카드의 프로젝트로(열지 않아도 됨) · 앱의 프로젝트 코드로 과금된다(결과의 billing). 그 코드에 2.5 4K 권한이 없는데 2.5 4K 카드면 낮추지 않고 거절한다', costs: true },
   { name: 'card.cancel', args: '{ "id": "카드 id" }', does: '대기 중(queued) 작업을 취소한다 — 이미 돌기 시작했으면 앱이 거절한다(그때는 과금된다)' },
 ];
 
@@ -151,7 +151,7 @@ const RULES = [
   '프롬프트 본문에 소수 길이 지시(예: "4.5초로")를 쓰지 않는다 — BytePlus 가 내부 오류로 실패한다.',
   '오디오 생성과 마지막 프레임 받기는 같이 못 켠다 — 마지막 프레임을 켜면 오디오는 꺼져서 나간다.',
   '과금 프로젝트(앱에서는 "프로젝트 코드", 비용이 가는 곳)는 앱 전체에 하나고 사람이 앱 설정 패널 맨 위에서 고른다 — 에이전트는 고르지 않는다. 어느 프로젝트로 보내든 그 코드로 과금된다. 코드가 없으면 앱은 요청을 가져가지 않고 기다린다(최대 10분, 작업 상태의 needsBilling) — 사람에게 시댄스의 "프로젝트 코드" 를 골라 달라고 할 것. 요청에 billing(코드 이름)을 적으면 지금 코드와 같을 때만 보낸다(다르면 실패 — 사람에게 확인).',
-  '권한이 필요한 모델과 4K 는 그 프로젝트 코드에 권한이 있어야 한다 — projects.list 의 allowedModels · fourK. 권한이 없으면 낮추거나 바꿔 보내지 않고 거절한다. Omni 의 4K 는 권한이 필요 없다.',
+  '권한이 필요한 모델과 Seedance 2.5 의 4K 는 그 프로젝트 코드에 권한이 있어야 한다 — projects.list 의 allowedModels · fourK25(2.5 4K). 권한이 없으면 낮추거나 바꿔 보내지 않고 거절한다. Seedance 2.0 · Omni 의 4K 는 권한이 필요 없다(fourK 는 늘 true).',
   '비율은 앱이 미리 거르지 않는다 — 틀리면 BytePlus 가 과금 없이 거절한다.',
   '레퍼런스를 하나라도 못 붙이거나 앱이 경고로 멈추면 보내지 않고, 그 이유가 그대로 돌아온다.',
 ];
@@ -182,9 +182,9 @@ export function buildAgentManual(appVersion: string): AgentManual {
       needsGrant: !!modelGrant(id),
       duration: { min: dMin, max: dMax, auto: !omni },
       resolutions: res,
-      fourKNeedsGrant: !omni && res.includes('4k'),
+      fourKNeedsGrant: fourKNeedsGrant(id),
       defaults: { resolution, ratio, duration },
-      draft: modelSupportsDraft(id) ? { defaultOn: draftEffective(id, undefined), resolution: DRAFT_RESOLUTION, final: DRAFT_FINAL_RESOLUTION } : null,
+      draft: modelSupportsDraft(id) ? { defaultOn: draftEffective(id, undefined), resolution: DRAFT_RESOLUTION, final: DRAFT_FINAL_RESOLUTION, finals: res.includes('4k') ? [...DRAFT_FINAL_RESOLUTIONS] : [DRAFT_FINAL_RESOLUTION] } : null,
       outputFormats: modelOutputFormats(id).map(f => ({ id: f, label: OUTPUT_FORMAT_LABEL[f] || f, isDefault: f === modelOutputFormat(id) })),
       audioOnly: !omni && modelAllowsAudioOnly(id),
       refSeconds: omni ? null : { video: modelRefVideoSec(id), audio: modelRefAudioSec(id) },
@@ -247,10 +247,10 @@ function manualText(m: any, version: string): string {
   for (const x of m.models) {
     L.push('', `### ${x.name} · \`${x.id}\``, '');
     L.push(`- 프롬프트 가이드: ${x.guide || '(연결된 공식 가이드 없음 — 같은 회사의 가장 가까운 가이드)'}${x.needsGrant ? ' · **과금 프로젝트에 이 모델 권한이 있어야 한다**' : ''}`);
-    const res = x.resolutions.join(' / ') + (x.fourKNeedsGrant ? ' (4k 는 과금 프로젝트에 4K 권한이 있을 때만 — 없으면 보내지 않는다)' : '');
+    const res = x.resolutions.join(' / ') + (x.fourKNeedsGrant ? ' (4k 는 과금 프로젝트에 2.5 4K 권한이 있을 때만 — projects.list 의 fourK25, 없으면 보내지 않는다)' : '');
     L.push(`- 길이 ${x.duration.min}~${x.duration.max}초${x.duration.auto ? ' 또는 -1(자동)' : ''} · 해상도 ${res} · 기본 ${x.defaults.resolution} · ${x.defaults.ratio} · ${x.defaults.duration === -1 ? '자동' : `${x.defaults.duration}초`}`);
     if (x.provider === 'gemini') L.push(`- 비율: ${m.ratios.omni.join(' / ')} · 오디오 레퍼런스 없음 · generate_audio 설정 없음`);
-    if (x.draft) L.push(`- 초안(draft): 있음${x.draft.defaultOn ? '(기본 켬)' : ''} — ${x.draft.resolution} 로 나가고, 고른 것만 앱 카드에서 ${x.draft.final} 본편`);
+    if (x.draft) L.push(`- 초안(draft): 있음${x.draft.defaultOn ? '(기본 켬)' : ''} — ${x.draft.resolution} 로 나가고, 고른 것만 앱 카드에서 ${(x.draft.finals || [x.draft.final]).join(' 또는 ')} 본편(card.final 의 resolution, 기본 ${x.draft.final})`);
     if (x.outputFormats.length) L.push(`- 출력 형식(output_format): ${x.outputFormats.map((o: any) => `${o.id}(${o.label}${o.isDefault ? ', 기본' : ''})`).join(' / ')}`);
     if (x.refSeconds) L.push(`- 레퍼런스 길이: 영상 ${x.refSeconds.video}초 · 오디오 ${x.refSeconds.audio}초까지(각각, 그리고 합계)${x.audioOnly ? ' · 오디오만으로도 생성 가능' : ' · 오디오만으로는 생성 불가 — 이미지나 영상을 함께'}`);
     if (x.modes) {

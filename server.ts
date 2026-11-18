@@ -15,7 +15,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // Shared with the client store — see src/lib/model-access.ts for why these two facts
 // live outside both files.
-import { MODEL_GRANTS, brandOf } from './src/lib/model-access';
+import { MODEL_GRANTS, FOUR_K_GRANTS, brandOf } from './src/lib/model-access';
 import { PERSONAL_BILLING } from './src/lib/edition';
 // 생성 결과물의 장기 보관소. R2(입력 임시 저장)와 역할이 겹치지 않는다 — ncp.ts 참고.
 import {
@@ -1732,7 +1732,7 @@ async function startServer() {
   const agentJobs = new Map<string, AgentJob>();
   let agentScreen: {
     at: number; project?: string; billing?: string | null; generating?: boolean; composer?: boolean;
-    allowedModels?: string[]; fourK?: boolean; billingReady?: boolean;
+    allowedModels?: string[]; fourK?: boolean; fourK25?: boolean; billingReady?: boolean;
   } = { at: 0 };
   let agentManual: { version: string; manual: unknown; text: string } | null = null;   // 화면이 올린 설명서
   const manualVersionNow = () => agentManual?.version ?? null;
@@ -1780,7 +1780,8 @@ async function startServer() {
       project: agentScreen.project ?? null,              // 지금 열린 프로젝트(사이드바)
       billing: agentScreen.billing ?? null,               // 과금 프로젝트 선택 — null 이면 아직 안 고름
       allowedModels: agentScreen.allowedModels ?? null,   // 그 과금 프로젝트로 지금 쓸 수 있는 모델
-      fourK: !!agentScreen.fourK,                         // 4K 권한
+      fourK: !!agentScreen.fourK,                         // 2.0 4K — 26.11.1801~ 화면이 늘 true(누구나). 옛 화면(≤1702)은 옛 뜻(그 코드의 4K 권한)
+      fourK25: !!agentScreen.fourK25,                     // 2.5 4K 권한(시트 F열 '2.5 4K 허용', 26.11.1801~)
       generating: !!agentScreen.generating,
       // false = 코드 목록(시트)을 아직 못 받아 요청을 가져가지 않는다 — 기다리는 이유를 말할 때(화면이 들른 적 없으면 null).
       billingReady: agentScreen.billingReady ?? null,
@@ -1866,6 +1867,7 @@ async function startServer() {
       composer: b.composer !== false,
       allowedModels: Array.isArray(b.allowedModels) ? b.allowedModels.filter((x: unknown) => typeof x === 'string').slice(0, 50) : undefined,
       fourK: b.fourK === true,
+      fourK25: b.fourK25 === true,
       billingReady: b.billingReady !== false,
     };
     // 받다 끊긴 것 닫기(26.10.2002 검토) — 화면은 받은 요청 · 명령 id 를 끝 보고가 닿을 때까지 working 에 실어 보낸다. 이 화면이
@@ -2809,9 +2811,12 @@ async function startServer() {
           console.warn(`[Billing] 종료 · 목록에 없는 코드로 생성 요청 — 거절 (${billingProject || '-'} id=${billingProjectId || '-'} status=${row?.status ?? '없음'})`);
           return res.status(403).json({ error: { message: `프로젝트 코드 "${row?.project || billingProject || ''}" 가 종료됐거나 시트 목록에 없어 보내지 않았습니다. 설정 패널 맨 위 "프로젝트 코드" 를 다시 골라 주세요.` } });
         }
-        if (String(byteplusBody.resolution) === '4k' && row.allow4k !== true) {
-          console.warn(`[Billing] 4K 권한 없는 코드로 4K 요청 — 거절 (${row.project})`);
-          return res.status(403).json({ error: { message: `"${row.project}" 는 4K 권한이 없어 보내지 않았습니다. 해상도를 낮춰 다시 보내 주세요.` } });
+        // 4K 는 FOUR_K_GRANTS 의 모델만 묻는다(26.11.1801~ — 2.5 만, 시트 F열 '2.5 4K 허용' → allow4k25). 2.0 4K 는 누구나.
+        // 초안 → 본편도 같은 길이다(본문의 model 이 2.5, resolution 이 '4k').
+        const fourKGrant = FOUR_K_GRANTS[String(byteplusBody.model)];
+        if (String(byteplusBody.resolution) === '4k' && fourKGrant && row[fourKGrant] !== true) {
+          console.warn(`[Billing] 2.5 4K 권한 없는 코드로 4K 요청 — 거절 (${row.project})`);
+          return res.status(403).json({ error: { message: `"${row.project}" 는 2.5 4K 권한이 없어 보내지 않았습니다(크레딧 시트 F열 · 2.5 4K 허용). 해상도를 낮춰 다시 보내 주세요.` } });
         }
       }
     }

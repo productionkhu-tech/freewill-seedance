@@ -20,6 +20,7 @@ export const PERSONAL_BILLING = {
   status: '진행',
   allow4k: true,
   allow25: true,
+  allow4k25: true,   // 개인판은 본인 계정 — 2.5 4K 도 BytePlus 가 정한다(26.11.1801~)
 } as const;
 
 /** 화면에서 지금 개인판인가. preload 가 알려 준 값만 믿는다(주소창 쿼리 · 저장값으로는 못 바꾼다). */
