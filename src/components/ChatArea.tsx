@@ -3,13 +3,13 @@ import { markAgentMessages, setAgentInLine } from '../lib/agent-origin';
 import { useAppStore, navigateProjectHistory, consumeHistoryNav, consumeFindRequest, AssetRole, flushPersist, AssetCategory, ElementImage, clampResolution, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, resolveOutputFormat, modelOutputFormats, refTaskTypeFor, mentionKey, videoExtFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider, resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor , downloadFilenameFor, modelSupportsDraft, draftEffective, draftExpiresAt, draftDaysOf, DRAFT_FINAL_RESOLUTION, DRAFT_FINAL_RESOLUTIONS, draftFinalLabel, allowedResolutions, billingProjectOfDraft, modelDurationRange, modelOmniTasks, settingsDefaultsFor, GenerationMode, GenerationSettings, modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX } from '../store';
 import { resolveModelId , brandOf } from '../lib/model-access';
 import { agentText, agentTextList, AGENT_LIMITS, AgentInputError, kindOf } from '../lib/agent-input';
-import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
+import { downloadMetaFor, pinMessageReferences, requestFindMessage, usedCollectionOf, boundCollectionOf, defaultSettings, findBillingProject, projectBilling, billingOf, type ChatMessage, type Asset } from '../store';
 import { readSettingsFromFile, readVideoClues, sanitizePromptHtml, plainTextToHtml, storePayloadThumbs, thumbSrc, type SettingsPayload } from '../lib/settings-box';
 import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
 import { RevealSourceButton, REVEAL_ON_THUMB } from './RevealSource';
 import { findSourcePath, sourcePathOf } from '../lib/source-path';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight, ClipboardCopy, ImageDown, ShieldCheck } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight, ClipboardCopy, ImageDown, ShieldCheck, Hourglass } from 'lucide-react';
 import { PICKABLE_MODELS, modelExtendAddRange } from '../store';
 import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink, attachAssetRefTo } from '../lib/send-request';
 import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from '../lib/agent-inbox';
@@ -17,6 +17,7 @@ import { visibleProjectIds } from '../lib/split';
 import { PERSONAL } from '../lib/edition';
 import { isAssetUri, imgSrcOk, assetLabel } from '../lib/byteplus-asset';
 import { translateError, byteplusErrorText } from '../lib/translate-error';
+import { isLineFull, joinLine } from '../lib/busy-line';
 import { CATEGORY_META, fileToElementImage, MAX_ELEMENT_IMAGES } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
 import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
@@ -1726,21 +1727,22 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
             <div className="space-y-3">
               {/* 막혀서 자동으로 고치는 중(26.11.24~, send-request recover) — 끝나면 이 카드로 다시 보낸다. 취소하면 다시 보내지 않는다. */}
               {(msg as any).bpFix && (() => {
-                const fx = (msg as any).bpFix as { kind: 'face' | 'gone'; label: string };
+                const fx = (msg as any).bpFix as { kind: 'face' | 'gone' | 'busy'; label: string; tries?: number };
+                const busy = fx.kind === 'busy';   // BytePlus 대기열이 꽉 참(26.11.25~ lib/busy-line)
                 return (
                   // 정렬(26.11.25~): 아이콘 · 제목 첫 줄 · 취소가 한 줄, 둘째 글은 제목과 같은 왼쪽. 창이 아니라 배너 자신의 폭(@container)으로 바뀐다 — 나누면 74px 까지 좁아진다.
                   // 좁으면(20rem 미만) 취소가 글 아래로 내려오고, 아주 좁으면(9rem 미만) 설명은 접는다. 테두리는 안쪽(ring-inset) — border 면 아래 줄과 1px 어긋난다.
                   <div data-bp-fix={fx.kind} className="@container text-sm text-amber-700 bg-amber-50 ring-1 ring-inset ring-amber-100 px-3 py-2 rounded-lg">
                     <div className="grid grid-cols-[16px_minmax(0,1fr)] @xs:grid-cols-[16px_minmax(0,1fr)_auto] gap-x-2 items-start @max-[9rem]:block">
-                      <span className="h-5 flex items-center @max-[9rem]:hidden"><ShieldCheck size={16} className="shrink-0" /></span>
+                      <span className="h-5 flex items-center @max-[9rem]:hidden">{busy ? <Hourglass size={16} className="shrink-0" /> : <ShieldCheck size={16} className="shrink-0" />}</span>
                       <p title={fx.label} className="font-medium leading-5 break-keep [overflow-wrap:anywhere]">
-                        {fx.kind === 'face' ? '실사 얼굴이 걸려 ' : null}{/* 좁으면 파일 이름만 한 줄로 줄인다(전체는 title) — 긴 이름이 수십 줄을 먹지 않게 */}
+                        {busy ? 'BytePlus 대기열이 꽉 차서 자리가 나길 기다려요' : fx.kind === 'face' ? '실사 얼굴이 걸려 ' : null}{/* 좁으면 파일 이름만 한 줄로 줄인다(전체는 title) — 긴 이름이 수십 줄을 먹지 않게 */}
                         <span className="@max-xs:inline-block @max-xs:max-w-full @max-xs:truncate @max-xs:align-bottom">{fx.label}</span>
-                        {fx.kind === 'face' ? ` ${fx.label.startsWith('[Video') ? '영상' : '사진'}을 BytePlus 에 인증하는 중이에요` : ' 의 에셋이 BytePlus 에서 지워져 다시 등록하는 중이에요'}
+                        {busy ? null : fx.kind === 'face' ? ` ${fx.label.startsWith('[Video') ? '영상' : '사진'}을 BytePlus 에 인증하는 중이에요` : ' 의 에셋이 BytePlus 에서 지워져 다시 등록하는 중이에요'}
                       </p>
-                        <p className="col-start-2 @xs:col-end-4 row-start-2 text-[12px] leading-[18px] text-amber-600 mt-0.5 break-keep [overflow-wrap:anywhere] @max-[9rem]:hidden">끝나면 이 카드로 저절로 다시 보내요 — 보통 10초 안팎, 막힌 요청은 과금이 없어요.{fx.kind === 'face' ? ' AI 로 만든 가상 인물이 아니면(실존 인물) 취소해 주세요.' : ''}</p>
+                        <p className="col-start-2 @xs:col-end-4 row-start-2 text-[12px] leading-[18px] text-amber-600 mt-0.5 break-keep [overflow-wrap:anywhere] @max-[9rem]:hidden">{busy ? `자리가 나면 이 카드로 저절로 보내요 — 거절된 요청은 과금이 없어요. 지금까지 ${fx.tries || 1}번 물어봤어요.` : `끝나면 이 카드로 저절로 다시 보내요 — 보통 10초 안팎, 막힌 요청은 과금이 없어요.${fx.kind === 'face' ? ' AI 로 만든 가상 인물이 아니면(실존 인물) 취소해 주세요.' : ''}`}</p>
                     <button
-                      onClick={() => useAppStore.getState().updateMessage(projectId, msg.id, { status: 'failed', content: '취소함', error: '자동 인증 중에 취소했어요 — 다시 보내지 않았어요.', bpFix: undefined, endTime: Date.now() } as any)}
+                      onClick={() => useAppStore.getState().updateMessage(projectId, msg.id, { status: 'failed', content: '취소함', error: busy ? '대기열을 기다리다 취소했어요 — 보내지 않았어요(거절된 요청은 과금이 없어요).' : '자동 인증 중에 취소했어요 — 다시 보내지 않았어요.', bpFix: undefined, endTime: Date.now() } as any)}
                       className="col-start-2 row-start-3 justify-self-start -ml-2 @xs:col-start-3 @xs:row-start-1 @xs:ml-0 @xs:-my-[3px] h-[26px] whitespace-nowrap text-[12px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2 rounded-md transition-colors"
                     >
                       취소
@@ -4299,21 +4301,51 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     if (us.return_last_frame) payload.return_last_frame = true;
 
     let refused = false;   // 거절이라는 답을 받았나(4xx · 코드) — 아니면(5xx · 끊김 · 빈 답) 태스크가 만들어졌는지 모른다
-    try {
+    // 한 번 보낸다 — 나감 · 대기열이 꽉 참(429, 생성 전 거절 · 과금 없음) · 던짐(그 밖의 거절 · 끊김)
+    const postFinal = async (): Promise<'sent' | 'busy'> => {
       const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const text = await res.text();
       let data; try { data = JSON.parse(text); } catch { throw new Error(`서버 응답 오류 (${res.status})`); }
       if (!res.ok || (data.code !== undefined && data.code !== 0)) {
         refused = res.ok || (res.status >= 400 && res.status < 500);
+        if (isLineFull(res.status, data)) { busyError = byteplusErrorText(data); return 'busy'; }
         throw new Error(byteplusErrorText(data));
       }
       const taskId = data.id || data.data?.task_id;
       if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-      updateMessage(owner.id, id, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now() });
+      updateMessage(owner.id, id, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), bpFix: undefined } as any);
       useAppStore.getState().pollTask(owner.id, id, taskId);
       showToast(`${label} 본편을 만들기 시작했습니다 — 맨 아래에 추가됩니다.`, true);
+      return 'sent';
+    };
+    let busyError = '';
+    const failFinal = (error: string) => updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error, endTime: Date.now(), bpFix: undefined } as any);
+    try {
+      // 대기열이 꽉 찼으면 실패시키지 않고 줄에 세운다(26.11.25~ lib/busy-line) — 일반 보내기(send-request waitTurn)와 같은 줄.
+      if ((await postFinal()) === 'busy') {
+        const mark = (tries: number) => updateMessage(owner.id, id, { status: 'queued', error: undefined, content: 'BytePlus 대기열이 꽉 참 — 자리가 나면 저절로 보냄', bpFix: { kind: 'busy', label: '', at: Date.now(), tries } } as any);
+        mark(1);
+        joinLine({
+          wanted: () => { const m = useAppStore.getState().projects.find(p => p.id === owner.id)?.messages.find(x => x.id === id) as any; return !!m && m.status === 'queued' && m.bpFix?.kind === 'busy'; },
+          tell: (n) => mark(n + 1),
+          giveUp: () => failFinal(`${busyError}\n\n[대기열] 6시간 동안 자리가 나지 않아 그만 기다렸어요(거절된 요청은 과금이 없어요).`),
+          attempt: async () => {
+            // 기다린 사이 초안이 만료됐거나 · 프로젝트(코드)가 종료됐거나 · 권한이 풀렸으면 보내지 않는다(처음과 같은 확인)
+            const now = useAppStore.getState();
+            const d = now.projects.find(p => p.id === owner.id)?.messages.find(m => m.taskId === draftTaskId);
+            const live = findBillingProject(now.billingProjects, bill.key);
+            const scope = { billingProjectKey: bill.key, billingProjects: now.billingProjects };
+            const why = d && Date.now() > draftExpiresAt(d) ? 'Draft 를 본편으로 만들 수 있는 기간이 지나 보내지 않았습니다.'
+              : !live ? '보내는 사이 프로젝트 코드가 종료됐거나 목록에서 빠져 보내지 않았습니다.'
+              : !isModelAllowed(model, scope) ? '보내는 사이 이 모델 권한이 풀려 보내지 않았습니다.'
+              : target === '4k' && !allowedResolutions(model, isFourKAllowed(scope)).includes('4k') ? '보내는 사이 2.5 4K 권한이 풀려 보내지 않았습니다.' : '';
+            if (why) { failFinal(`${why}\n\n(BytePlus 대기열을 기다리던 중이었어요 — 거절된 요청은 과금이 없어요)`); return 'end'; }
+            try { return await postFinal(); } catch (e: any) { failFinal(e?.message || String(e)); return 'end'; }
+          },
+        });
+      }
     } catch (error: any) {
-      updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
+      failFinal(error.message);
       onStartFailed?.({ error: error.message, unsure: !refused });
     }
     return id;

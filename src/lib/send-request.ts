@@ -11,6 +11,7 @@ import { personalR2Ready, R2_NEEDED_MSG } from './personal-keys';
 import { byteplusErrorText } from './translate-error';
 import { isAssetUri, assetLabel } from './byteplus-asset';
 import { bpScopeQuick, assetUrlFor, hasActiveBp, certifiedAssetUrl, certifiedAnywhere, knownBpScope, panelBpState, bpEntryOf, isPhotoOf, checkSamePhoto, registerElement, kickBpPoll } from './bp-assets';
+import { isLineFull, joinLine } from './busy-line';
 import { certifyPhoto, certifyVideo, videoAssetUrl, videoKnown, forgetVideoAsset } from './bp-certify';
 import {
   useAppStore, Asset, AssetRole, ElementImage, GenerationSettings, applyAssetUpdate,
@@ -823,11 +824,11 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
 
     // Settings + assets are preserved after send so user can iterate quickly with same setup
 
-    const post = async (): Promise<{ taskId?: string; error?: string }> => {
+    const post = async (): Promise<{ taskId?: string; error?: string; busy?: boolean }> => {
       const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const text = await res.text();
       let data; try { data = JSON.parse(text); } catch { return { error: res.status === 413 ? '파일 크기 초과 (이미지 개당 30MB, 전체 64MB 이하)' : `서버 응답 오류 (${res.status})` }; }
-      if (!res.ok || (data.code !== undefined && data.code !== 0)) return { error: byteplusErrorText(data) };
+      if (!res.ok || (data.code !== undefined && data.code !== 0)) return { error: byteplusErrorText(data), busy: isLineFull(res.status, data) };
       const taskId = data.id || data.data?.task_id;
       return taskId ? { taskId } : { error: 'Task ID를 받지 못했습니다.' };
     };
@@ -936,8 +937,43 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
     };
     const fixing = new Map<number, Promise<{ ok: boolean; why?: string }>>();
     const cardOf = (sysMsgId: string) => useAppStore.getState().projects.find(p => p.id === project.id)?.messages.find(m => m.id === sysMsgId);
+    // 아직 못 보낸 카드의 R2 파일을 붙잡는다 — ×N 카드는 같은 주소를 쓰는데, 먼저 끝난 카드가 지우면 기다리던 카드가 실패한다(server holdR2).
+    const hold = (id: string, release?: 'sent' | 'end') => {
+      const urls = release ? [] : content.map(c => c?.[c?.type]?.url).filter((u: any) => typeof u === 'string');
+      if (!release && !urls.length) return;
+      fetch('/api/r2-hold', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, urls, release }) }).catch(() => { /* 놓쳐도 하루 뒤 저절로 지워진다 */ });
+    };
+    // 대기열이 꽉 참(429 — 생성 전 거절 · 과금 없음, 26.11.25~ lib/busy-line): 실패시키지 않고 줄에 세워 자리가 나면 같은 카드로 보낸다.
+    // 보내기 직전 확인(프로젝트 · 코드 · 권한)은 물어볼 때마다. 취소하면(카드 '취소') 더 보내지 않는다.
+    const waitTurn = (sysMsgId: string, error: string) => {
+      const mark = (tries: number) => useAppStore.getState().updateMessage(project.id, sysMsgId, {
+        status: 'queued', error: undefined, content: 'BytePlus 대기열이 꽉 참 — 자리가 나면 저절로 보냄',
+        bpFix: { kind: 'busy', label: '', at: Date.now(), tries },
+      } as any);
+      mark(1);
+      hold(sysMsgId);
+      joinLine({
+        left: (sent) => { if (sent || (cardOf(sysMsgId) as any)?.bpFix?.kind !== 'face' && (cardOf(sysMsgId) as any)?.bpFix?.kind !== 'gone') hold(sysMsgId, sent ? 'sent' : 'end'); },   // 줄에서 자동 인증으로 넘어갔으면 그쪽이 이어서 붙잡는다
+        wanted: () => { const m = cardOf(sysMsgId) as any; return !!m && m.status === 'queued' && m.bpFix?.kind === 'busy'; },
+        tell: (n) => mark(n + 1),
+        giveUp: () => failed(sysMsgId, `${error}\n\n[대기열] 6시간 동안 자리가 나지 않아 그만 기다렸어요(거절된 요청은 과금이 없어요).`),
+        attempt: async () => {
+          const why = recheckBeforePost(project.id, bill.key, currentSettings.model, currentSettings.resolution);
+          if (why) { failed(sysMsgId, `${why}\n\n(BytePlus 대기열을 기다리던 중이었어요 — 거절된 요청은 과금이 없어요)`); return 'end'; }
+          try {
+            const r = await post();
+            if (r.taskId) { started(sysMsgId, r.taskId); return 'sent'; }
+            if (r.busy) return 'busy';
+            if (fixPlan(r.error!)) { void recover(sysMsgId, r.error!); return 'end'; }
+            failed(sysMsgId, r.error!);
+          } catch (e: any) { failed(sysMsgId, e?.message || String(e)); }
+          return 'end';
+        },
+      });
+    };
     const recover = async (sysMsgId: string, firstError: string) => {
-      let err = firstError;
+      let err = firstError, left: 'sent' | 'end' | 'line' = 'end';
+      hold(sysMsgId);
       try {
         for (let n = 0; n < MAX_FIX; n++) {
           const plan = fixPlan(err);
@@ -963,17 +999,20 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
           const why = recheckBeforePost(project.id, bill.key, currentSettings.model, currentSettings.resolution);
           if (why) { failed(sysMsgId, `${why}\n\n(자동 인증은 끝났어요 — 확인한 뒤 재생성(✦)하면 인증된 사진으로 나가요)`); return; }
           const r = await post();
-          if (r.taskId) { started(sysMsgId, r.taskId); return; }
+          if (r.taskId) { left = 'sent'; started(sysMsgId, r.taskId); return; }
+          if (r.busy) { left = 'line'; waitTurn(sysMsgId, r.error!); return; }
           err = r.error || '알 수 없는 오류';
         }
         failed(sysMsgId, err);
       } catch (e: any) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${e?.message || e}`); }
+      finally { if (left !== 'line') hold(sysMsgId, left); }   // 줄에 섰으면 줄이 이어서 붙잡는다
     };
 
     await Promise.allSettled(systemMessageIds.map(async (sysMsgId) => {
       try {
         const r = await post();
         if (r.taskId) { started(sysMsgId, r.taskId); return; }
+        if (r.busy) { waitTurn(sysMsgId, r.error!); return; }
         if (fixPlan(r.error!)) { void recover(sysMsgId, r.error!); return; }
         failed(sysMsgId, r.error!);
       } catch (error: any) {

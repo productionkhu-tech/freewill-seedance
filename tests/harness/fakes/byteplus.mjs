@@ -25,7 +25,7 @@ const serveFile = (req, res, file) => {
   res.writeHead(200, { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes', 'Content-Length': size, 'Access-Control-Allow-Origin': '*' });
   fs.createReadStream(file).pipe(res);
 };
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const raw = await read(req);
   const body = raw.toString('utf8');
@@ -34,11 +34,21 @@ http.createServer(async (req, res) => {
   // 시험용: 시트 권한 바꾸기 — { "EVK": { "allow4k25": true, "allow4k": false } } (26.11.1801 2.5 4K 시험)
   if (u.pathname === '/__roster_add') { const p = JSON.parse(body || '{}'); if (p.id && !ROSTER.some((r) => r.id === p.id)) ROSTER.push(p); return send(res, 200, ROSTER); }
   if (u.pathname === '/__roster') { const p = JSON.parse(body || '{}'); for (const r of ROSTER) if (p[r.id]) Object.assign(r, p[r.id]); return send(res, 200, ROSTER); }
+  // 시험용(11/25 대기열): /__down?ms=4000 — 그동안 아예 안 받는다(연결 거절) · /__marks — 만들기 요청이 온 때(몇 번째에 무엇으로 답했나)
+  if (u.pathname === '/__down') { send(res, 200, { ok: true }); setTimeout(() => { server.close(); server.closeAllConnections(); setTimeout(() => server.listen(FAKE_PORT, '127.0.0.1'), Number(u.searchParams.get('ms')) || 3000); }, 50); return; }
+  if (u.pathname === '/__marks') return send(res, 200, state.marks || []);
   if (u.pathname === '/__tasks') return send(res, 200, state.tasks);
   if (u.searchParams.get('action') === 'projects') return send(res, 200, { ok: true, projects: ROSTER });
   if (u.pathname === '/__puts') return send(res, 200, state.puts || []);
   if (req.method === 'POST' && u.pathname.endsWith('/contents/generations/tasks')) {
     const p = JSON.parse(body); state.seen.push(p);
+    const mark = (what) => (state.marks ||= []).push({ at: Date.now(), what, text: String((p.content || []).find((c) => c.type === 'text')?.text || (p.content || [])[0]?.draft_task?.id || '').slice(0, 24) });
+    // state.cut: 남은 수만큼 — 몸통을 다 받고 답 없이 끊는다(BytePlus 가 받았는지 알 수 없는 경우)
+    if (state.cut > 0) { state.cut--; mark('cut'); return req.socket.destroy(); }
+    // state.refuse: 남은 수만큼 429(대기열이 꽉 참) — state.refuseCode 로 다른 429(쓰기 한도 등)
+    if (state.refuse > 0) { state.refuse--; mark('429'); return send(res, 429, { error: { code: state.refuseCode || 'QuotaExceeded', message: state.refuseText || 'The number of queued tasks exceeds the limit. Request id: fake', type: 'TooManyRequests' } }); }
+    // state.cap: 끝나지 않은 작업이 이만큼이면 429(동시 + 대기열 한도 흉내 — bulk.mjs --cap)
+    if (state.cap > 0 && Object.values(state.tasks).filter((t) => Date.now() - t.at < t.delay).length >= state.cap) { mark('429'); return send(res, 429, { error: { code: 'QuotaExceeded', message: 'The number of queued tasks exceeds the limit. Request id: fake', type: 'TooManyRequests' } }); }
     // 시험용(11/24 자동 인증): 실제 BytePlus 와 같은 문구 · 칸 번호로 거절 — 앞에서부터 처음 걸린 칸 하나만(실측과 같다)
     //   state.goneAssets: [에셋 id]  → asset://그 id 칸: "The specified asset … is not found"(11/24 실측 문구)
     //   state.faceKeys:  [글자]      → 주소(asset:// 아님)에 그 글자가 든 이미지 · 영상 칸: PrivacyInformation + 'content[N]'
@@ -63,9 +73,12 @@ http.createServer(async (req, res) => {
     const clip = state.queue.length ? state.queue.shift() : list[(state.n - 1) % list.length];
     const dly = /DLY(\d+)/.exec(body);   // 시험용: 프롬프트에 DLY12 → 12초 · FAILTEST → 실패
     state.tasks[id] = { clip, at: Date.now(), delay: dly ? +dly[1] * 1000 : state.delayMs, fail: body.includes('FAILTEST') ? 'test' : body.includes('FACEFAIL') ? 'face' : false };
+    mark('in');   // 작업이 정말 만들어진 것만
     return send(res, 200, { id });
   }
   const m = /\/contents\/generations\/tasks\/([^/]+)$/.exec(u.pathname);
+  if (req.method === 'DELETE' && u.pathname.startsWith('/fake/')) { (state.dels ||= []).push(decodeURIComponent(u.pathname)); res.writeHead(204); return res.end(); }   // R2 지우기
+  if (u.pathname === '/__dels') return send(res, 200, state.dels || []);
   if (m && req.method === 'DELETE') {   // 시험용 취소 — 있으면 지우고 200
     const had = !!state.tasks[m[1]]; delete state.tasks[m[1]];
     return send(res, had ? 200 : 404, had ? {} : { error: { code: 'NotFound' } });
@@ -91,4 +104,5 @@ http.createServer(async (req, res) => {
   }   // 시험용 보관함(NCP · R2) 올리기
   if (req.method === 'HEAD') { res.writeHead(404); return res.end(); }
   return send(res, 503, { error: 'fake' });
-}).listen(FAKE_PORT, '127.0.0.1', () => console.log('fake', FAKE_PORT, DIR));
+});
+server.listen(FAKE_PORT, '127.0.0.1', () => console.log('fake', FAKE_PORT, DIR));

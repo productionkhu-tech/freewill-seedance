@@ -542,6 +542,27 @@ async function startServer() {
     }
   }
 
+  // 아직 못 보낸 카드가 R2 파일을 붙잡는다(26.11.25~) — ×N 카드는 같은 R2 주소를 쓴다. 하나가 먼저 끝나 파일을 지우면
+  // BytePlus 대기열(429)이나 자동 인증을 기다리던 나머지는 '파일을 못 받음' 으로 실패한다. 태스크처럼 센다(열쇠 hold:카드id).
+  // 놓을 때: 보냈으면 바로(진짜 태스크가 이미 세고 있다), 못 보내고 끝났으면 1분 뒤(같은 파일로 막 나가던 요청이 있을 수 있다).
+  const holdTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  function holdR2(id: string, urls: string[]) {
+    const t = holdTimers.get(id);
+    if (t) { clearTimeout(t); holdTimers.delete(id); }
+    if (taskToR2Keys.has(`hold:${id}`)) return;
+    const keys = [...new Set(urls.filter(isR2Url).map(extractR2Key).filter((k): k is string => !!k))];
+    if (!keys.length) return;
+    taskToR2Keys.set(`hold:${id}`, keys);
+    for (const k of keys) r2KeyRefCount.set(k, (r2KeyRefCount.get(k) || 0) + 1);
+  }
+  function releaseR2(id: string, sent: boolean) {
+    if (!taskToR2Keys.has(`hold:${id}`) || holdTimers.has(id)) return;
+    if (sent) return scheduleR2Delete(`hold:${id}`);
+    const t = setTimeout(() => { holdTimers.delete(id); scheduleR2Delete(`hold:${id}`); }, 60_000);
+    t.unref?.();
+    holdTimers.set(id, t);
+  }
+
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
@@ -2991,6 +3012,42 @@ async function startServer() {
   });
 
   // BytePlus API — Create Task
+  // 생성 요청이 '연결도 되기 전에' 끊긴 것만 다시 보낸다(26.11.25~, 1 · 3 · 6초 뒤 세 번까지) — 요청이 나가지 않았으니 두 번 만들어지지 않는다.
+  // 보내던 중 끊긴 것(ECONNRESET · 응답 시간 초과)은 BytePlus 가 받았는지 모른다 → 다시 보내면 두 번 과금될 수 있어 그대로 던진다(사람이 정한다).
+  const NOT_SENT = new Set(['ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH']);
+  const neverSent = (e: any): boolean => {
+    const c = e?.cause;
+    if (!c) return false;
+    if (c.code === 'UND_ERR_CONNECT_TIMEOUT') return true;
+    if (Array.isArray(c.errors) && c.errors.length) return c.errors.every((x: any) => NOT_SENT.has(x?.code) && x?.syscall === 'connect');
+    return NOT_SENT.has(c.code) && (c.syscall === 'connect' || c.syscall === 'getaddrinfo');
+  };
+  async function fetchUnlessSent(go: () => Promise<Response>): Promise<Response> {
+    for (const wait of [1000, 3000, 6000]) {
+      try { return await go(); } catch (e: any) {
+        if (!neverSent(e)) throw e;
+        console.warn(`[BytePlus API] 연결 실패(${e.cause?.code || e.message}) — 요청이 나가지 않아 ${wait / 1000}초 뒤 다시`);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+    return go();
+  }
+
+  // 보내던 중 끊긴 이유를 사람 말로 — 다시 만들어도 되는지(과금)가 갈린다.
+  const createFailText = (e: any): string => {
+    if (neverSent(e)) return `BytePlus 에 연결하지 못했어요(${e.cause?.code || '연결 실패'}) — 요청이 나가지 않아 과금이 없어요. 인터넷을 확인하고 재생성(✦)하세요.`;
+    if (e?.message === 'fetch failed' || e?.name === 'TypeError') return `BytePlus 에 보내는 중 연결이 끊겨 답을 받지 못했어요(${e?.cause?.code || '끊김'}) — 요청이 들어갔다면 과금됐을 수 있어요. 다시 만들기 전에 필요한지 확인해 주세요.`;
+    return e?.message || String(e);
+  };
+
+  // 아직 못 보낸 카드의 R2 파일 붙잡기 · 놓기(위 holdR2)
+  app.post('/api/r2-hold', (req, res) => {
+    const id = String(req.body?.id || ''), urls = Array.isArray(req.body?.urls) ? req.body.urls.filter((u: any) => typeof u === 'string').slice(0, 64) : [];
+    if (!/^[\w-]{8,64}$/.test(id)) return res.status(400).json({ error: 'id' });
+    if (req.body?.release) releaseR2(id, req.body.release === 'sent'); else holdR2(id, urls);
+    res.json({ ok: true });
+  });
+
   app.post('/api/byteplus/tasks', async (req, res) => {
     console.log('[BytePlus API] Creating task...');
 
@@ -3062,11 +3119,11 @@ async function startServer() {
     }
 
     try {
-      const create = () => fetch(bpTasks(), {
+      const create = () => fetchUnlessSent(() => fetch(bpTasks(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey()}` },
         body: JSON.stringify(byteplusBody)
-      });
+      }));
       let response = await create();
       // 401 = 키가 틀렸다(관리자가 Cloudflare 에서 바꾸고 옛 키를 끊음). 게이트웨이에서 새로 받았으면 한 번만 다시.
       // 만들기는 401 이면 태스크가 안 생기므로 다시 보내도 두 번 만들어지지 않는다.
@@ -3117,7 +3174,7 @@ async function startServer() {
       res.status(response.status).json(data);
     } catch (error: any) {
       console.error('[BytePlus API] Create Error:', error);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: createFailText(error) });
     }
   });
 
