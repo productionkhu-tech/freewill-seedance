@@ -1,11 +1,14 @@
 import { useState, useMemo, useEffect, useCallback, memo } from 'react';
 import { useAppStore, AssetCategory, ElementAsset, ElementImage, MODELS, modelImageMax, mentionKey, uniqueElementName, groupElementFiles } from '../store';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Plus, Search, Trash2, Image as ImageIcon, Upload, Check, Link2, Pencil, Layers, User, MapPin, Package, AlertTriangle, Share2, Copy, Loader2 } from 'lucide-react';
+import { X, Plus, Search, Trash2, Image as ImageIcon, Upload, Check, Link2, Pencil, Layers, User, MapPin, Package, AlertTriangle, Share2, Copy, Loader2, ShieldCheck } from 'lucide-react';
 import { getFilePath, validateImageFile, validateImageDimensions, createThumbnail, createElementPackLink, fetchElementPackByLink, storeLibraryImage, libraryPreviewSrc, libraryImageDataUrl } from '../lib/utils';
 import { HoverZoom } from './HoverZoom';
 import { RevealSourceButton } from './RevealSource';
 import { findSourcePath } from '../lib/source-path';
+import { bpScope, bpCardState, bpCardError, registerElement, kickBpPoll, verifyBpAssets, type BpCardState } from '../lib/bp-assets';
+import { PERSONAL } from '../lib/edition';
+import { fileToElementImage } from '../lib/element-image';
 
 // Category visuals — shared with ChatArea mention pills. `accent` is the solid
 // dot color used in the prompt pills (kept emoji-free for a cleaner look).
@@ -68,24 +71,9 @@ function parseBundle(text: string): { kind: 'collection' | 'asset'; collectionNa
   return { kind: b.kind === 'asset' ? 'asset' : 'collection', collectionName: typeof b.collectionName === 'string' ? b.collectionName : undefined, assets };
 }
 
-// Process a picked/dropped file into an ElementImage: small thumbnail (for prompt pills
-// and the editor grid) + the ORIGINAL bytes stored as a file in the server library
-// (libId). 26.9.3001~ the original is never held in memory as base64 — cards and hover
-// load a JPG preview by URL (libraryPreviewSrc), and send/copy/share read the original
-// file untouched. storeLibraryImage verifies the server wrote every byte.
-// 에이전트 작업함(ChatArea 의 elements.add)도 이 함수로 등록한다 — 검사 · 썸네일 · 원본 저장이 화면과 같게.
-// path: 파일 객체에서 경로를 못 얻는 길(에이전트는 경로로 읽어 File 을 새로 만든다)이 알려 주는 원본 경로.
-export async function fileToElementImage(file: File, path?: string): Promise<ElementImage> {
-  const sizeErr = validateImageFile(file);
-  if (sizeErr) throw new Error(sizeErr);
-  const dimErr = await validateImageDimensions(file);
-  if (dimErr) throw new Error(dimErr);
-  // 256, not the 80 default: the thumbnail is what the editor grid and the drop dialog
-  // actually paint, and 80px was sized for prompt pills. ~15KB per image — noise.
-  const [thumbnailUrl, libId] = await Promise.all([createThumbnail(file, 256), storeLibraryImage(file, file.name)]);
-  const originalPath = path || getFilePath(file);
-  return { id: crypto.randomUUID(), libId, thumbnailUrl, ...(file.name ? { file_name: file.name } : {}), ...(originalPath ? { originalPath } : {}) };
-}
+// 파일 → 라이브러리 사진은 lib/element-image.ts(26.11.24~ 옮김 — 레퍼런스 칸 방패 · 자동 인증이 lib 에서 부른다). 에이전트 작업함(ChatArea 의
+// elements.add)도 같은 함수 — 검사 · 썸네일 · 원본 저장이 화면과 같게. 예전 import 길이 깨지지 않게 여기서도 내보낸다.
+export { fileToElementImage };
 
 /* ─── Drag & drop intake: OS files → assets named after the files ─── */
 // Every other way into this library makes you retype a name that is already sitting on the
@@ -614,8 +602,18 @@ function ImportDialog({ currentCollectionName, onCommit, onClose }: {
 // content-visibility:auto — 화면 밖 카드는 레이아웃·페인트를 건너뛴다. 창을 열고 닫을 때의
 // 애니메이션이 49장을 한꺼번에 그리느라 끊기던 것을 이걸로 없앤다. 스크롤 시 높이가 튀지
 // 않도록 contain-intrinsic-size 로 예상 크기를 알려준다.
-const AssetCard = memo(function AssetCard({ asset, sharing, imagesReady, onOpen, onShare, onDelete }: {
+// BytePlus 에셋 등록 상태 배지(26.11.2301~, lib/bp-assets.ts) — 늘 보이게(손을 대야 보이면 '되어 있나' 를 모른다).
+const BP_BADGE: Record<Exclude<BpCardState, 'none'>, { text: string; cls: string }> = {
+  processing: { text: '등록 중…', cls: 'bg-amber-500/90 text-white' },
+  active: { text: '인증 완료', cls: 'bg-emerald-600/90 text-white' },
+  failed: { text: '등록 실패', cls: 'bg-red-600/90 text-white' },
+  partial: { text: '일부 등록', cls: 'bg-amber-500/90 text-white' },
+  gone: { text: '지워짐', cls: 'bg-gray-500/90 text-white' },   // 보관함 정리 · 만료로 BytePlus 에서 지워짐(26.11.24~) — 쓸 때 다시 등록
+};
+
+const AssetCard = memo(function AssetCard({ asset, sharing, imagesReady, onOpen, onShare, onDelete, bpState = 'none', bpError = '', bpBusy = false, onRegister }: {
   asset: ElementAsset; sharing: boolean;
+  bpState?: BpCardState | 'off'; bpError?: string; bpBusy?: boolean; onRegister?: (a: ElementAsset) => void;
   // 열기 애니메이션이 끝나기 전에는 false. 커버가 원본 해상도라 디코딩이 무거운데,
   // 그게 애니메이션과 같은 프레임에서 경쟁하면 창이 뚝뚝 끊긴다. 애니메이션을 먼저 끝내고
   // 그 다음에 이미지를 붙인다.
@@ -642,7 +640,20 @@ const AssetCard = memo(function AssetCard({ asset, sharing, imagesReady, onOpen,
           : <div className="w-full h-full flex items-center justify-center text-gray-300"><ImageIcon size={28} /></div>}
         <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ background: meta.bg, color: meta.text }}><CatIcon size={10} /> {meta.name}</span>
         {asset.images.length > 1 && <span className="absolute bottom-1.5 right-1.5 text-[10px] font-medium text-white bg-black/55 px-1.5 py-0.5 rounded-full">{asset.images.length}장</span>}
+        {bpState !== 'none' && bpState !== 'off' && (
+          <span data-bp-state={bpState} title={bpState === 'failed' && bpError ? bpError : bpState === 'active' ? 'BytePlus 에셋으로 등록됨 — 보낼 때 사진 대신 에셋이 나가요(실사 얼굴도 안 막혀요)'
+              : bpState === 'gone' ? '보관함 정리로 BytePlus 에서 지워졌어요 — 쓸 때 자동으로 다시 등록돼요(방패로 지금 다시 등록할 수도 있어요)' : undefined}
+            className={`absolute bottom-1.5 left-1.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full ${BP_BADGE[bpState].cls}`}>
+            {bpState === 'processing' ? <Loader2 size={10} className="animate-spin" /> : bpState === 'active' ? <Check size={10} /> : bpState === 'failed' ? <AlertTriangle size={10} /> : <ShieldCheck size={10} />}
+            {BP_BADGE[bpState].text}
+          </span>
+        )}
         <div className="absolute top-1 right-1 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {onRegister && bpState !== 'off' && bpState !== 'active' && bpState !== 'processing' && (
+            <button data-bp-register onClick={(e) => { e.stopPropagation(); onRegister(asset); }} disabled={bpBusy}
+              title={bpState === 'failed' ? `다시 등록 — ${bpError || '실패'}` : bpState === 'gone' ? '지금 다시 등록 — 보관함 정리로 지워진 에셋(쓸 때 자동으로 다시 등록되기도 해요)' : 'BytePlus 에셋으로 등록 — AI 로 만든 가상 인물이 실사처럼 보여 막힐 때. 실존 인물은 안 돼요(BytePlus 본인 인증 에셋으로). 한 번 해 두면 계속 써요'}
+              className="bg-black/55 hover:bg-emerald-600 text-white rounded-full p-1">{bpBusy ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}</button>
+          )}
           <button onClick={(e) => { e.stopPropagation(); onShare(asset); }} disabled={sharing} title="이 어셋 공유 링크" className="bg-black/55 hover:bg-[#0071e3] text-white rounded-full p-1">{sharing ? <Loader2 size={12} className="animate-spin" /> : <Share2 size={12} />}</button>
           <button onClick={(e) => { e.stopPropagation(); onDelete(asset); }} title="삭제" className="bg-black/55 hover:bg-red-500 text-white rounded-full p-1"><Trash2 size={12} /></button>
         </div>
@@ -695,6 +706,30 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
   const [editing, setEditing] = useState<ElementAsset | 'new' | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   const [shareBusy, setShareBusy] = useState<string | null>(null); // key currently generating a link
+  // BytePlus 에셋 등록(26.11.2301~, lib/bp-assets.ts) — 이 PC 팀 키의 BytePlus 프로젝트(배지는 그 프로젝트 기준). 개인판은 없다('off').
+  const [bpProject, setBpProject] = useState<string | null>(null);
+  const [bpBusy, setBpBusy] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    if (!open || PERSONAL) return;
+    // 등록한 적이 있을 때만 묻는다 — 이 기능을 안 쓰는 사람이 라이브러리를 열 때마다 게이트웨이를 부르지 않게(배지를 그릴 것도 없다).
+    // 처음 등록하는 순간(registerBp)에 프로젝트를 알게 된다. 이미 아는 값(10분 기억)은 다시 묻지 않는다.
+    const anyBp = useAppStore.getState().elementAssets.some(a => a.images.some(im => im.bpAssets && Object.keys(im.bpAssets).length > 0));
+    if (!anyBp) return;
+    let alive = true;
+    void bpScope().then((s) => { if (alive) setBpProject(s.project); if (s.project) { kickBpPoll(1000); void verifyBpAssets(); } });
+    return () => { alive = false; };
+  }, [open]);
+  const registerBp = useCallback(async (a: ElementAsset) => {
+    setBpBusy((s) => new Set(s).add(a.id));
+    try {
+      const r = await registerElement(a.id);
+      const s = await bpScope();
+      setBpProject(s.project);
+      window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { msg: `[${a.name}] ${r.message}`, ok: r.ok } }));
+    } finally {
+      setBpBusy((s) => { const n = new Set(s); n.delete(a.id); return n; });
+    }
+  }, []);
   // Size and elapsed seconds, not a percentage — see createElementPackLink for why a
   // percentage here would be made up. 240MB takes ~26s, so the wait needs SOMETHING.
   const [shareMB, setShareMB] = useState(0);
@@ -782,7 +817,12 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
       if (!selectedCollectionId) return;
       addElementAsset({ collectionId: selectedCollectionId, ...data });
     } else if (editing && editing !== 'new') {
-      updateElementAsset(editing.id, data); // id + collectionId pinned → mention pills + send stay valid
+      // 편집 창이 열려 있는 사이 BytePlus 등록 상태가 바뀌었을 수 있다(창은 열 때의 사본을 들고 있다) — 같은 사진이면 지금 상태를 이어 붙인다.
+      // 지운 사진의 등록은 따라 사라지고, 새로 넣은 사진은 등록 전이다(26.11.2301~).
+      const live = useAppStore.getState().elementAssets.find(a => a.id === editing.id);
+      const bpOf = new Map((live?.images || []).map(im => [im.id, im.bpAssets]));
+      const images = data.images.map(im => { const bp = bpOf.get(im.id); return bp ? { ...im, bpAssets: bp } : im; });
+      updateElementAsset(editing.id, { ...data, images }); // id + collectionId pinned → mention pills + send stay valid
     }
     setEditing(null);
   };
@@ -1008,7 +1048,9 @@ export function ElementLibrary({ open, onClose, projectId }: { open: boolean; on
                       {filtered.map(a => (
                         <AssetCard key={a.id} asset={a} sharing={shareBusy === 'asset-' + a.id}
                           imagesReady={imagesReady}
-                          onOpen={openEditor} onShare={shareAsset} onDelete={removeAsset} />
+                          onOpen={openEditor} onShare={shareAsset} onDelete={removeAsset}
+                          bpState={PERSONAL ? 'off' : bpCardState(a, bpProject)} bpError={bpCardError(a, bpProject)}
+                          bpBusy={bpBusy.has(a.id)} onRegister={PERSONAL ? undefined : registerBp} />
                       ))}
                     </div>
                   )}

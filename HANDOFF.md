@@ -470,7 +470,9 @@ E 1분마다 변화 + 숨김 없음(사고 상황) → 첫 변화 15.0분 뒤 ·
 개수 1~3. **URL 은 24시간**, task 기록은 7일.
 
 > ### ★ 미디어 길이 상한은 API 에게 직접 물어라 (무과금)
-> BytePlus 는 검증을 **`resolution` → `ratio` → `duration` → 미디어** 순으로 한다.
+> BytePlus 는 검증을 **`resolution` → `duration` → `ratio` → 미디어** 순으로 한다(2026-11-24 대조군으로 바로잡음 —
+> `99:1` + duration 99 는 duration 오류, `99:1` + duration 5 는 ratio 오류. 예전 이 줄은 ratio 와 duration 이 뒤바뀌어 있었다).
+> 비율은 목록 값만 받는다 — `256:135` · `2048:1080` · `1.9:1` 은 ratio 오류(같은 날, 뒤에 깨진 이미지를 안전핀으로).
 > (§5-2 의 무과금 프로브가 `ratio` 를 안전핀으로 쓰는 이유이자, 그 프로브로는 **미디어 길이를
 > 잴 수 없는** 이유다 — 30초짜리 비디오도 ratio 에서 먼저 걸려 통과처럼 보인다. 실측 2026-08-07.)
 > 길이를 재려면 **파라미터를 전부 정상으로 두고 과길이 미디어를 보낸다.** 초과면 HTTP 400 +
@@ -649,6 +651,18 @@ BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 
   만료되면 'Draft 만료 · 본편 불가'. 카드가 memo 라 예전엔 앱을 켜 둔 채 만료가 지나도 버튼이 남았다(누르면 막히긴 했다, 26.10.2901~).
   잠자기 뒤 타이머가 늦을 수 있어 길어도 1시간마다 다시 본다.
 - 초안 id 를 해상도보다 **먼저** 검사한다 — 가짜 초안 id 로는 본편 해상도 허용 여부를 공짜로 못 본다(2026-10-26).
+- **★ 본편은 표준 비율로 눌린다(2026-11-20 무렵~, BytePlus 쪽 변화).** 초안은 원본 모양 그대로(2048x1080 → 882x464)인데 본편은
+  가장 가까운 표준 비율(16:9 · 21:9 · 9:16 …)로 **잘리지 않고 눌려** 나온다 — AFX_3 2048x1080 시험 차트 본편 1920x1080 에서 원이 가로 6.5% 줄어 타원.
+  6T 1.85 플레이트는 11/19 까지 본편 979:529(원본 모양) → 11/20 오후부터 16:9(약 4% 눌림). 본편에 `ratio` 를 실으면 동기 400
+  "ratio is not supported for draft_task"(과금 없음) — 앱이 고칠 길이 없다. **원본 비율이 필요한 플레이트는 초안을 끄고 1080p 로 바로**
+  (실측 11/24, 2048x1080 차트 편집: 2.5 1080p 바로 1982x1046 · Flash 720p 1322x696 · 초안 882x464 전부 원 모양 그대로, 2.0 Fast adaptive 는 864x496 16:9 로
+  양옆 잘림 — 2.0 은 원래 표준 비율 6개만). **우리 손 재현**: 같은 차트 초안 `cgt-20261124172427-e1w9e`(882x464, 원 1.004) → 앱과 같은 본편
+  요청(draft_task + 1080p) `cgt-20261124174512-m66mq` = 1920x1080, 원 가로/세로 0.940(6% 눌림, 잘림 없음 — 네 모서리 띠 다 보임).
+  값: 1080p 바로 47만 토큰 ≈ 본편 하나(47만)와 같다 — 초안 9만만 빠진다. 스크립트 scratchpad `ratio/edit-ratio.mjs` · `final-plain.mjs`.
+  **문서(2607688 · 1520757, 11/24 17:18 판)는 이 변화를 말하지 않는다** — 본편은 초안의 ratio 를 '자동으로 재사용' 해 일관된 영상을 만든다고만,
+  편집은 '고른 영상의 비율을 유지' 한다고만 적혀 있다. 1080p 픽셀 표에는 표준 비율 여섯 칸뿐(16:9 1920x1080 · 21:9 2206x946 …) — 본편이 그 표로 맞춰지는 듯.
+  문서와 다르게 동작하는 것이니 BytePlus 에 물어볼 거리다.
+  곁가지: 편집 결과 길이는 원본보다 최대 0.4초 짧을 수 있다(문서 "Due to input frame processing") — 120f 원본 → 113f(0.29초), 121f 원본은 121f.
 - **4K**: 2026-10-26 엔 계정 단위로 막혀 있었다(2.5 순정 `4k` · 초안 → `4k` 본편 모두 동기 400 "not supported for this account and model",
   `dreamina-seedance-2-5-premium-260915` 404). 2026-11-17 무료 확인(해상도 통과 → 비율에서 거절)으로 열린 것을 보고 26.11.1801 에 2.5 `res` 와
   본편 해상도를 넓혔다. 권한은 시트 F열(§5-2). 4K = 같은 길이 1080p 의 약 1.6배 값($4.7/100만 · 화소 4배).
@@ -664,6 +678,197 @@ BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 
   ($0.762 vs $1.165), 시간은 절반(68초 vs 142초). 규격 같음(H.264 High 1280x720 24fps · AAC), 비트레이트 10.9 vs 16.4 Mbps.
   그림은 2.5 가 장면을 짜고 카메라가 움직이고, Flash 는 정면 한 컷에 지시를 그대로(움직임 약 57%). 파일 · 비교 그림: `시댄스 api\flash시험_20261116\`.
 - 단가(토큰 100만당): 영상 입력 없음 $7.0 · 있음 $4.3 (2.5: 480/720p $10.70 · 1080p $11.7 · 영상 입력 $6.40/$7.0).
+
+### 5-8. 실존 인물 얼굴 · BytePlus 에셋(asset://) · 신뢰 결과물 (26.11.2301~)
+
+BytePlus 문서 셋(2026-11-19~20 갱신 — 본문이 스크립트로 그려져 WebFetch 로는 빈 껍데기만 온다, 브라우저로 읽을 것):
+`seedance-portrait-asset-guide` · `upload-real-person-portrait-assets` · `private-virtual-avatar-library-guide`(ModelArk/2333565) · `error-codes`.
+- **Seedance 2.0 · 2.5 는 실존 인물 얼굴이 든 레퍼런스 이미지 · 영상을 바로 받지 않는다.** 오류 `InputImageSensitiveContentDetected.PrivacyInformation`
+  · `InputVideoSensitiveContentDetected.PrivacyInformation`(HTTP 400). 앱은 코드까지 카드에 남기고(`byteplusErrorText` · 실패 태스크도) 이미지/영상을
+  가려 세 길을 알려 준다(`src/lib/translate-error.ts` — 카드 · 미니 창 같은 문구).
+- 쓸 수 있는 길 셋:
+  1. **BytePlus 에셋** — 공개 디지털 캐릭터 · 비공개 가상 인물 라이브러리 · 본인 인증(KYC)한 실존 인물. 요청에는 레퍼런스 주소 자리에 `asset://<에셋 ID>`
+     (ID 예 `asset-20260410114236-8cdfz`), image_url / video_url / audio_url 모두. 프롬프트에서는 "Image 1" 꼴로 부르고 **에셋 ID 를 쓰지 않는다**(앱의 [Image N] 이 그 순서).
+     ★ 에셋은 **BytePlus 프로젝트마다 따로** — 등록한 프로젝트의 키(= 그 팀의 프로젝트 코드)로만 쓸 수 있다. 실존 인물(KYC) 등록은 콘솔
+     (Model Playground › My assets)에서 사람이 한다. 가상 인물은 앱이 게이트웨이를 거쳐 등록한다(아래 '에셋 자동 등록' — Assets API 는 AK/SK 서명
+     ServiceName ark, Version 2024-01-01 이라 키는 게이트웨이에만).
+  2. **신뢰 결과물** — 같은 계정이 30일 안에 만든 **원본** 결과물(Seedance 영상 2026-03-11~ · 그 마지막 프레임 이미지 · Seedream 5.0 이미지 2026-04-16~).
+     "secondary editing" · 재압축 · 캡처는 안 된다. 결과 URL 은 24시간.
+  3. 실사가 아닌(스타일라이즈) 이미지.
+- 앱에서(`src/lib/byteplus-asset.ts` 한 곳): 설정 패널 'URL / Asset ID로 추가' 가 `asset-…` · `asset://…` 를 받아 다듬고(모양이 아니면 거절 + 이유) ·
+  에이전트 refs `{ "asset", "type": "image"|"video"|"audio" }`(AGENT_FEATURES `asset_refs`) — 둘 다 `attachAssetRefTo`(send-request) 한 함수로 칸 수 · 역할 · 중복을 본다.
+  에셋은 캐시 · R2 · 재업로드를 안 거치고 주소 그대로 나간다. 화면은 `<img>` 로 그리지 않는다(`imgSrcOk` · `AssetTile` — 브라우저는 asset:// 을 못 연다).
+  재사용 · 재생성(`prepareReuse`) · 받은 영상의 설정 상자는 asset:// 를 그대로 되살린다. 옴니는 받지 않는다(거절 + 이유).
+- **앱이 받은 영상 = 원본 + 설정 상자**(§6 '영상에 생성 설정 넣기'). 그 파일을 다시 레퍼런스로 넣으면 R2 에 올리기 직전에 상자를 떼어 원본 바이트로 보낸다
+  (`src/lib/settings-box-strip.ts`, server `/api/reupload` · `/api/reupload-from-path` 의 `originalBytesForByteplus`). 캐시 파일 · cacheId · '수정됐나' 검사는 그대로.
+- R2 에 다시 올린 원본 사본도 '신뢰' 로 받는다(11/23 실측 — 영상 v2v, 아래 '실제 시험'. 이미지 사본은 아직 안 해 봄).
+  모르는 것: 에셋 쪽 거절의 정확한 문구(지금은 `hasAsset` · 카드 `bpAssetRefs` 일 때 흔한 원인을 덧붙이기만).
+- **첫 · 끝 프레임 실측(2026-11-24, 진짜 BytePlus · TA 키 → 2DT · 480p 5초 · scratchpad `portrait\real\frame-assets.mjs` · `frame-raw-order.mjs`)**:
+  - 첫 프레임에 실사 AI 인물 사진 그대로(role 없음) → 동기 400 PrivacyInformation. 프레임 자리도 얼굴 검사를 한다.
+  - 에셋을 **첫 프레임(role 없이 — 앱 image_to_video_first 모양) · first_frame · last_frame 으로 받는다** — 2.0 Fast(cgt-20261124093953-lpz4g ·
+    093954-4vm0c) · 2.5 Flash(093955-oit8b) 모두 성공. 첫 = 에셋 · 끝 = 사진 그대로면 그 사진 칸(`content[2]`)만 막힌다.
+  - ★ **BytePlus 는 role 이 아니라 '항목 순서' 로 첫 프레임을 정한다.** `[last_frame B, first_frame A]` 로 보내자 영상이 B 로 시작해 A 로 끝났다 —
+    에셋(4vm0c)도, 사람 없는 그냥 사진(cgt-20261124094247-7a1a2, 밤하늘 → 해돋이로 거꾸로)도. 앱은 패널을 늘 Start → End 로 보여 주지만
+    (SettingsPanel `FRAME_RANK`) 스토어는 넣은 순서라, **첫 프레임 칸을 지웠다 다시 넣으면 거꾸로 나가던 옛 버그**였다(26.11.24 고침 —
+    send-request 가 보내는 사본을 첫 → 끝으로 줄 세운다. 모두 프레임일 때만 · 스토어는 그대로 · 카드 레퍼런스도 그 순서).
+  - 2.0 Fast 는 2:3 사진에서 3:4(560×752), 2.5 Flash 는 265:397(530×794) — adaptive 가 고르는 비율이 모델마다 다르다(에셋과 무관).
+- 시험: scratchpad `portrait\test-units.mts`(상자 떼기 · ID · 문구 16) · `portrait\t-portrait.mjs`(격리 앱 · 가짜 BytePlus 의 FACEIMG · FACEVID · FACEFAIL — 순서 · 역할 ·
+  원본 바이트 · 재생성 · 거절 · 옴니 · 문구 · 미니 창 · 설정 상자 · 패널 입력 28항목).
+
+**에셋 자동 등록 (26.11.2301~)** — 사용자 2026-11-23: "어셋 올리면 삥글삥글 돌더니 인증 완료! … 한 번 해놓으면 쭉 쓸 수 있고". GPT 이미지 등으로 만든 AI 인물도
+실사처럼 보이면 막히므로 비공개 가상 인물 라이브러리에 올려 쓴다.
+```
+어셋 라이브러리 카드 'BytePlus 등록'(방패) ─▶ 서버 /api/bp-assets/register ─ 원본(libId)을 R2 서명 주소(24시간)로
+   └ 배지: 등록 중… / 인증 완료 / 등록 실패 / 일부 등록        └▶ 게이트웨이 /v1/assets/register(출입증) ─ AK/SK 서명 ─▶ BytePlus CreateAssetGroup · CreateAsset
+lib/bp-assets.ts 가 처리 중이면 몇 초마다 /api/bp-assets/status ─▶ /v1/assets/status ─▶ GetAsset(Processing → Active / Failed)
+보내기(send-request): @인물 사진이 이 팀 프로젝트에서 Active 면 사진 대신 asset://id — [Image N] 번호 · 옴니 길은 그대로
+                     패널 · 첫/끝 프레임 칸에 그대로 넣은 같은 사진(바이트가 같으면)도 asset://id (26.11.24~, 칸 하나 = 항목 하나)
+```
+- **패널 · 프레임 칸도 인증 사진이면 에셋(26.11.24~)**: 사용자가 인증한 사진을 @이름 대신 첫 · 끝 프레임이나 레퍼런스 칸에 끌어 넣어도 에셋으로 나간다.
+  맞추는 열쇠는 내용 — 패널 레퍼런스의 cacheId 와 라이브러리 사진의 libId(· 옛 cacheId) 앞 12자리가 둘 다 md5(store `contentKey`). `bp-assets
+  certifiedAssetUrl` · `certifiedAnywhere`(라이브러리 배열마다 한 번 만드는 표). 첨부 때 바이트로 맞추므로 원본 파일이 그 뒤 고쳐져도 칸에 보이는 그 사진의 에셋.
+  이 팀 프로젝트에서 Active 가 아니면(처리 중 · 실패 · 다른 팀만 · 인물을 지움) 예전처럼 사진을 올린다 — 기다리지 않는다. 칸에는 썸네일 모서리 초록 배지
+  (SettingsPanel `AssetRow`, 옴니 · 개인판은 안 보임 — 아래 '레퍼런스 칸의 방패' 의 모양). 카드에는 실린 에셋 수 `bpAssetRefs`(usedAssets 칸마다 적으면 재사용이 그 값을 패널로 되살려서 카드 칸에).
+  에이전트가 그 사진을 refs 경로로 넘겨도 같다(설명서 RULES). 시험 scratchpad `portrait\t-frames.mjs` 19항목(섞어 넣기 · 지웠다 다시 넣기 · 둘 다 ·
+  첫 프레임만 · 다른 팀 · 처리 중 · 같은 사진 인물 둘 · 인물 지움 · 레퍼런스 순서 · 에이전트 역할 거꾸로 · 화면 표시 · 옴니).
+- **레퍼런스 칸의 방패(26.11.24~, 사용자 "레퍼런스 칸에도 방패 넣어줘 그게 편할 거 같음")**: 이미지 칸(회사판 · Seedance 모델)에 방패 —
+  누르면 같은 바이트의 라이브러리 인물 카드(있으면 그 카드, 없으면 이 채팅에 연결된 컬렉션에 새로 · 연결이 없으면 '레퍼런스 인물' 컬렉션 · 이름은
+  파일 이름, 겹치면 '이름 2')를 **라이브러리 방패와 같은 `registerElement`** 로 등록한다 — 등록 길은 하나(중복 · 한도 · 다시 하기 그대로).
+  칸에는 같은 바이트 라이브러리 사진의 상태를 그대로 그린다(`panelBpState` — 등록 중 · 실패 + 다시 · 끝나면 인증).
+  같은 사진을 두 칸에서 동시에 눌러도 카드 하나(`certifying` 표, 열쇠 contentKey). 오디오 칸 · 옴니 · 개인판엔 없다.
+  **모양(26.11.24 바꿈, 사용자 "이 ui 가 별로 안 어울리지 않니 · 등록 성공도" → "저 폴더로 열기랑 인증이랑 겹치자너")**: 처음엔 역할 글 옆 알약
+  (주황 · 초록 · 회색 · 빨강) → 역할 글이 잘림, 다음엔 오른쪽 아이콘 줄의 방패 → 폴더(원본 열기)와 붙어 비좁음. 지금은 **썸네일 오른쪽 아래 모서리 배지**
+  하나(`AssetRow` 의 `bpBadge`): 등록 전은 칸에 손을 올릴 때만(group-hover · 막히면 자동 인증이 하니까) · 등록 중 = 도는 고리 · 인증 = 초록 동그라미 흰 방패 ·
+  지워짐 = 회색 · 실패 = 빨강(누르면 다시, 이유는 title). 오른쪽 줄은 파일 동작(폴더 · 바꾸기 · 지우기)만. 상태가 **바뀔 때만** `bp-pop`(index.css, 180ms)
+  — 처음 그린 상태는 안 튄다(프로젝트를 열 때 칸마다 튀지 않게). 다크는 앱 규칙대로 `dark:` 색을 붙이지 않는다(색 단계가 뒤집혀 오히려 어두워짐 — index.css 맨 위).
+  시험 셀렉터는 `data-bp-register-ref` · `data-bp-ref-state`(processing · done · gone · failed).
+- **화소가 전부 같은 사진이면 인증이 이어진다(26.11.25~, 사용자 "원래 썼던 에셋을 복사해서 다시 썼어 … 어쩔 수 없는 거임?" → "무거워지지 않는다면" → "드래그앤드랍할 수도
+  있잖아 로컬에서 변수가 많음")**: 클립보드 · 다시 저장을 거치면 그림은 같은데 내용 md5 가 달라져 보관함 칸 · 카드를 하나 더 썼다(실제 두 장으로 확인). `lib/same-pixels` 가 '화소가 같은
+  내용 key 들' 을 알고(`sameKeys`), `bp-assets` 의 찾기(`imagesFor` · `libraryElementFor` · `isPhotoOf`)가 같은 바이트 다음으로 그것을 본다. **파일은 안 바꾼다** — 칸 이름 · 원본 폴더는
+  넣은 파일 그대로, 보낼 때 에셋만 같은 사진의 것. 카드 이름은 처음 등록한 파일 이름(이름으로 같은 사진을 정하지 않는다). 확인은 두 곳 — 칸에 보일 때(AssetRow) · 보내기 직전(화면에 없는
+  프로젝트 · 에이전트, 3초 넘기지 않음) + 인증 누를 때(`certifyPhoto`). 점 하나가 1 만 달라도 다른 사진, 움직이는 그림(gif · APNG · webp)은 뺀다. 비교는 화면에 보이는 색(색 프로필 · 회전 적용 뒤).
+  **PC 에 남기지 않는다**(사용자 "개인 pc에 이거 남기는 건 비추") — 켜져 있는 동안의 기억뿐, 다시 켜면 라이브러리의 등록 사진에서 다시 만든다(크기 → 256px 미리보기 16×16 비교 → 비슷할 때만 원본을 풂).
+  워커는 부르지 않는다(이 PC 안의 계산). 자동 인증 기다리기(`send-request` fixItem 의 pick)도 `isPhotoOf` 로 — 바이트로만 찾으면 '라이브러리에서 지워졌어요' 로 잘못 끝난다.
+  실측(켠 뒤 처음 한 번): 등록 없음 0ms · 50장 크기 다름 0.05초 · 50장 크기 같고 다른 그림 0.2초 · 거의 같은 그림 10장 1.2~1.6초(뒤에서, 화면 멈춤 최대 15ms). 다시 볼 때 0ms.
+  안 되는 것: 캡처 · 크기 조절 · 다시 압축(화소가 다름), 같은 그림을 라이브러리 카드로 따로 추가한 것(카드마다 등록), 옴니 · 개인판. 시험 `portrait\t-same.mjs` 31항목.
+  (처음엔 붙여넣기에서 파일을 원본으로 바꿔 넣었다가 같은 날 이 방식으로 바꿈 — `t-paste.mjs` 는 옛 시험.)
+- **자동 인증 배너 정렬(26.11.25~, 사용자 "행 정렬만 잘 맞추면 · 화면 작게 하든 크게 하든 스플릿을 갈기든")**: 창이 아니라 배너 폭(`@container`)으로 바뀐다 — 20rem 미만이면 취소가 글 아래,
+  파일 이름은 한 줄로 줄임, 9rem 미만이면 설명을 접음. 폭 74~735px 36곳에서 겹침 · 넘침 0(`portrait\banner-check.mjs`).
+- **영상 칸 배지(26.11.24~, 사용자 "이런 경우엔 어떻게 들어가는 거임 인증 버튼이")**: 영상 칸에도 같은 배지 — 누르면 `certifyVideo`(아래 '영상(v2v) 인물도
+  자동 인증' 과 같은 함수 · 같은 `videoInFlight` 라 누르고 바로 보내도 등록 한 번). 상태는 `bp-certify` 메모리(`videoBpState` · `subscribeVideoBp` →
+  `useSyncExternalStore`) — 라이브러리 카드를 만들지 않는다.
+  **영상 기록(26.11.25~, 사용자 "껐다 킬 때마다 신호 … 워커에 부담 · 용량 · 메모리만 안 차지하면 됨 · 캐시 정리하면 같이 가게")**: localStorage `seedance-vid` 에 '프로젝트:내용 key → [에셋 id, 마지막 쓴 때]'
+  한 줄씩(300개 ≈ 14KB · 30일 안 쓰면 버림). **사이드바 캐시 정리를 누르면 같이 지운다**(`forgetAllVideos`). 다시 켜도 배지가 남고 첫 보내기부터 바로 나간다 — 기록이 없을 때 되풀이되던
+  업로드 1 · 막힌 요청 1 · 게이트웨이 등록 호출 1 이 없어진다. 켤 때 기록(또는 인증 사진)이 있는 PC 만 프로젝트 확인 1 + 정리 확인 1. 지워진 에셋은 보내기의 자동 복구가 다시 등록하고 기록도 바꾼다.
+  시험 `portrait\t-vidkeep.mjs` 15항목(다른 팀 프로젝트 기록 안 씀 · 깨짐 · 300개 · 30일 · 캐시 정리 실제 클릭).
+  거절 이유는 내용 key 로 기억(`videoFailed`, 다시 누르면 지움 · '취소됨' 은 안 남김). 정리로 지워지면(`forgetVideoAsset`) 곧바로 등록 전.
+  설명에 '이 앱(Seedance)에서 만든 영상은 원래 통과 — 누르면 보관함 칸만 씀' · '실존 배우 실사 영상은 안 됨(Real-human)'. 시험 `portrait\t-vidbadge.mjs` 11항목
+  (2026-11-25 00:42~00:48 지금 코드로 하나씩 다시: t-vidbadge 11 · t-refshield 18 · t-refedge 21 · t-evict 12 · t-frames 19 모두 통과).
+  방패 설명(칸 · 라이브러리 둘 다): **AI 로 만든 가상 인물만 — 실존 인물은 안 됨**(BytePlus 비공개 가상 인물 라이브러리 조건: "must not resemble
+  any real human person's portrait", 등록 뒤 BytePlus 보안 검토). 시험 scratchpad `portrait\t-refshield.mjs` 18항목 + t-frames 19 · test-units 16 다시 통과.
+- **막히면 자동으로 고쳐 같은 카드로 다시(26.11.24~, 사용자 "오류 뜨면 … 자동으로 인증 날려준다고 뜨면 되지 않을까 기다리라고 · 방패 클릭은 귀찮잖아",
+  묻고 '완전 자동' 을 고름 — 실존 인물 사진도 그대로 등록되는 위험은 사용자가 감수)**: `send-request` 의 요청이 동기 400 으로 돌아오면
+  `fixPlan` 이 글을 읽는다 — `PrivacyInformation`(이미지) 이면 face, `The specified asset asset-… is not found`(11/24 실측 문구) 이면 gone.
+  `content[N]` 으로 그 칸이 무엇인지 안다(패널 칸 = currentAssets · @이름 = `elementSrc`, 보낸 순서 그대로). face → `certifyPhoto`(레퍼런스 칸 방패와 같은
+  `lib/bp-certify.ts` — 라이브러리 카드 찾기/만들기 → registerElement) 또는 그 인물 `registerElement`, gone → 그 id 를 쓰던 라이브러리 사진을 '없어짐' 으로
+  (`markGone`) 두고 다시 등록 → Active 가 되면(`waitActive`, 3분까지 · 시작 뒤의 '실패' 만 끝) 그 항목만 asset:// 로 바꿔 **같은 카드**로 다시 POST.
+  BytePlus 는 막힌 칸을 하나씩 알려 주므로 칸마다 되풀이(6번까지). 뒤에서 돈다 — 보내기 · 에이전트 작업함은 기다리지 않는다. 카드는 queued +
+  `bpFix`(호박색 '인증 중 … 끝나면 저절로 다시 보내요 · 실존 인물이면 취소') · 취소 단추(status failed → 다시 안 보냄). 출력 여러 개면 고치기는 한 번
+  (`fixing`), 다시 보내기는 카드마다. 영상 칸 · 원본 없는 칸 · 개인판은 고치지 않는다(예전처럼 실패 + 안내). 그 사이 앱이 꺼지면 켤 때
+  `closeOrphanCards` 가 '자동 인증을 기다리다 끊김(막힌 요청은 과금 없음) — 재생성' 으로. 에이전트 설명서 RULES 도 바꿈.
+  **다시 보내기 직전에도 `recheckBeforePost`**(11/24~, 사용자 "등록하다가 막 취소하거나 이미지 바꿀 때 오류뜨거나") — 인증을 기다린 사이 프로젝트가 지워졌거나
+  코드가 바뀌었거나 종료 · 권한이 풀렸으면 보내지 않고 이유 + '자동 인증은 끝났어요 — 재생성하면 인증된 사진으로'. 시험 `portrait\t-cancel.mjs`(방패 등록 중 칸 지움 ·
+  자동 인증 중 라이브러리 카드 지움 · 취소 직후 재생성 = 등록 한 번 · 코드 바뀜 · 프로젝트 지움 · 화면 오류 0).
+  시험 scratchpad `portrait\t-autofix.mjs`(가짜 BytePlus 가 실제 문구 · 칸 번호로 거절 — fake.mjs `faceKeys` · `goneAssets`, fake-gw `/__gone` · `/__fail`).
+- **영상(v2v) 인물도 자동 인증(26.11.24~, 사용자 "v2v 인증 절차도 해야겠지 당연히")**: 영상 칸이 `InputVideo…PrivacyInformation` 으로 막히면 그 영상을
+  **Video 에셋**으로 등록해(`lib/bp-certify certifyVideo` → server `/api/bp-assets/register` 가 이제 `type: 'Video'` 와 캐시 파일을 받음 · 규격 미리 거르기는 사진만 ·
+  올릴 때 설정 상자를 뗀 원본 바이트) Active 가 되면 같은 카드로 다시. 라이브러리(사진 카드)에는 두지 않는다 — 게이트웨이가 내용 key(캐시 id)로 에셋 하나를
+  기억 · 찾고(그룹 `v<내용 key>`), 이 PC 는 '프로젝트:내용 key → id' 를 작게 남긴다(26.11.25~, 아래 '영상 기록' — 다음 보내기부터 바로 asset:// · 기록이 없으면 첫 보내기가 한 번 막히고
+  게이트웨이가 이미 있는 에셋을 바로 돌려줌). BytePlus 가 영상 에셋을 거절하면(실존 배우로 판단 등) 카드 실패 + '에셋으로 받지 않았어요 … Real-human'.
+  **실측(11/24, 진짜 BytePlus)**: 영상 칸이 `content[1]` 로 막힘 → Video 에셋 5초 만에 Active → 같은 카드로 생성 성공(2.0 Fast 레퍼런스).
+  2.5 Flash **Edit**(omni_reference_task_type edit · adaptive · duration -1) · **Extend**(extend · 5초)도 asset:// 영상을 받아 둘 다 성공
+  (cgt-20261124220153-2h36x 95,821 토큰 · cgt-20261124220154-sp3o7 98,700 토큰, 480p, 세로 원본 → 결과도 같은 비율).
+- **모드마다(11/24, 사용자 "i2v 도 · r2v edit 등등 다 인증 잘 들어가는 거제")**: 칸 → 에셋 바꾸기와 자동 인증은 모드를 가리지 않는다(같은 content 사본을 읽음).
+  진짜 BytePlus 로 에셋을 받는 것 확인: 첫 프레임(role 없이) · 첫/끝 · 레퍼런스(사진 · 영상) · 2.5 Edit · 2.5 Extend. 자동 인증 되풀이 `MAX_FIX` 는
+  실린 사진 · 영상 수만큼(6~16) — 예전 6 고정이면 Extend 영상 10개 중 7번째부터 못 고쳤다. 시험 `portrait\t-modes.mjs`(첫 프레임 · 첫/끝 거꾸로 넣고 둘 다 막힘 ·
+  2.5 Edit 영상 · 2.5 Extend 영상 둘 · 레퍼런스 7장 모두 막힘).
+- **바꾸기 · 순서 · 재사용 · 재생성(11/24, 사용자 "래퍼런스 바꾸기 · 순서 바꿀 때 · 불러오기 할 때 짜잘한 인증 오류 없는지")** — 인증은 칸이 아니라
+  **내용(contentKey)** 을 따라가므로 칸 id 가 그대로인 교체(↻) · 순서 바꾸기 · 재사용(새 id)이 모두 맞게 따라간다. 고친 둘:
+  ① 인증으로 asset:// 로 바꿔 보낸 영상은 카드 기록(usedAssets)에 그 주소를 남기지 않는다(`thumbAssets` — 원본이 있으면 url ''). 남기면 재사용 · 받은 영상
+  설정 상자가 그 칸을 에셋 ID 로 되살려 다른 팀 코드 · 다른 PC 에서 남의 에셋이 나갔다. 사람이 넣은 에셋 ID(원본 없음)는 그대로.
+  ② 칸의 '등록 중…' 은 누른 그 내용(`bpBusyFor === cacheId`)에만 — 누른 뒤 ↻ 로 바꾸면 새 사진에 옛 표시가 붙던 것.
+  시험 `portrait\t-refedge.mjs` 21항목(교체 → 표시 · 보내기 / 되돌리기 / 순서 [에셋, 사진] ↔ [사진, 에셋] / 재사용 칸 순서 · 표시 · 보내기 / 재생성(카드가 끝난 뒤 —
+  생성 중엔 단추가 잠김) / 등록 중 교체 / 라이브러리 카드 지우기 / 영상 자동 인증 뒤 재사용 · 순서 · 기억 / 프로젝트 오가기). 같은 시험 앱에서 다른 시험 뒤에 돌리면
+  사진이 이미 인증돼 있어 틀린다 — 시험마다 새 시험 앱(run-harness-assets.ps1).
+- **오류 갈래(문서 error-codes, 11/24)**: `…PrivacyInformation` = 실사 인물인데 **인증(등록) 안 됨** → 자동 인증 대상 · `…PolicyViolation` =
+  "may be related to copyright restrictions"(유명인 · 유명 캐릭터 · 장면) → **에셋 인증으로 안 풀림**, 자동 인증 안 하고 '저작권 · 유명인 — 다른 소재로' 글
+  (translate-error) · 접미사 없는 `…SensitiveContentDetected` = 민감 콘텐츠 · `OutputImage…DeepFake` = 결과물(위조 문서 등). 실존 배우 본인 에셋 만드는 곳 링크는
+  `translate-error REAL_HUMAN_URL`(Model Playground — 아래 My assets › Real-human).
+- **보관함이 차면 정리(26.11.24~, 사용자 "에셋 보관 다 차면 어떻게 정리할 건지")** — 게이트웨이 `evictIdle`: CreateAsset 이 개수 때문에 거절하면
+  (낱말로 봄 — quota · capacity · exceed · limit …, 규격 낱말(size · resolution …)이 든 거절은 제외 · 거절 문구는 아직 실측 못 함) 이 앱이 만든 에셋
+  (AIGC 그룹 · 이름이 내용 key 꼴 — 콘솔에서 사람이 올린 것 · 실존 인물 에셋은 안 건드림) 중 마지막으로 쓰거나 만든 지 24시간 넘은 것을
+  **BytePlus 의 `LastInferenceTime`(11/24 실측 — ListAssets 항목에 ISO 시각으로 온다)** 오래된 순으로 남은 줄 수만큼(3개까지) `DeleteAsset`(10 QPS) →
+  KV `ast:a` 와 **done 잠금 `ast:lock:`** 도 지우고(안 지우면 다시 등록이 지운 옛 id 를 `done:` 으로 돌려줬다 — 11/24 고침) → 한 번 더 만든다.
+  한 호출에 정리는 한 번. 지울 것이 없으면 `asset_quota_full` + 이유. 잘못 지워도 위 '자동으로 고쳐' 의 gone 이 다음 보낼 때 다시 등록한다.
+  **정리 알아채기(11/24~, 사용자 "앱에서 안 꼬이게 잘")**: 지울 때 KV `ast:ev:<project>:<at>:<id>`(30일) 기록 → `/v1/assets/evicted`(since → 목록 · until,
+  목록 지연 2분). 앱 `bp-certify checkEvicted`/`startEvictWatch`(켤 때 8초 뒤 한 번 · 1시간마다 — 26.11.25 에 10분 · 창 돌아올 때에서 줄임, 사용자 "워커에 부담")가 물어 **active 인 것만** '지워짐'
+  (BpAssetEntry `gone`) · 칸 회색 배지 · 라이브러리 '지워짐' · 영상 기억 지움. 쓸 때 자동으로 다시 등록. 시험 gateway.test [15c](174 통과) · `portrait\t-evict.mjs` 12.
+- **영상 속 인물(앱이 안 만든 v2v 원본)**: 앱이 만든 Seedance 영상(같은 계정 · 30일 · 원본)은 그대로 통과. 그 밖의 영상은 —
+  사람 없음 · 그림체면 통과 / AI 가상 인물이면 BytePlus 가 Video 에셋도 받는다(문서: 비공개 가상 인물 라이브러리 = image · video · audio, 영상은 처리가
+  더 느림 · 막히면 앱이 자동으로 Video 에셋 등록 — 위 '영상(v2v) 인물도 자동 인증') / **실존 배우가 나오는 실사 플레이트는 실존 인물 길만** —
+  ModelArk Model Playground › My assets › Real-human › 에셋 그룹(계정 실명 · 기업 인증 필요) → 기간 정하고 QR 초대 → 배우 본인이 자기 BytePlus 계정으로
+  얼굴 인증 · 사진 · 영상 올리고 승인 → 그 에셋 ID 를 'URL / Asset ID로 추가' 로(문서 `upload-real-person-portrait-assets`, 11/24 판). 앱이 대신 못 한다.
+- **키**: 전용 IAM 사용자 `seedance-asset-gateway`(2026-11-23 만듦) · 정책 `SeedanceAssetGatewayOnly` = `ark:*Asset*` + `ark:ListApiKeys` + `iam:ListProjects` 만
+  (원본 키 꺼내기 · 사용자 목록 · 청구는 막힘 확인). AK/SK 는 리포트 암호 파일(`26.05.04 시댄스 크레딧 관리\weekly_report\secrets.dat`, DPAPI)의
+  `BP_ASSET_AK` · `BP_ASSET_SK` → 게이트웨이 비밀값 같은 이름(`node worker/setup-secrets.mjs … --bp-asset-key`). 앱 · PC 에는 안 간다.
+- **팀 → BytePlus 프로젝트**: 게이트웨이가 스스로 찾는다 — `ListProjects` 의 프로젝트마다 `ListApiKeys` 의 가린 키(앞 8 + * + 뒤 8)를 팀 키와 맞춰 본다
+  (TA → `2DT` 처럼 이름이 다르다). 팀 키 지문과 함께 KV 에 기억, 키를 재발급하면 다시 찾는다. 예외는 var `TEAM_PROJECTS`.
+- **사진마다** `ElementImage.bpAssets[프로젝트] = { id, status: processing|active|failed|retry, error, at }`(lib/bp-assets · store `setElementImageBp` —
+  편집이 아니라 updatedAt 을 안 바꾼다). 편집 창 저장은 그 사이 바뀐 등록 상태를 이어 붙인다. 공유 팩에는 안 실린다. 앱을 껐다 켜면 처리 중인 것을 이어서 본다(App).
+- **중복 · 겹침 막기**(사용자 2026-11-23 "중복적으로 들어가는 일 없게 · 동기 겹치지 않게 · 이미 올라와 있는 거 처리 · 우리 로직이랑 절대 안 꼬이게"):
+  - 열쇠는 원본 내용(libId = md5 앞 12자리 + 확장자) — BytePlus 에셋 이름도 그 값. 같은 사진은 다른 인물 · 다른 PC 에 있어도 에셋 하나.
+  - 서버는 먼저 주소 없이 묻고(이미 있으면 그대로), 없다는 것(NeedUpload)만 R2 에 올려 한 번 더 — 헛 업로드가 없다. 서버 안 등록은 한 줄로(`assetsChain`,
+    한 고리 170초까지 — 멎은 등록이 뒤를 막지 않게). 규격 밖 사진(BMP · 300px 미만 · 6000px 초과 · 비율 0.4~2.5 밖 · 30MB 이상)은 게이트웨이에 안 보내고
+    그 줄만 '등록 실패 + 이유'(`src/lib/asset-image-spec.ts` — 머리 1MB 만 비동기로 읽음). 보내면 한도를 한 번 쓰고 몇 초 뒤 Failed 로 돌아온다.
+    없는 것은 **한 장씩 올리고 바로 등록** — 분당 한도(이유 없는 Retry)에 걸리면 남은 사진은 올리지 않는다(열 장 올리고 세 장만 만들던 낭비를 없앰).
+  - 게이트웨이: KV 기억 → 없으면 BytePlus `ListAssets`(이름 정확히 같은 것, 실측 0.8초)로 찾고 → 그래도 없으면 잠금(60초) 을 잡고 **한 번 더 찾은 뒤** 만든다.
+    잠금은 이번 호출만의 표를 적고 0.3초 뒤 다시 읽어 내 표일 때만 잡은 것(같은 순간 두 PC → 하나만 만들고 하나는 Busy, 시험 [15b]).
+    만든 뒤엔 잠금 자리에 `done:<에셋 id>` 를 60초 남긴다 — 그 사이 온 다른 PC 는 또 만들지 않고 그 id 를 받는다. 실패면 잠금을 바로 지운다.
+    '등록 실패' 를 다시 누르면 한 번에 새로 만든다(죽은 id 의 done 표 · KV 의 Failed 는 비어 있는 것으로).
+  - 화면: 인물마다 등록 하나씩(`inFlightEls`), 상태 확인은 한 번에 하나(`polling`), 확인하는 사이 다시 등록된 사진엔 옛 답을 안 덮는다(에셋 id 비교).
+    같은 원본이 한 인물에 두 장이면 한 번만 보내고 답을 둘 다에 붙인다. 상태 확인의 일시 오류(Retry)는 '바뀐 것 없음'(id 를 안 지움).
+    바뀐 게 없으면 `setElementImageBp` 는 set 을 아예 안 부른다(구독자 · persist · 미니 창을 안 깨움, 시험 t-retry R4).
+  - 생성과 분리: 보낼 때는 Active 인 것만 asset:// 로 바꾸고, 프로젝트 이름은 '인증 완료' 사진이 있을 때만 3초까지 기다린다(`bpScopeQuick`) — 모르면
+    예전처럼 사진을 올린다. 인증 완료가 있는 PC 는 켤 때 프로젝트 이름을 한 번 미리 받는다(App). 등록 기록이 없는 PC 는 켤 때 · 라이브러리 · 보내기 모두 호출 0.
+    등록은 보내기를 기다리게 하지 않고, 보내기도 등록을 기다리지 않는다.
+- **한도 · 다시 하기**: 지금 무료 Entry(에셋 50 · 분당 3). 속도 한도(429 · Throttl · FlowLimit · TooManyRequests …)만 'retry'(25초부터 두 배씩, 5분까지) —
+  개수 한도(QuotaExceeded · AssetLimit 같은 이름)는 '등록 실패 + 이유'(끝없이 다시 하지 않게). **저절로 다시 하기는 'retry' 사진만**(같은 인물의 실패 사진은
+  사람이 누를 때만 — 계속 거절되는 사진이 에셋을 계속 만들지 않게). 셈은 둘: `tries`(기다림 늘리기, 한도 · Busy 포함, 끝없음) · `fails`(이유가 붙은 실패만 —
+  게이트웨이 오류 · 업로드 실패 · 원본 없음 · 오프라인). fails 가 8 을 넘으면 '등록 실패 + 마지막 이유'. 한도 대기만으로는 실패가 되지 않는다(인물 다섯 × 열 장을
+  한꺼번에 눌러도 오래 기다릴 뿐). 통째 실패도 늘려 가며 센다(2초 반복 없음).
+  처리 중 확인은 5초 → 2분 넘으면 30초 → 30분 넘으면 5분. 프로젝트를 못 찾은 답은 화면 90초 · 게이트웨이 10분(`ast:projmiss:<팀>`) 기억한다.
+  확인 중 프로젝트 이름을 잠깐 못 받아도(절전 · 와이파이) 처리 중 · 다시 할 것이 남아 있으면 확인을 접지 않고 1.5분 → … 15분 뒤 다시 잡는다.
+  커밋 후 Advanced 로 올리면 코드는 그대로.
+  ★ 유료 권리가 끝나고 15일이 지나면 유료 기간에 만든 에셋이 지워진다 — 갱신을 놓치지 말 것(그러면 카드는 '등록 실패 · 에셋이 없어졌어요' → 다시 등록).
+- 개인판 · 개발 실행(게이트웨이 없음)은 등록 단추가 '게이트웨이에 연결된 실행이 아니에요' 로 끝난다. 격리 시험은 `SEEDANCE_ASSETS_TEST_GATEWAY`(127.0.0.1) ·
+  `SEEDANCE_ASSETS_TEST_TOKEN`(설치본은 회사판 · 개인판 모두 main.cjs 가 지운다).
+- **게이트웨이 키 넣기**: `node worker/setup-secrets.mjs --only-bp-asset-key [--dry]` — 어셋 키 둘만(bat 폴더 없이). bat 폴더와 함께 `--bp-asset-key` 를 쓰면
+  팀 키 · R2 까지 bat 값으로 다시 올라가니(Cloudflare 에서만 바꾼 값이 되돌아간다) 어셋 키만 넣을 땐 쓰지 말 것.
+- **실제 시험(2026-11-23, TA팀 키 · 2DT, 새 게이트웨이 코드를 이 PC 에서 진짜 키로)** — scratchpad `portrait\real\real-e2e.mjs`:
+  GPT Image 2 로 만든 실사풍 가상 인물을 그대로 레퍼런스로 → `InputImageSensitiveContentDetected.PrivacyInformation`(동기 400, 무료) ·
+  등록: 프로젝트 찾기 6초(TA → 2DT) → NeedUpload → 올림 → Processing → **6초 뒤 Active** · 같은 사진을 다른 인물로 → 같은 에셋(중복 없음) ·
+  `asset://` 로 생성 성공(2.0 Fast 480p 5초, 111초) · v2v(BytePlus 결과 주소) 성공 · **v2v(같은 바이트를 우리 R2 에 다시 올린 사본) 성공** — 신뢰 결과물은
+  바이트가 원본이면 주소가 바뀌어도 받는다. 영상 속 인물이 등록한 얼굴 그대로였다.
+  같은 날 리뷰 고침 뒤(`real-find.mjs`, 조회만 · 무료): 게이트웨이 기억을 비운 채 같은 사진을 주소 없이 물으면 ListAssets 로 그 에셋을 0.8초 만에 찾아
+  Active 로 돌려준다(그룹 안 만듦) · 이름이 일부만 같으면 안 잡는다(NeedUpload).
+- 격리 시험 `portrait\t-assets.mjs`(18) · `t-assets-send.mjs`(2) · `t-retry.mjs`(11 — 저절로 다시 하기 범위 · 횟수(한도 대기는 안 셈) · 같은 원본 두 장 · 바뀐 것 없을 때 알림 0) ·
+  `t-impact.mjs`(8 — 안 쓰는 PC 는 켜기 · 프로젝트 오가기 · 라이브러리 · 갤러리 · 보내기에 호출 0 · 엘리먼트 쓰기 0) · `test-spec.mts`(17 — ffmpeg 로 만든
+  png · jpg · webp · gif · bmp 로 규격 판정) — 가짜 게이트웨이(`portrait\fake-gw.mjs` = 진짜 워커 코드 + 가짜 BytePlus, 분당 3 한도 흉내).
+- **시험 앱 여러 벌(11/24~)**: `minitest\run-harness-assets.ps1 -Slot N` — 0번은 옛 포트(3946 · 3947 · 3958 · 3959 · 9612), N 은 4000+20N.. · CDP 9620+N,
+  데이터 폴더도 따로(`portrait\ports.mjs` 와 같은 규칙). 시험 앱은 `DISABLE_HMR=true` 로 띄운다.
+  한꺼번에 돌리는 `minitest\run-par.ps1` 은 아직 미완 — 결과로 칠 실행이 없다(11/24: 첫 번은 창 주소를 잘못 찾아 무효, 다음 두 번은 8개 중 1개씩만 끝까지).
+  끊긴 시험은 모두 첫 `await import('/src/store.ts')` 에서 'Promise was collected'(11/25 기록 확인). 원인은 아직 확인 안 함 — 동시에 뜰 때 첫 불러오기가
+  오래 걸린 탓으로 짐작. 창 새로 고침 · 웹소켓 24678 은 근거 없는 설명이었고 `ws: false` 도 효과가 없어 되돌렸다. 하나씩 돌리는 `run-ui-suite.ps1` 이 기준.
 
 ---
 
@@ -701,6 +906,10 @@ BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 
     실행만 평문 `dev-plain`). 화면은 값을 다시 받지 않는다(끝 네 글자만, `GET /api/personal/status`). 회사판에선 두 길 다 404.
   - **회사 팀 키는 거절**: 넣을 때 앱에 박힌 해시 표(`TEAM_KEY_HASHES`) + 게이트웨이 `/v1/ticket`(입장권 = HMAC 만 보낸다, 원문 아님 —
     새로 발급 · 다시 발급한 키까지 안다). 그때 못 물어봤으면 저장하고 **켤 때마다 다시 물어** 회사 키면 지우고 띠로 알린다.
+  - **에이전트 입구 없음 — MCP 대상 아님**(26.11.2301~, 사용자 2026-11-23 "개인판엔 MCP 못붙게 해야할듯"). 서버가 `/api/agent/*` 전부
+    (status · manual · jobs · commands · sent)를 403 `{ code: 'personal_edition' }` 로 거절하고, 화면은 작업함 들르기 · 설명서 올리기를 시작하지
+    않는다(ChatArea 2초 타이머). MCP 스크립트(`send-to-seedance.mjs` · `read-local-apps.mjs` · PowerShell 안내서)는 `/api/team` → `{ team: "개인" }` ·
+    `/api/personal/status` → `byteplus` 객체로 판을 먼저 가려 멈춘다 — **이 두 응답 모양은 바꾸지 말 것**(바꾸면 MCP 쪽에 먼저 알린다).
   - **레퍼런스**: 본인 R2 로 올린다(`uploadToR2` 는 같은 함수, 값만 사용자 것). R2 가 없으면 보내기 직전에 'R2 가 필요해요' 안내
     (`send-request.ts` — '원본이 지워졌을 수 있다' 같은 엉뚱한 말 대신). 옴니는 R2 가 필요 없다(Google Files API).
   - **영상은 PC 에 받지 않는다 — 24시간 링크 + 썸네일 한 장**(26.10.2006~, 사용자 2026-10-21: "PC 가 그걸 다 다운받으면 안 될 것 같은데 ·
@@ -1446,6 +1655,11 @@ R2 에 올린다. 미리보기 JPG 는 화면에만 — 크기·품질을 바꾸
     - 한 저장 = 한 트랜잭션(바뀐 카드 + root + 지운 카드). 저장은 한 줄로(`stateWriteChain`) — `written` 이 맞아야 다음 '바뀐 것' 을 고른다.
     - 바뀐 카드는 **참조로** 안다 — 위 '제자리 수정 금지' 가 여기서도 전제다.
     - 문서 폴더 백업 파일은 모양 그대로(`persistJson` = `JSON.stringify` 와 바이트까지 같음). 그래서 옛 판으로 되돌리면 그 판은 백업에서 되살린다.
+57. **BytePlus 로 나가는 레퍼런스는 원본 바이트 그대로**(26.11.2301~, §5-8). 실존 인물 얼굴은 '같은 계정의 원본 결과물' 일 때만 받아 주므로, 레퍼런스를
+    다시 인코딩 · 자르기 · 압축 · 캔버스로 다시 그리기 하지 말 것. 앱이 덧붙인 것(영상 끝 설정 상자)만 R2 에 올리기 직전에 뗀다. 같은 이유로 `asset://` 는
+    받은 그대로 보내고(캐시 · 썸네일 · 재업로드 안 거침), 화면에 그림으로 그리지 않는다.
+58. **첫 · 끝 프레임은 첫 프레임 항목을 먼저 보낸다**(26.11.24~, §5-8). BytePlus 는 role 이 붙어 있어도 앞에 온 사진으로 영상을 시작한다(실측) —
+    스토어 순서(넣은 순서)를 그대로 보내면 칸을 지웠다 다시 넣은 사람의 영상이 거꾸로 나간다. 줄 세우기는 send-request 의 보내는 사본에서만.
 
 ---
 
@@ -1484,6 +1698,18 @@ R2 에 올린다. 미리보기 JPG 는 화면에만 — 크기·품질을 바꾸
 ---
 
 ## 10. 작업 절차
+
+### 시험 — `tests/harness` (2026-11-25~, 쓰는 법 · 규칙은 `tests/harness/README.md`)
+
+그 전 시험은 임시 폴더(scratchpad)에만 있었다 — 이 문서에 나오는 `portrait\t-*.mjs` · `minitest\run-*.ps1` 은 이제 여기로 옮겨졌다(이름: t-autofix → auto-certify ·
+t-same → same-picture · t-vidkeep → video-record · t-vidbadge → video-badge · t-refshield → panel-badge · t-refedge → panel-edits · t-evictwatch → evict-watch · 나머지 같은 이름).
+
+- `node tests/harness/verify.mjs` — 바뀐 파일을 보고 위험 · 돌릴 시험을 고른다(모르는 파일은 전부). 결과에 **코드 도장**이 붙고, 코드가 바뀌면 무효, 안 돌린 것은 '안 함'.
+  배포 전 `--gate`(지금 코드에 결과가 다 있나 — 말만 한다, 막으려면 `HARNESS_GATE=enforce`).
+- `node tests/harness/compare-send.mjs` — 커밋된 코드와 지금 코드에 같은 것을 시켜 BytePlus 로 나가는 내용을 견준다. 일부러 바꾼 것만 `approved.json` 에 이유와 함께.
+- `node tests/harness/break-check.mjs` — 코드 사본을 일부러 망가뜨려 시험이 잡는지. 새 기능을 넣으면 한 줄 넣는다.
+- `node tests/harness/play.mjs` — 사람이 만져 볼 시험 앱(0번 슬롯, 가짜 BytePlus).
+- 앱 화면 스타일(Tailwind)에는 섞이지 않는 것을 확인했다(옮기기 전후 CSS 가 글자까지 같음). 설치 파일에도 안 들어간다(electron-builder 는 넣을 것만 적는 목록).
 
 ### 검증 도구
 
@@ -1718,7 +1944,10 @@ F:\시댄스\                                ← 키 배포 (윈도우 전용, s
   올림(팀 키 17 · R2 · 옴니 · ENROLL_OPEN · 관리 키. R2_SECRET 은 v1 부터 있어 안 건드린다) ④ `/admin` 에서 17팀 '앱 v1 표와 맞음'
   · '입장권 기억' 확인 ⑤ 앱 802 배포 → 관리 화면에서 PC 가 넘어오는지 ⑥ (권장) 평문으로 퍼졌던 키 재발급 → Cloudflare 만 교체
   ⑦ 전 PC 가 넘어온 뒤 `LEGACY_NCP` = "0".
-- **시험**: `node worker/gateway.test.mjs`(워커 67) · `node scripts/gateway_check.mjs`(앱 ↔ 워커 한 프로세스 49 — 팀 bat 바꾸기 · 끊긴 PC · PC 이름 바꾸기 포함) · 서버 수준
+- **에셋 길(26.11.2301~, §5-8)**: `/v1/assets/project · register · status` — 출입증으로, 팀은 출입증에서만. 비밀값 `BP_ASSET_AK` · `BP_ASSET_SK`(전용 IAM 사용자 —
+  묶음 · 응답에 안 실린다), KV `ast:proj:<팀>` · `ast:projmiss:<팀>`(못 찾음 10분) · `ast:g:` · `ast:a:` · 잠금 `ast:lock:` · `ast:glock:`(진행 중 표 또는
+  만든 뒤 `done:<id>` 60초). 관리 화면에 '어셋 키 있음' 과 팀별 프로젝트.
+- **시험**: `node worker/gateway.test.mjs`(워커 159 — 어셋 92 포함, 서명은 노드 createHmac 으로 따로 맞춤 · 같은 순간 두 PC · done 표 · 개수 한도 · KV 쓰기 실패) · `node scripts/gateway_check.mjs`(앱 ↔ 워커 한 프로세스 49 — 팀 bat 바꾸기 · 끊긴 PC · PC 이름 바꾸기 포함) · 서버 수준
   (`scratchpad/gw-e2e/server-e2e.mjs` — 진짜 server.ts + 가짜 BytePlus · R2 · 시트, 키 교체 중 생성 · 업로드가 안 멈춤, 밖으로 0건)
   · 진짜 main.cjs 3회(처음 · 보관본 · 게이트웨이 죽음) · 진짜 DPAPI. ★ 격리 하네스는 `SEEDANCE_GATEWAY=off` 로 — 안 그러면
   시험 PC 가 진짜 게이트웨이에 등록된다(`SEEDANCE_GATEWAY_URL` 을 막으면 옛 NCP 길까지 막혀 서버가 안 뜬다). 레지스트리 삭제

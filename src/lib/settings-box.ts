@@ -15,6 +15,8 @@
 
 export const SETTINGS_KIND = 'freewill-seedance/settings';
 export const SETTINGS_VERSION = 1;
+import { isAssetUri } from './byteplus-asset';
+
 const MAGIC = 'FWSD';
 const MAX_JSON = 8 * 1024 * 1024;          // 프롬프트 3만 자가 약 90KB — 이보다 크면 우리 것이 아니다
 const LIB_ID = /^[0-9a-f]{12}\.[a-z0-9]{2,5}$/;
@@ -58,7 +60,8 @@ export async function buildSettingsPayload(m: any, project: { id?: string; name?
   // 영상·오디오 레퍼런스의 url 은 생성 때 올린 임시 링크라(곧 죽는다) 비운다. 그림 url 은 미리보기 주소라 둔다.
   const usedAssets = (Array.isArray(m.usedAssets) ? m.usedAssets : []).map((a: any) => {
     const { originalPath: _local, ...rest } = a || {};
-    return rest.type === 'image_url' ? rest : { ...rest, url: '' };
+    // BytePlus 에셋(asset://)은 종류와 상관없이 그대로 — 임시 링크가 아니라 그 에셋을 가리키는 이름이다(26.11.2301~).
+    return rest.type === 'image_url' || isAssetUri(rest.url) ? rest : { ...rest, url: '' };
   });
   const message: SettingsMessage = {
     taskId: m.taskId, timestamp: m.timestamp, endTime: m.endTime,
@@ -135,7 +138,8 @@ export function parseSettingsJson(text: string): SettingsPayload | null {
     const out: any = {
       type: a.type,
       role: ASSET_ROLES.has(a.role) ? a.role : a.type === 'video_url' ? 'reference_video' : a.type === 'audio_url' ? 'reference_audio' : 'reference_image',
-      url: a.type === 'image_url' && typeof a.url === 'string' && SAFE_IMG.test(a.url) ? a.url : '',
+      // BytePlus 에셋(asset://)은 종류와 상관없이 되살린다(모양을 isAssetUri 로 좁혀 다른 주소는 못 들어온다, 26.11.2301~).
+      url: isAssetUri(a.url) ? a.url : a.type === 'image_url' && typeof a.url === 'string' && SAFE_IMG.test(a.url) ? a.url : '',
     };
     if (typeof a.cacheId === 'string' && CACHE_ID.test(a.cacheId)) out.cacheId = a.cacheId;
     const fn = label(a.file_name, 200); if (fn) out.file_name = fn;

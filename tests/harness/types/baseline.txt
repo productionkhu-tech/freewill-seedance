@@ -1,0 +1,59 @@
+src/components/ChatArea.tsx: error TS2339: Property 'getAsFile' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'kind' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'received' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'received' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'state' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'state' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'state' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'state' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'state' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'state' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'total' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'total' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'total' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'total' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'total' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2339: Property 'type' does not exist on type 'unknown'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ChatArea.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/ElementLibrary.tsx: error TS2322: Type '{ key: string; currentCollectionName: string; onCommit: (parsed: { kind: "collection" | "asset"; collectionName?: string; assets: { category: AssetCategory; name: string; description: string; images: ElementImage[]; }[]; }, mode: "new" | "merge") => void; onClose: () => any; }' is not assignable to type '{ currentCollectionName: string; onCommit: (parsed: { kind: "collection" | "asset"; collectionName?: string; assets: { category: AssetCategory; name: string; description: string; images: ElementImage[]; }[]; }, mode: "new" | "merge") => void; onClose: () => void; }'.
+src/components/ElementLibrary.tsx: error TS2322: Type '{ key: string; initial: any; onSave: (data: { name: string; description: string; category: AssetCategory; images: ElementImage[]; }) => void; onDelete: () => void; onShare: () => any; ... 4 more ...; modelName: string; }' is not assignable to type '{ initial: ElementAsset; onSave: (data: { name: string; description: string; category: AssetCategory; images: ElementImage[]; }) => void; onDelete: () => void; ... 5 more ...; modelName: string; }'.
+src/components/HoverZoom.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/SettingsPanel.tsx: error TS2322: Type '{ key: string; asset: Asset; name: string; locked: boolean; bpOk: boolean; onReplaceFile: (existing: Asset, file: File) => Promise<void>; onRemove: (id: string) => void; dragOverId: any; setDragOverId: any; }' is not assignable to type '{ asset: Asset; name: string; locked?: boolean; bpOk?: boolean; onReplaceFile: (a: Asset, f: File) => void; onRemove: (id: string) => void; dragOverId: string; setDragOverId: (updater: string | ((c: string) => string)) => void; }'.
+src/components/SettingsPanel.tsx: error TS2339: Property 'name' does not exist on type 'unknown'.
+src/components/SettingsPanel.tsx: error TS2339: Property 'name' does not exist on type 'unknown'.
+src/components/SettingsPanel.tsx: error TS2339: Property 'name' does not exist on type 'unknown'.
+src/components/SettingsPanel.tsx: error TS2339: Property 'name' does not exist on type 'unknown'.
+src/components/SettingsPanel.tsx: error TS2339: Property 'name' does not exist on type 'unknown'.
+src/components/SettingsPanel.tsx: error TS2339: Property 'name' does not exist on type 'unknown'.
+src/components/SettingsPanel.tsx: error TS2339: Property 'name' does not exist on type 'unknown'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'File'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'File'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'File'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'File'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'File'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'File'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string | File'.
+src/components/SettingsPanel.tsx: error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'string | File'.
+src/components/SettingsPanel.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/SettingsPanel.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/SettingsPanel.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/SettingsPanel.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/SettingsPanel.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/SettingsPanel.tsx: error TS2503: Cannot find namespace 'React'.
+src/components/SettingsPanel.tsx: error TS2503: Cannot find namespace 'React'.

@@ -8,8 +8,12 @@
 //   바뀌었으면 보내지 않는다(recheckBeforePost). 확인과 요청 사이에는 await 가 없다.
 import { PERSONAL } from './edition';
 import { personalR2Ready, R2_NEEDED_MSG } from './personal-keys';
+import { byteplusErrorText } from './translate-error';
+import { isAssetUri, assetLabel } from './byteplus-asset';
+import { bpScopeQuick, assetUrlFor, hasActiveBp, certifiedAssetUrl, certifiedAnywhere, knownBpScope, panelBpState, bpEntryOf, isPhotoOf, checkSamePhoto, registerElement, kickBpPoll } from './bp-assets';
+import { certifyPhoto, certifyVideo, videoAssetUrl, videoKnown, forgetVideoAsset } from './bp-certify';
 import {
-  useAppStore, Asset, ElementImage, GenerationSettings, applyAssetUpdate,
+  useAppStore, Asset, AssetRole, ElementImage, GenerationSettings, applyAssetUpdate,
   clampResolution, allowedResolutions, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec,
   modelAllowsAudioOnly, resolveOutputFormat, refTaskTypeFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider,
   resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor,
@@ -185,6 +189,32 @@ export function memoryAssetSink(settings: GenerationSettings): AssetSink & { lis
     add: (a) => { list.push({ ...a, id: crypto.randomUUID() }); },
     replace: (id, updates) => { const i = list.findIndex(x => x.id === id); if (i >= 0) list[i] = applyAssetUpdate(list[i], updates); },
   };
+}
+
+// BytePlus 에셋(asset://) 하나를 받는 곳에 붙인다(26.11.2301~, lib/byteplus-asset.ts). 파일이 아니라 내려받지도 · 캐시하지도 않고 주소
+// 그대로 — 검사는 모드의 칸 수와 역할(첫 · 끝 프레임)만. 형식 · 길이 · 크기는 BytePlus 가 본다(등록할 때 이미 걸렀다).
+// 설정 패널 'URL / Asset ID로 추가'(SettingsPanel handleAddAssetId)와 같은 규칙. 붙였으면 null, 못 붙였으면 이유.
+export function attachAssetRefTo(sink: AssetSink, url: string, type: 'image_url' | 'video_url' | 'audio_url'): string | null {
+  const cur = sink.settings();
+  if (!cur) return '프로젝트가 사라졌습니다';
+  if (!isAssetUri(url)) return `BytePlus 에셋 주소가 아닙니다: ${url}`;
+  const label = assetLabel(url);
+  if (modelProvider(cur.model) === 'gemini') return `${label}: 옴니(구글)는 BytePlus 에셋을 받지 않습니다`;
+  if (cur.mode === 'text_to_video') return `${label}: Text to Video 는 레퍼런스를 쓰지 않습니다`;
+  const assets = sink.assets();
+  const caps = modeRefCaps(cur.model, cur.mode);
+  const cap = type === 'image_url' ? caps.image : type === 'video_url' ? caps.video : caps.audio;
+  const kind = type === 'image_url' ? '이미지' : type === 'video_url' ? '영상' : '오디오';
+  if (assets.some(a => a.type === type && a.url === url)) return `${label}: 이미 넣은 레퍼런스입니다`;
+  if (assets.filter(a => a.type === type).length >= cap) return `${label}: 이 모드에서는 ${kind}를 ${cap}개까지 넣을 수 있습니다`;
+  let role: AssetRole = type === 'image_url' ? 'reference_image' : type === 'video_url' ? 'reference_video' : 'reference_audio';
+  if (cur.mode === 'image_to_video_first' || cur.mode === 'image_to_video_first_last') {
+    if (!assets.some(a => a.role === 'first_frame')) role = 'first_frame';
+    else if (cur.mode === 'image_to_video_first_last' && !assets.some(a => a.role === 'last_frame')) role = 'last_frame';
+    else return `${label}: 프레임 자리가 이미 찼습니다`;
+  }
+  sink.add({ type, url, role, file_name: label });
+  return null;
 }
 
 // 붙이지 못한 파일과 이유를 돌려준다 — 알리는 건 부르는 쪽이다.
@@ -571,7 +601,14 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
       if (was4k) warn(`이 프로젝트 코드는 2.5 4K 권한이 없어 ${clamped}로 전송합니다.`);
     }
   }
-  const currentAssets = [...assets];
+  // 첫 · 끝 프레임은 늘 첫 프레임 항목을 먼저 보낸다(26.11.24~). BytePlus 는 역할(first_frame · last_frame)이 붙어 있어도 '앞에 온 사진' 으로
+  // 영상을 시작했다 — 11/24 실측: [끝 프레임 B, 첫 프레임 A] 로 보내자 영상이 B 로 시작해 A 로 끝났다. 패널은 늘 Start → End 로 보여 주지만
+  // (SettingsPanel FRAME_RANK) 스토어 순서는 넣은 순서라, 첫 프레임 칸을 지웠다 다시 넣으면 [끝, 첫] 이 되어 거꾸로 나갔다.
+  // 패널과 같은 규칙: 모두 프레임일 때만 줄 세운다(섞인 목록은 손대지 않는다). 스토어는 그대로 — 보내는 사본만. 카드 · 재사용도 이 순서를 받는다.
+  const FRAME_RANK: Record<string, number> = { first_frame: 0, last_frame: 1 };
+  const currentAssets = assets.length > 1 && assets.every(a => a.role in FRAME_RANK)
+    ? [...assets].sort((a, b) => FRAME_RANK[a.role] - FRAME_RANK[b.role])
+    : [...assets];
 
   // Pre-flight: legacy data URL safety check (only matters for old assets pre-URL migration)
   const totalPayloadBytes = currentAssets.reduce((sum, a) => {
@@ -597,9 +634,33 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   // originalPath fallback (re-read from disk). User-pasted asset:// URIs and
   // raw public URLs have no cacheId, so they're passed through unchanged.
   io.busy?.(true);
+  // BytePlus 에셋으로 등록된(Active) 사진은 올리지 않고 asset://id 로 보낸다(26.11.2301~, lib/bp-assets.ts) — 실사 얼굴 차단을 받지 않는다.
+  //   ① @이름 으로 부른 라이브러리 인물(아래 elementContent)
+  //   ② 패널 · 첫/끝 프레임 칸에 그대로 넣은 같은 사진(바로 아래 — 바이트가 같으면, 26.11.24~)
+  // 에셋은 BytePlus 프로젝트마다 따로라 이 PC 팀 키의 프로젝트(게이트웨이가 알려 줌)에 등록된 것만. 프로젝트 이름은 아는 만큼만 기다린다(3초) —
+  // 게이트웨이가 느려도 생성이 멈추지 않는다. 모르면 예전처럼 사진을 올린다. '인증 완료' 사진이 있을 때만 기다린다(대기 · 실패만 있으면
+  // 기다릴 까닭이 없다). 켤 때 App 이 미리 물어 두므로 보통은 바로 나온다. 옴니 길(sendOmni)은 여기를 지나지 않는다.
+  // 화면에 안 떠 있던 칸(다른 프로젝트 · 에이전트)도 여기서 — 화소가 같은 등록 사진이 있으면 아래가 그 에셋을 고른다. 등록한 것이 없으면 바로 지나가고, 3초를 넘기지 않는다.
+  if (!PERSONAL) {
+    const ask = currentAssets.filter(a => a.type === 'image_url' && a.cacheId && !certifiedAnywhere(a.cacheId)).map(a => checkSamePhoto(a.cacheId));
+    if (ask.length) await Promise.race([Promise.all(ask), new Promise(r => setTimeout(r, 3000))]);
+  }
+  const bpScopeNow = (currentAssets.some(a => (a.type === 'image_url' && certifiedAnywhere(a.cacheId)) || (a.type === 'video_url' && videoKnown(a.cacheId))) || mentionedElements.some(el => hasActiveBp(el.images)))
+    ? await bpScopeQuick(3000) : null;
   for (let i = 0; i < currentAssets.length; i++) {
     const a = currentAssets[i];
     if (!a.cacheId && !a.originalPath) continue;
+    // ② 칸 하나가 항목 하나로 그대로 바뀐다 — 역할 · 순서 · [Image N] 은 흔들리지 않는다. 첨부 때 바이트(cacheId)로 맞추므로 원본 파일이
+    // 그 뒤 고쳐졌어도 패널에 보이는 그 사진의 에셋이 나간다. 11/24 실측: 에셋을 첫 프레임(role 없이 · first_frame) · 끝 프레임으로 받는다.
+    if (a.type === 'image_url') {
+      const asAsset = certifiedAssetUrl(a.cacheId, bpScopeNow);
+      if (asAsset) { currentAssets[i] = { ...a, url: asAsset }; continue; }
+    }
+    // 이 PC 가 이 프로젝트에서 이미 인증한 영상(v2v 인물, lib/bp-certify certifyVideo — 메모리 기억)이면 올리지 않고 asset:// (26.11.24~)
+    if (a.type === 'video_url') {
+      const asAsset = videoAssetUrl(a.cacheId, bpScopeNow ?? knownBpScope());
+      if (asAsset) { currentAssets[i] = { ...a, url: asAsset }; continue; }
+    }
 
     let done = false;
     if (a.cacheId) {
@@ -637,11 +698,16 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   // panel assets). Built as reference_image content items, appended AFTER the
   // panel assets so the panel's own [Image N] numbering is unaffected.
   const elementContent: any[] = [];
+  const elementSrc: { elementId: string; imageId: string; name: string }[] = [];   // elementContent 와 같은 순서 — 막혔을 때 어느 사진인지(자동 인증)
+  // ① @이름 — '인증 완료'(위 bpScopeNow 의 프로젝트에서 Active)면 asset://id. 사진 하나 = 항목 하나는 그대로라 [Image N] 번호는 바뀌지 않는다.
   for (const el of mentionedElements) {
     for (const img of el.images) {
+      const asAsset = assetUrlFor(img, bpScopeNow);
+      if (asAsset) { elementContent.push({ type: 'image_url', image_url: { url: asAsset }, role: 'reference_image' }); elementSrc.push({ elementId: el.id, imageId: img.id, name: el.name }); continue; }
       try {
         const url = await resolveElementImageUrl(img);
         elementContent.push({ type: 'image_url', image_url: { url }, role: 'reference_image' });
+        elementSrc.push({ elementId: el.id, imageId: img.id, name: el.name });
       } catch {
         warn(`어셋 '${el.name}'의 이미지 업로드에 실패했습니다. 다시 시도해주세요.`);
         io.busy?.(false);
@@ -669,6 +735,11 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
     const out: any = { ...a };
     if (a.type === 'image_url') {
       out.url = a.thumbnailUrl || (await createThumbnail(a.url)) || a.url;
+    } else if (isAssetUri(a.url) && a.cacheId) {
+      // 인증으로 asset:// 로 바꿔 보낸 영상(원본이 있음, 26.11.24~ v2v)은 카드 기록에 그 주소를 남기지 않는다 — 재사용 · 받은 영상의 설정 상자가 그 칸을
+      // 원본으로 되살리고, 보낼 때마다 다시 판단한다(다른 팀 코드 · 다른 PC 에서 남의 에셋 id 가 나가지 않게). 카드 화면은 썸네일 · 캐시로 그린다.
+      // 사람이 넣은 에셋 ID(원본 없음)는 그대로 — 그건 ID 자체가 레퍼런스다.
+      out.url = '';
     }
     return out;
   }));
@@ -679,6 +750,9 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
   const usedElementImages = mentionedElements.flatMap(el =>
     el.images.map((img) => ({ id: `${el.id}__${img.id}`, elementId: el.id, imageId: img.id, name: el.name, category: el.category, cacheId: img.cacheId, libId: img.libId, url: img.thumbnailUrl || img.url }))
   );
+  // 이 요청에 에셋(asset://)이 몇 개 실렸나 — 카드 오류 글이 에셋 쪽 안내를 붙일지 가른다(ChatArea translateError hasAsset).
+  // 카드 칸(message)에 둔다: usedAssets 칸마다 적으면 재사용이 그 값까지 패널로 되살린다. 썸네일은 그대로 사진이다.
+  const bpAssetRefs = currentAssets.filter(a => isAssetUri(a.url)).length + elementContent.filter(c => isAssetUri(c?.image_url?.url)).length;
 
   // 보내기 직전 — 위의 기다림(업로드) 사이에 프로젝트가 지워졌거나 프로젝트 코드가 바뀌었으면(종료로 비워졌으면) 보내지 않는다.
   // 여기부터 요청을 띄울 때까지는 await 가 없다 — 확인한 코드 그대로 카드 · 요청에 찍힌다.
@@ -691,7 +765,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
     systemMessageIds.push(id);
     // 보낼 때의 프로젝트 코드를 메시지에 굽는다. 프로젝트의 코드는 나중에 바뀔 수 있고 시트에서 이름이
     // 바뀔 수도 있다 — 이 카드가 어디로 찍혔는지 · NCP 폴더를 되찾는 힌트다.
-    useAppStore.getState().addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, usedCollection: boundCollectionOf(project.id), videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key } } as any);
+    useAppStore.getState().addMessage(project.id, { id, role: 'system', content: `영상 생성 시작... (${i + 1}/${outputCount})`, status: 'queued', promptText: plainText, promptHtml, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, usedCollection: boundCollectionOf(project.id), videoStorage: { project: bill.project, projectId: bill.id, projectKey: bill.key }, ...(bpAssetRefs ? { bpAssetRefs } : {}) } as any);
   }
   io.sent?.();
 
@@ -749,18 +823,161 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
 
     // Settings + assets are preserved after send so user can iterate quickly with same setup
 
+    const post = async (): Promise<{ taskId?: string; error?: string }> => {
+      const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const text = await res.text();
+      let data; try { data = JSON.parse(text); } catch { return { error: res.status === 413 ? '파일 크기 초과 (이미지 개당 30MB, 전체 64MB 이하)' : `서버 응답 오류 (${res.status})` }; }
+      if (!res.ok || (data.code !== undefined && data.code !== 0)) return { error: byteplusErrorText(data) };
+      const taskId = data.id || data.data?.task_id;
+      return taskId ? { taskId } : { error: 'Task ID를 받지 못했습니다.' };
+    };
+    const started = (sysMsgId: string, taskId: string) => {
+      const refs = content.filter(c => isAssetUri(c?.[c?.type]?.url)).length;
+      useAppStore.getState().updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, ...(apiText !== plainText ? { apiPrompt: apiText } : {}), bpFix: undefined, ...(refs ? { bpAssetRefs: refs } : {}) } as any);
+      useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
+    };
+    const failed = (sysMsgId: string, error: string) =>
+      useAppStore.getState().updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error, endTime: Date.now(), bpFix: undefined } as any);
+    // ── 막히면 고쳐서 같은 카드로 다시(26.11.24~, 사용자 "오류 뜨면 … 자동으로 인증 날려준다고 뜨면 되지 않을까 기다리라고" — 완전 자동을 고름) ──
+    //   face: 실사 얼굴(PrivacyInformation, 이미지) → 그 칸 사진을 인증(레퍼런스 칸 방패와 같은 certifyPhoto · @이름 이면 그 인물 registerElement)
+    //   gone: 'asset … is not found'(보관함 정리 · 만료로 지워진 에셋, 11/24 실측 문구) → 그 에셋을 쓰던 라이브러리 사진을 '없어짐' 으로 두고 다시 등록
+    //   → Active 가 되면 그 항목만 asset:// 로 바꿔 같은 카드로 다시 보낸다. 둘 다 생성 전 동기 400 이라 막힌 쪽은 과금이 없다.
+    //   BytePlus 는 막힌 칸을 하나씩(content[N]) 알려 주므로 칸마다 되풀이한다(MAX_FIX 번까지). 원본 없는 칸 · 개인판은 고치지 않는다.
+    //   모드와 상관없다 — 첫 프레임 · 첫/끝 · 레퍼런스 · Edit · Extend 모두 같은 content(보내는 사본, 프레임은 Start→End 로 줄 세운 뒤)를 읽는다.
+    //   뒤에서 돈다 — 화면의 보내기 · 에이전트 작업함은 기다리지 않는다. 카드의 '취소' 를 누르면(status failed) 다시 보내지 않는다.
+    //   카드 여럿(출력 개수)이 같은 칸에 막히면 고치기는 한 번(fixing), 다시 보내기는 카드마다.
+    // 칸마다 한 번씩 — 실린 사진 · 영상 수만큼(최소 6 · 최대 16). Extend Video 는 영상이 10개까지라 6 으로 묶으면 7번째부터 못 고쳤다(11/24).
+    const MAX_FIX = Math.min(16, Math.max(6, content.filter(c => c?.type === 'image_url' || c?.type === 'video_url').length));
+    const FIX_WAIT_MS = 180_000;
+    type Src = { elementId?: string; imageId?: string; cacheId?: string; asset?: Asset; name: string };
+    const srcOf = (index: number): Src | null => {
+      const k = index - 1;
+      if (k < 0) return null;
+      if (k < currentAssets.length) { const a = currentAssets[k]; return a.cacheId ? { asset: a, cacheId: a.cacheId, name: a.file_name || '사진' } : null; }
+      const e = elementSrc[k - currentAssets.length];
+      return e ? { elementId: e.elementId, imageId: e.imageId, name: e.name } : null;
+    };
+    const fixPlan = (err: string) => {
+      if (PERSONAL) return null;
+      const m = /content\[(\d+)\]/.exec(err);
+      let index: number;
+      if (m) index = Number(m[1]);
+      else {
+        // 칸 번호가 없는 문구(문서 error-codes 의 예시 문구엔 없다 — 사진은 실측에서 'content[1]' 이 왔다) — 그 종류의 칸(에셋 아닌 것)이 하나뿐이면 그 칸.
+        // 둘 이상이면 어느 것인지 모르니 고치지 않는다(엉뚱한 사진을 등록하지 않게).
+        const kind = /InputVideo|input video/i.test(err) ? 'video_url' : /InputImage|input image/i.test(err) ? 'image_url' : '';
+        const cands = kind ? content.map((c, i) => ({ c, i })).filter(({ c, i }) => i > 0 && c?.type === kind && !isAssetUri(c?.[kind]?.url)) : [];
+        if (cands.length !== 1) return null;
+        index = cands[0].i;
+      }
+      const t = content[index]?.type;
+      if (t !== 'image_url' && t !== 'video_url') return null;
+      const gone = /asset\s+(asset-[A-Za-z0-9._-]+)\s+is\s+not\s+found/i.exec(err);
+      const face = /PrivacyInformation|real person/i.test(err);
+      if (!gone && !face) return null;
+      const src = srcOf(index);
+      if (!src) return null;
+      if (t === 'video_url' && !src.asset) return null;   // 영상은 패널 칸만(@이름 은 사진뿐)
+      const n = content.slice(1, index + 1).filter(c => c.type === t).length;
+      return { index, src, kind: (gone ? 'gone' : 'face') as 'gone' | 'face', goneId: gone?.[1], label: `[${t === 'video_url' ? 'Video' : 'Image'} ${n}] ${src.name}` };
+    };
+    const markGone = (id: string) => {
+      const now = Date.now();
+      const patches = useAppStore.getState().elementAssets.flatMap(el => el.images.flatMap(im => Object.entries(im.bpAssets || {})
+        .filter(([, e]) => e?.id === id)
+        .map(([scope]) => ({ elementId: el.id, imageId: im.id, scope, entry: { status: 'failed' as const, error: '에셋이 BytePlus 에서 없어졌어요(보관함 정리 · 만료) — 다시 등록해요', at: now } }))));
+      if (patches.length) useAppStore.getState().setElementImageBp(patches);
+    };
+    // 그 사진(라이브러리 카드의 사진)이 이 프로젝트에서 Active 가 될 때까지 — 고치기를 시작한 뒤의 '실패' 만 끝으로 본다(그 전 기록은 지난 것).
+    const waitActive = async (elementId: string, pick: (im: ElementImage) => boolean, since: number): Promise<{ url?: string; error?: string }> => {
+      const t0 = Date.now();
+      kickBpPoll(1500);
+      while (Date.now() - t0 < FIX_WAIT_MS) {
+        const scope = knownBpScope();
+        const img = useAppStore.getState().elementAssets.find(e => e.id === elementId)?.images.find(pick);
+        if (!img) return { error: '인물 사진이 라이브러리에서 지워졌어요' };
+        const u = assetUrlFor(img, scope);
+        if (u) return { url: u };
+        const e = bpEntryOf(img, scope);
+        if (e?.status === 'failed' && e.at > since) return { error: e.error || '등록 실패' };
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      return { error: '3분 안에 인증이 끝나지 않았어요' };
+    };
+    const fixItem = async (plan: NonNullable<ReturnType<typeof fixPlan>>): Promise<{ ok: boolean; why?: string }> => {
+      // 영상(v2v 인물) — 라이브러리 없이 게이트웨이에 Video 에셋으로(lib/bp-certify certifyVideo). 지워진 에셋이면 기억을 지우고 다시.
+      if (content[plan.index]?.type === 'video_url') {
+        if (plan.goneId) forgetVideoAsset(plan.goneId);
+        const r = await certifyVideo(plan.src.asset!, { waitMs: FIX_WAIT_MS });
+        if (!r.ok || !r.url) return { ok: false, why: r.message };
+        const it = content[plan.index];
+        content[plan.index] = { ...it, video_url: { url: r.url } };
+        return { ok: true };
+      }
+      if (plan.goneId) markGone(plan.goneId);
+      const since = Date.now();
+      let elementId = plan.src.elementId, pick: (im: ElementImage) => boolean;
+      if (plan.src.asset) {
+        const r = await certifyPhoto(plan.src.asset, project.id);
+        if (!r.elementId) return { ok: false, why: r.message };
+        elementId = r.elementId;
+        pick = (im) => isPhotoOf(im, plan.src.cacheId);   // 화소가 같은 다른 파일일 수 있다 — 바이트로만 찾으면 '지워졌어요' 로 잘못 끝난다
+      } else {
+        const r = await registerElement(plan.src.elementId!);
+        if (!r.ok && !/등록 중|이미 등록/.test(r.message)) return { ok: false, why: r.message };
+        const imageId = plan.src.imageId;
+        pick = (im) => im.id === imageId;
+      }
+      const w = await waitActive(elementId!, pick, since);
+      if (!w.url) return { ok: false, why: w.error };
+      const it = content[plan.index];
+      content[plan.index] = { ...it, image_url: { url: w.url } };
+      return { ok: true };
+    };
+    const fixing = new Map<number, Promise<{ ok: boolean; why?: string }>>();
+    const cardOf = (sysMsgId: string) => useAppStore.getState().projects.find(p => p.id === project.id)?.messages.find(m => m.id === sysMsgId);
+    const recover = async (sysMsgId: string, firstError: string) => {
+      let err = firstError;
+      try {
+        for (let n = 0; n < MAX_FIX; n++) {
+          const plan = fixPlan(err);
+          if (!plan) break;
+          useAppStore.getState().updateMessage(project.id, sysMsgId, {
+            status: 'queued', error: undefined,
+            content: plan.kind === 'face' ? `실사 얼굴 — ${plan.label} 인증 중` : `에셋이 지워짐 — ${plan.label} 다시 등록 중`,
+            bpFix: { kind: plan.kind, label: plan.label, at: Date.now() },
+          } as any);
+          let p = fixing.get(plan.index);
+          if (!p) {
+            const mine: Promise<{ ok: boolean; why?: string }> = fixItem(plan);
+            p = mine;
+            fixing.set(plan.index, mine);
+            mine.finally(() => { if (fixing.get(plan.index) === mine) fixing.delete(plan.index); }).catch(() => { /* 기다리는 쪽(아래 await)이 받는다 */ });
+          }
+          const fixed = await p;
+          const card = cardOf(sysMsgId);
+          if (!card || card.status === 'failed') return;   // 사람이 취소했거나 카드를 지움 — 다시 보내지 않는다
+          if (!fixed.ok) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${fixed.why || ''}`); return; }
+          // 다시 보내기 직전에도 처음 보낼 때와 같은 확인(26.11.24~) — 인증을 기다린 몇십 초 ~ 몇 분 사이 프로젝트가 지워졌거나 코드가 바뀌었거나
+          // 종료됐거나 모델 · 4K 권한이 풀렸으면 보내지 않는다(그 사이 바뀐 코드로 과금되지 않게). 인증은 끝났으니 재생성하면 에셋으로 나간다.
+          const why = recheckBeforePost(project.id, bill.key, currentSettings.model, currentSettings.resolution);
+          if (why) { failed(sysMsgId, `${why}\n\n(자동 인증은 끝났어요 — 확인한 뒤 재생성(✦)하면 인증된 사진으로 나가요)`); return; }
+          const r = await post();
+          if (r.taskId) { started(sysMsgId, r.taskId); return; }
+          err = r.error || '알 수 없는 오류';
+        }
+        failed(sysMsgId, err);
+      } catch (e: any) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${e?.message || e}`); }
+    };
+
     await Promise.allSettled(systemMessageIds.map(async (sysMsgId) => {
       try {
-        const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        const text = await res.text();
-        let data; try { data = JSON.parse(text); } catch { throw new Error(res.status === 413 ? '파일 크기 초과 (이미지 개당 30MB, 전체 64MB 이하)' : `서버 응답 오류 (${res.status})`); }
-        if (!res.ok || (data.code !== undefined && data.code !== 0)) throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
-        const taskId = data.id || data.data?.task_id;
-        if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-        useAppStore.getState().updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, ...(apiText !== plainText ? { apiPrompt: apiText } : {}) });
-        useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
+        const r = await post();
+        if (r.taskId) { started(sysMsgId, r.taskId); return; }
+        if (fixPlan(r.error!)) { void recover(sysMsgId, r.error!); return; }
+        failed(sysMsgId, r.error!);
       } catch (error: any) {
-        useAppStore.getState().updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error: error.message, endTime: Date.now() });
+        failed(sysMsgId, error.message);
       }
     }));
   } catch (error: any) {

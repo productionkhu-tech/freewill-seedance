@@ -9,85 +9,28 @@ import { messageMatchesQuery, taskIdMatches } from '../lib/search-match';
 import { HoverZoom } from './HoverZoom';
 import { RevealSourceButton, REVEAL_ON_THUMB } from './RevealSource';
 import { findSourcePath, sourcePathOf } from '../lib/source-path';
-import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight, ClipboardCopy, ImageDown } from 'lucide-react';
+import { Send, Loader2, AlertCircle, Play, UploadCloud, Video, Music, Image as ImageIcon, Download, RefreshCw, X, Trash2, Search, LayoutGrid, ArrowUp, ArrowDown, Eye, ChevronDown, ChevronUp, Copy, Check, FolderOpen, Sparkles, Star, ArrowLeftRight, ClipboardCopy, ImageDown, ShieldCheck } from 'lucide-react';
 import { PICKABLE_MODELS, modelExtendAddRange } from '../store';
-import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink } from '../lib/send-request';
+import { getAssetNames, getPlainText, OMNI_TASK_LABELS, sendRequest, attachFilesTo, projectAssetSink, memoryAssetSink, attachAssetRefTo } from '../lib/send-request';
 import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from '../lib/agent-inbox';
 import { visibleProjectIds } from '../lib/split';
 import { PERSONAL } from '../lib/edition';
+import { isAssetUri, imgSrcOk, assetLabel } from '../lib/byteplus-asset';
+import { translateError, byteplusErrorText } from '../lib/translate-error';
 import { CATEGORY_META, fileToElementImage, MAX_ELEMENT_IMAGES } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
 import { libraryPreviewSrc, libraryOriginalSrc, formatStamp, formatStampFull, copyImageToClipboard, downloadViaProxy, buildDownloadFilename, validateImageFile, validateImageDimensions, validateVideoFile, validateAudioFile, getMediaDurationSec, totalDurationError, createThumbnail, createVideoThumbnail, reuploadFromCache, reuploadFromPath, getFilePath, getCachedBlob, setCachedBlob, cacheFile, cacheFromPath, dataUrlToFile, readCacheAsDataUrl, SourceChangedError } from '../lib/utils';
 
 
-/* ─── Korean error translation ─── */
-function translateError(error: string): string {
-  if (!error) return '알 수 없는 오류가 발생했습니다.';
-  // Windows runs the packaged exe (start.bat); Mac runs from source (start.command).
-  // Naming the wrong one is a dead end for whoever reads it.
-  if (error.includes('API Key is required'))
-    return `API 키 오류: 서버를 재시작해주세요. (${navigator.platform.startsWith('Mac') ? 'start.command' : 'start.bat'})`;
-  if (error.includes('Payload Too Large')) return '파일 크기 초과: 이미지 개당 30MB, 전체 요청 64MB 이하여야 합니다.';
-  // Gemini Omni's input filter. Its wording ("sensitive words that violate Google's
-  // Prohibited Use policy") sends people hunting for a forbidden word, and that is not
-  // what it keys on. Measured 2026-08-28 on one unchanged clip: asking for the
-  // OPERATION is refused in any language (연장 · 확장 · 늘려줘 · 뒤에 이어붙여줘 ·
-  // extend the video · lengthen · extension), while a scene description passed
-  // (강아지가 고개를 돌린다 · 카메라가 천천히 뒤로 빠진다 · Continue.).
-  // ★ But that is a tendency, not the rule: a plain scene description was blocked in
-  // real use and the SAME sentence then passed against a different source clip. So the
-  // filter reads the whole request, video included, and is not reproducible from the
-  // text alone. Say both, or the message sends someone to rewrite a prompt that was
-  // already fine.
-  // Gemini rejects the key itself. The raw string names no cause, and the cause here is
-  // almost never a bad key on disk: the server reads NANOBANANA_STUDIO_KEY from the
-  // process environment ONCE at launch, and an auto-updated app inherits its environment
-  // block from the process it replaced — so a key rotated at any point keeps travelling
-  // as the old value through every later update until someone starts the app fresh.
-  if (error.includes('API key not valid') || error.includes('API_KEY_INVALID'))
-    return 'Gemini API 키가 거부되었습니다.\n앱은 켤 때 환경변수(NANOBANANA_STUDIO_KEY)를 한 번만 읽고, 자동 업데이트는 이전 프로세스의 환경을 그대로 물려받습니다. 키를 바꾼 적이 있다면 앱이 옛 값을 계속 쓰고 있을 수 있습니다.\n→ 작업 관리자에서 앱을 완전히 종료한 뒤 다시 실행해보세요. 그래도 같으면 키가 만료·삭제된 것입니다.';
-  if (error.includes('Input blocked') || error.includes('Prohibited Use'))
-    return '프롬프트가 Google 정책 필터에 막혔습니다. (생성 전 단계라 과금은 없습니다.)\n"연장 / 늘려줘 / extend" 처럼 작업을 지시하면 거의 항상 막힙니다 — 이어질 장면을 묘사로 적어주세요.\n장면 묘사인데도 막혔다면 필터가 원본 영상까지 함께 본 경우입니다. 같은 문장이 다른 영상에서는 통과하니, 문장을 조금 바꾸거나 다시 시도해보세요.';
-  if (error.includes('resource download failed')) return '리소스 다운로드 실패: 이미지에 접근할 수 없습니다. 파일을 다시 업로드해주세요.';
-  if (error.includes('real person') || error.includes('PrivacyInformation')) return '실사 인물 감지: Seedance 2.0은 실제 사람 얼굴이 담긴 레퍼런스 이미지·영상을 받지 않습니다. Seedance로 생성한 결과물이나 비실사(스타일라이즈) 캐릭터 이미지를 사용해주세요.';
-  if (error.includes('SensitiveContentDetected') || error.includes('SensitiveContent')) return '민감 콘텐츠 감지: 레퍼런스 이미지 또는 프롬프트가 BytePlus 콘텐츠 정책에 의해 거부되었습니다.';
-  if (error.includes('rate limit') || error.includes('429')) return 'API 요청 한도 초과: 잠시 후 다시 시도해주세요.';
-  if (error.includes('No task ID')) return 'Task ID를 받지 못했습니다. API 응답을 확인해주세요.';
-  if (error.includes('1080p is not supported for this account')) return '1080p는 현재 계정에서 사용할 수 없습니다. BytePlus 콘솔에서 1080p 권한을 활성화하거나 480p/720p를 사용해주세요.';
-  if (error.includes('4k is not supported for this account')) return '4K는 현재 팀의 API 키에서 사용할 수 없습니다. BytePlus 콘솔에서 4K를 활성화하거나 1080p 이하를 사용해주세요.';
-  if (error.includes('not supported for this account')) return `현재 계정에서 사용할 수 없는 옵션입니다: ${error}`;
-  // 2.5 re-classifies the task from the PROMPT TEXT, not from the mode we send, and the
-  // label varies — "video editing", "video extension", possibly others. Whatever it picks,
-  // the output must inherit framing (and sometimes length) from the source clip, so `ratio`
-  // has to be `adaptive` and `duration` sometimes -1. Match the family, not one label, and
-  // read the required values out of the API's own "Issues:" list so the guidance is exactly
-  // what this request needs. (Seen 2026-07-29: editing → ratio+duration, extension → ratio.)
-  if (error.includes('identified your task as')) {
-    const kind = /identified your task as ([a-z ]+?) based/i.exec(error)?.[1] || '';
-    const ko = kind.includes('editing') ? '영상 편집' : kind.includes('extension') ? '영상 연장' : kind || '다른 작업';
-    const fixes: string[] = [];
-    if (/`ratio` must be `adaptive`/.test(error)) fixes.push('  · Ratio → adaptive');
-    if (/`duration` must be -1/.test(error)) fixes.push('  · Duration → Auto');
-    const what = fixes.length ? fixes.join('\n') : '  · Ratio → adaptive';
-    return `프롬프트가 "${ko}"으로 해석되었습니다.\n이 작업은 비율·길이를 원본 영상에서 그대로 가져가므로 아래를 바꿔주세요.\n${what}\n(레퍼런스로 쓰려던 거라면 프롬프트에서 "원본 영상을 그대로/이어서 사용" 같은 표현을 빼주세요.)`;
-  }
+// BytePlus 에셋(asset://) 레퍼런스 자리 — 내려받을 수 없어 그림 대신 표시만(26.11.2301~, lib/byteplus-asset.ts).
+const AssetTile = ({ url }: { url: string }) => (
+  <div title={isAssetUri(url) ? `BytePlus 에셋 ${assetLabel(url)}` : undefined}
+    className="w-full h-full flex flex-col items-center justify-center bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 leading-none">
+    <ImageIcon size={14} />
+    <span className="text-[8px] font-semibold mt-0.5">에셋</span>
+  </div>
+);
 
-  // 초안 → 본편 거절. 만료된 초안의 정확한 문구는 아직 본 적이 없다(일부러 만들 수가 없다).
-  // 그래서 원인을 단정하지 않고 규칙만 말한다 — 원문은 카드에 그대로 한 줄 더 남는다.
-  // 'draft task' 를 말하는 거절만 받는다. 그냥 'draft' 로 잡으면 초안 '생성' 쪽 거절까지
-  // 본편 이야기로 둔갑한다. 'not valid' 규칙보다 먼저 와야 한다 — 실측한 본편 거절이 모두
-  // 그 문구를 달고 온다 (2026-09-23, 둘 다 동기 400 · 태스크 안 생김):
-  //   물려받는 값 재전송 → "generate_audio is not supported for draft_task"
-  //   없는 초안 id     → "`content[0].draft_task.id` ... is not valid: the parameter
-  //                       'draft_task_id' must be a draft task with status 'succeeded'"
-  if (/draft[_ ]?task/i.test(error)) return 'Draft → 본편 요청이 거절되었습니다.\nDraft는 만든 뒤 14일(2026-10-29 오전 9시 전에 만든 Draft는 7일)까지만 본편으로 만들 수 있습니다. 아래 원문을 확인해주세요.';
-  // 4k is flagship-only: Fast/Mini reject it at parameter validation, before a task exists.
-  if (error.includes('parameter resolution') && error.includes('not valid')) return '이 모델은 선택한 해상도를 지원하지 않습니다. 4K는 Seedance 2.0(플래그십) 전용입니다.';
-  if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;
-  if (error.includes('timeout') || error.includes('ETIMEDOUT')) return '요청 시간 초과: 네트워크 연결을 확인해주세요.';
-  if (error.includes('Failed to fetch') || error.includes('NetworkError')) return '네트워크 오류: 인터넷 연결을 확인해주세요.';
-  return error;
-}
 
 /* ─── Video player: lazy mount + blob fetch (single GET → smooth playback over high-latency CDN) ─── */
 // Can this machine decode the 4k output at all? BytePlus encodes 4k as H.265/HEVC
@@ -722,10 +665,11 @@ const textToHtml = (text: string, assets: any[]) => {
       const name = part.slice(1, -1);
       const asset = assets.find(a => a.name === name);
       if (asset) {
-        const thumbSrc = (asset.type === 'image_url' || asset.type === 'video_url') ? (asset.thumbnailUrl || (asset.type === 'image_url' ? asset.url : '')) : '';
+        const thumbRaw = (asset.type === 'image_url' || asset.type === 'video_url') ? (asset.thumbnailUrl || (asset.type === 'image_url' ? asset.url : '')) : '';
+        const thumbSrc = imgSrcOk(thumbRaw) ? thumbRaw : '';   // asset:// 은 그림이 아니다
         const iconHtml = thumbSrc
           ? `<img src="${escHtml(thumbSrc)}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px;" />`
-          : `<span style="display:inline-block;width:16px;height:16px;background:#f0f0f5;border-radius:2px;vertical-align:middle;margin-right:4px;text-align:center;line-height:16px;font-size:10px;">${asset.type === 'video_url' ? '🎥' : '🎵'}</span>`;
+          : `<span style="display:inline-block;width:16px;height:16px;background:#f0f0f5;border-radius:2px;vertical-align:middle;margin-right:4px;text-align:center;line-height:16px;font-size:10px;">${asset.type === 'video_url' ? '🎥' : asset.type === 'image_url' ? '🖼' : '🎵'}</span>`;
         return `<span contenteditable="false" class="mention-pill" data-name="${escHtml(asset.name)}" data-asset-id="${escHtml(asset.id)}" style="display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;">${iconHtml}<span style="font-weight:500;">[${escHtml(asset.name)}]</span></span>&nbsp;`;
       }
     }
@@ -1328,7 +1272,7 @@ const renderMessageContent = (content: string, namedAssets: any[]) => {
       if (asset) {
         return (
           <span key={i} className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md px-1.5 py-0.5 mx-0.5 align-middle text-[13px]">
-            {asset.type === 'image_url' ? <img src={asset.thumbnailUrl || asset.url} className="w-4 h-4 object-cover rounded-sm" alt="" /> : asset.type === 'video_url' && asset.thumbnailUrl ? <img src={asset.thumbnailUrl} className="w-4 h-4 object-cover rounded-sm" alt="" /> : asset.type === 'video_url' ? <Video size={12} /> : <Music size={12} />}
+            {asset.type === 'image_url' && imgSrcOk(asset.thumbnailUrl || asset.url) ? <img src={asset.thumbnailUrl || asset.url} className="w-4 h-4 object-cover rounded-sm" alt="" /> : asset.type === 'image_url' ? <ImageIcon size={12} /> : asset.type === 'video_url' && asset.thumbnailUrl ? <img src={asset.thumbnailUrl} className="w-4 h-4 object-cover rounded-sm" alt="" /> : asset.type === 'video_url' ? <Video size={12} /> : <Music size={12} />}
             <span className="font-medium">[{asset.name}]</span>
           </span>
         );
@@ -1533,14 +1477,17 @@ function SettingsRestoreDialog({ target, onPaste, onFill, onGoToCard, onAttach, 
                   <div className="text-[12px] font-semibold text-gray-500">레퍼런스</div>
                   {named.map((a: any, i: number) => {
                     const ok = a.cacheId ? have[a.cacheId] : undefined;
-                    const img = a.type === 'image_url' ? thumbSrc(a.thumbnailUrl || a.url, thumbs) : '';
+                    const img0 = a.type === 'image_url' ? thumbSrc(a.thumbnailUrl || a.url, thumbs) : '';
+                    const img = imgSrcOk(img0) ? img0 : '';
                     return (
                       <div key={'a' + i} className="flex items-center gap-2 text-[12px]">
                         {img ? <img src={img} className="w-8 h-8 object-cover rounded border border-gray-200 shrink-0" alt="" />
-                          : <div className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center shrink-0">{a.type === 'video_url' ? <Video size={14} className="text-purple-500" /> : <Music size={14} className="text-green-500" />}</div>}
+                          : <div className="w-8 h-8 rounded bg-gray-100 flex items-center justify-center shrink-0" title={isAssetUri(a.url) ? `BytePlus 에셋 ${assetLabel(a.url)}` : undefined}>{a.type === 'image_url' ? <ImageIcon size={14} className="text-blue-500" /> : a.type === 'video_url' ? <Video size={14} className="text-purple-500" /> : <Music size={14} className="text-green-500" />}</div>}
                         <span className="font-medium text-gray-700">[{a.name}]</span>
                         <span className="text-gray-400 truncate">{a.file_name || ''} · {roleLabel(a.role)}</span>
-                        <span className={`ml-auto shrink-0 ${ok === false ? 'text-red-500' : ok ? 'text-emerald-600' : 'text-gray-400'}`}>{ok === false ? '이 PC 에 없음' : ok ? '있음' : '확인 중'}</span>
+                        {isAssetUri(a.url)
+                          ? <span className="ml-auto shrink-0 text-amber-600">BytePlus 에셋</span>   // 내려받는 파일이 아니라 확인할 것이 없다
+                          : <span className={`ml-auto shrink-0 ${ok === false ? 'text-red-500' : ok ? 'text-emerald-600' : 'text-gray-400'}`}>{ok === false ? '이 PC 에 없음' : ok ? '있음' : '확인 중'}</span>}
                       </div>
                     );
                   })}
@@ -1702,7 +1649,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                         copyImageToClipboard([
                           { src: asset.cacheId && `/api/cache/${asset.cacheId}`, original: true },
                           { fromPath: asset.originalPath, expect: asset.cacheId, original: true },
-                          { src: asset.url }, { src: asset.thumbnailUrl },
+                          { src: imgSrcOk(asset.url) ? asset.url : undefined }, { src: asset.thumbnailUrl },
                         ], asset.file_name || asset.name || '이미지');
                       }}
                       className="w-11 h-11 rounded-lg overflow-hidden border border-gray-200 shadow-sm bg-white dark:bg-[#1c1c1e] relative group shrink-0">
@@ -1714,6 +1661,8 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                             : <div className="w-full h-full flex items-center justify-center bg-purple-50 text-purple-400"><Video size={14} /></div>
                       ) : asset.type.startsWith('audio') ? (
                         <div className="w-full h-full flex items-center justify-center bg-indigo-50 text-indigo-400"><Music size={14} /></div>
+                      ) : isAssetUri(asset.url) ? (
+                        <AssetTile url={asset.url} />
                       ) : (
                         <HoverZoom className="block w-full h-full" src={asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}><img src={asset.url} alt="" className="w-full h-full object-cover cursor-zoom-in" /></HoverZoom>
                       )}
@@ -1775,9 +1724,34 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
         <div className="p-4">
           {(msg.status === 'running' || msg.status === 'queued') ? (
             <div className="space-y-3">
+              {/* 막혀서 자동으로 고치는 중(26.11.24~, send-request recover) — 끝나면 이 카드로 다시 보낸다. 취소하면 다시 보내지 않는다. */}
+              {(msg as any).bpFix && (() => {
+                const fx = (msg as any).bpFix as { kind: 'face' | 'gone'; label: string };
+                return (
+                  // 정렬(26.11.25~): 아이콘 · 제목 첫 줄 · 취소가 한 줄, 둘째 글은 제목과 같은 왼쪽. 창이 아니라 배너 자신의 폭(@container)으로 바뀐다 — 나누면 74px 까지 좁아진다.
+                  // 좁으면(20rem 미만) 취소가 글 아래로 내려오고, 아주 좁으면(9rem 미만) 설명은 접는다. 테두리는 안쪽(ring-inset) — border 면 아래 줄과 1px 어긋난다.
+                  <div data-bp-fix={fx.kind} className="@container text-sm text-amber-700 bg-amber-50 ring-1 ring-inset ring-amber-100 px-3 py-2 rounded-lg">
+                    <div className="grid grid-cols-[16px_minmax(0,1fr)] @xs:grid-cols-[16px_minmax(0,1fr)_auto] gap-x-2 items-start @max-[9rem]:block">
+                      <span className="h-5 flex items-center @max-[9rem]:hidden"><ShieldCheck size={16} className="shrink-0" /></span>
+                      <p title={fx.label} className="font-medium leading-5 break-keep [overflow-wrap:anywhere]">
+                        {fx.kind === 'face' ? '실사 얼굴이 걸려 ' : null}{/* 좁으면 파일 이름만 한 줄로 줄인다(전체는 title) — 긴 이름이 수십 줄을 먹지 않게 */}
+                        <span className="@max-xs:inline-block @max-xs:max-w-full @max-xs:truncate @max-xs:align-bottom">{fx.label}</span>
+                        {fx.kind === 'face' ? ` ${fx.label.startsWith('[Video') ? '영상' : '사진'}을 BytePlus 에 인증하는 중이에요` : ' 의 에셋이 BytePlus 에서 지워져 다시 등록하는 중이에요'}
+                      </p>
+                        <p className="col-start-2 @xs:col-end-4 row-start-2 text-[12px] leading-[18px] text-amber-600 mt-0.5 break-keep [overflow-wrap:anywhere] @max-[9rem]:hidden">끝나면 이 카드로 저절로 다시 보내요 — 보통 10초 안팎, 막힌 요청은 과금이 없어요.{fx.kind === 'face' ? ' AI 로 만든 가상 인물이 아니면(실존 인물) 취소해 주세요.' : ''}</p>
+                    <button
+                      onClick={() => useAppStore.getState().updateMessage(projectId, msg.id, { status: 'failed', content: '취소함', error: '자동 인증 중에 취소했어요 — 다시 보내지 않았어요.', bpFix: undefined, endTime: Date.now() } as any)}
+                      className="col-start-2 row-start-3 justify-self-start -ml-2 @xs:col-start-3 @xs:row-start-1 @xs:ml-0 @xs:-my-[3px] h-[26px] whitespace-nowrap text-[12px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2 rounded-md transition-colors"
+                    >
+                      취소
+                    </button>
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="flex items-center justify-between gap-2 text-sm text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg">
-                <div className="flex items-center gap-2">
-                  <Loader2 size={16} className="animate-spin" />
+                <div className="flex items-center gap-2 min-w-0 break-keep">
+                  <Loader2 size={16} className="animate-spin shrink-0" />
                   {msg.status === 'queued' ? '대기열에서 대기 중...' : '영상 생성 중...'}
                 </div>
                 {msg.taskId && (
@@ -1799,8 +1773,14 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
               <AlertCircle size={16} className="shrink-0 mt-0.5" />
               <div>
                 <p className="font-medium">생성 실패</p>
-                <p className="text-red-500 mt-0.5 text-[13px]">{translateError(msg.error || '')}</p>
-                {msg.error && msg.error !== translateError(msg.error) && <p className="text-red-400 mt-1 text-[11px] font-mono">{msg.error}</p>}
+                {(() => {
+                  // 에셋(asset://)을 넣은 요청이면 에셋 쪽 흔한 원인을 덧붙인다(lib/translate-error.ts). 줄바꿈이 든 안내라 pre-line.
+                  const friendly = translateError(msg.error || '', { hasAsset: !!(msg as any).bpAssetRefs || (msg.usedAssets || []).some((a: any) => isAssetUri(a?.url)) });
+                  return <>
+                    <p className="text-red-500 mt-0.5 text-[13px] whitespace-pre-line">{friendly}</p>
+                    {msg.error && msg.error !== friendly && <p className="text-red-400 mt-1 text-[11px] font-mono">{msg.error}</p>}
+                  </>;
+                })()}
               </div>
             </div>
           ) : msg.status === 'succeeded' && (msg.videoUrl || msg.imageUrl) ? (
@@ -2242,7 +2222,8 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
           // only have an <img> when a thumbnail was successfully captured;
           // otherwise they show the 🎥 emoji span and we skip.
           const img = pill.querySelector('img') as HTMLImageElement | null;
-          const newSrc = (asset as any).thumbnailUrl || (asset.type === 'image_url' ? asset.url : '');
+          const newSrc0 = (asset as any).thumbnailUrl || (asset.type === 'image_url' ? asset.url : '');
+          const newSrc = imgSrcOk(newSrc0) ? newSrc0 : '';   // asset:// 은 그림이 아니다
           if (img && newSrc && img.getAttribute('src') !== newSrc) {
             img.setAttribute('src', newSrc);
             changed = true;
@@ -2568,6 +2549,9 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const restoreBusyRef = useRef(false); // 받은 영상을 작성 칸에 불러오는 중(26.10.801~ runRestore — 둘이 섞이지 않게)
   const agentTickRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => {
+    // 개인판은 에이전트(MCP) 입구가 없다(26.11.2301~, 서버가 /api/agent/* 를 403 으로 막는다) — 작업함 들르기 · 설명서 올리기를 아예 시작하지 않는다.
+    // 들르면 2초마다 403 이 쌓인다. 이 타이머 하나가 claim · 설명서 · 보낸 작업 이어 받기(sent) · 진행 보고를 모두 부른다.
+    if (PERSONAL) return;
     const t = window.setInterval(() => { void agentTickRef.current(); }, 2000);
     return () => window.clearInterval(t);
   }, []);
@@ -3119,10 +3103,11 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     } else {
       pill.className = 'mention-pill'; pill.dataset.name = item.name; pill.dataset.assetId = item.id;
       pill.style.cssText = 'display:inline-flex;align-items:center;background:#eef2ff;color:#4338ca;padding:2px 6px;border-radius:6px;font-size:13px;margin:0 2px;vertical-align:middle;border:1px solid #c7d2fe;';
-      const thumbSrc = (item.type === 'image_url' || item.type === 'video_url') ? (item.thumbnailUrl || (item.type === 'image_url' ? item.url : '')) : '';
+      const thumbRaw = (item.type === 'image_url' || item.type === 'video_url') ? (item.thumbnailUrl || (item.type === 'image_url' ? item.url : '')) : '';
+      const thumbSrc = imgSrcOk(thumbRaw) ? thumbRaw : '';   // asset:// 은 그림이 아니다
       const iconHtml = thumbSrc
         ? `<img src="${thumbSrc}" style="width:16px;height:16px;object-fit:cover;border-radius:2px;margin-right:4px;" />`
-        : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${item.type === 'video_url' ? '🎥' : '🎵'}</span>`;
+        : `<span style="width:16px;height:16px;background:#f0f0f5;border-radius:2px;margin-right:4px;text-align:center;line-height:16px;font-size:10px;display:inline-block;">${item.type === 'video_url' ? '🎥' : item.type === 'image_url' ? '🖼' : '🎵'}</span>`;
       pill.innerHTML = `${iconHtml}<span style="font-weight:500;">[${item.name}]</span>`;
     }
     return pill;
@@ -3531,12 +3516,18 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         // strip snapshot id — replaceAllAssets assigns fresh ones
         const { id, ...rest } = a;
         let recovered = false;
+        // BytePlus 에셋(asset://)은 내려받는 파일이 아니다 — 캐시 · 원본 경로 확인 없이 주소 그대로 되살린다(26.11.2301~, lib/byteplus-asset.ts).
+        // 예전에는 cacheId · originalPath 가 없어 '구버전에서 첨부됨' 으로 빠지고 재생성이 멈췄다.
+        if (isAssetUri(a.url)) {
+          restored.push({ ...rest });
+          recovered = true;
+        }
 
         // Reuse must NOT trigger R2 upload — that's send-time territory. Only
         // verify the asset is reachable (cache hit, or disk re-cache via
         // originalPath) so the next send finds it. Keep url cleared so the
         // send loop unconditionally re-uploads to R2 with a fresh per-task key.
-        if (a.cacheId) {
+        if (!recovered && a.cacheId) {
           // Confirm cache is still present; cheap HEAD via cache fetch (404 → fall through)
           try {
             const probe = await fetch(`/api/cache/${a.cacheId}`, { method: 'GET' });
@@ -3776,24 +3767,34 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     const omni = modelProvider(next.model) === 'gemini';
     // 첫·끝 프레임은 role 로 순서를 정한다. 나머지는 받은 순서 그대로 — 프롬프트의 [Image N] 번호가 이 순서다.
     const rank = (r?: string) => (r === 'first_frame' ? 0 : r === 'last_frame' ? 1 : 2);
+    // 파일 경로(path) 또는 BytePlus 에셋(asset + type, 26.11.2301~ — 서버가 이미 모양을 거른다).
     const refs = (Array.isArray(job.refs) ? job.refs : [])
-      .map((r: any, i: number) => ({ path: String(r?.path || ''), role: typeof r?.role === 'string' ? r.role : undefined, i }))
+      .map((r: any, i: number) => ({
+        path: String(r?.path || ''), role: typeof r?.role === 'string' ? r.role : undefined, i,
+        asset: isAssetUri(r?.asset) ? r.asset as string : undefined,
+        type: r?.type === 'image_url' || r?.type === 'video_url' || r?.type === 'audio_url' ? r.type as 'image_url' | 'video_url' | 'audio_url' : undefined,
+      }))
       .sort((a: any, b: any) => rank(a.role) - rank(b.role) || a.i - b.i);
     if (refs.length && !omni && next.mode === 'text_to_video') return fail('Text to Video 모드에서는 래퍼런스 파일을 사용하지 않습니다.\n(mode 를 안 적으면 text_to_video 입니다 — 레퍼런스를 쓰려면 mode 를 적어 주세요)');
 
     // 레퍼런스는 메모리에 붙인다(attachFilesTo 의 검사 그대로) — 그 프로젝트의 레퍼런스 칸에는 아무것도 생기지 않는다.
     const sink = memoryAssetSink(next);
     try {
-      const files: File[] = [];
-      const given = new Map<File, { path: string; cacheId: string }>();
+      // ★ 받은 순서 그대로 하나씩 붙인다 — 프롬프트의 [Image N] 번호가 이 순서다. 에셋(asset://)과 파일이 섞여도 같다(26.11.2301~).
+      //   attachFilesTo 는 파일마다 받는 곳의 지금 칸 수를 새로 읽으므로 하나씩 불러도 한꺼번에 부른 것과 검사가 같다.
+      const rejected: string[] = [];
       for (const r of refs) {
+        if (r.asset && r.type) {
+          const why = attachAssetRefTo(sink, r.asset, r.type);
+          if (why) rejected.push(why);
+          continue;
+        }
+        let got: { file: File; cacheId: string };
         try {
-          const got = await agentFileFromPath(r.path);
-          files.push(got.file);
-          given.set(got.file, { path: r.path, cacheId: got.cacheId });
+          got = await agentFileFromPath(r.path);
         } catch (e: any) { throw new Error(`레퍼런스를 읽지 못했습니다: ${r.path}\n${e?.message || e}`); }
+        rejected.push(...await attachFilesTo(sink, [got.file], () => ({ path: r.path, cacheId: got.cacheId })));
       }
-      const rejected = await attachFilesTo(sink, files, f => given.get(f));
       if (rejected.length) throw new Error(`레퍼런스를 붙이지 못했습니다:\n${rejected.join('\n')}`);
     } catch (e: any) { return fail(e?.message || String(e)); }
     const missing: string[] = [];
@@ -4035,8 +4036,11 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       if (a.replaceImages) upd.images = await agentElementImages(a.replaceImages);
       else if (a.addImages) {
         const more = await agentElementImages(a.addImages);
-        if (e.images.length + more.length > MAX_ELEMENT_IMAGES) throw new Error(`이미지는 ${MAX_ELEMENT_IMAGES}장까지 — 지금 ${e.images.length}장`);
-        upd.images = [...e.images, ...more];
+        // 올리는 동안 바뀐 것(에셋 등록 상태 · 다른 편집)을 덮지 않게 지금 스토어의 사진에 붙인다
+        const live = useAppStore.getState().elementAssets.find(x => x.id === e.id);
+        if (!live) throw new Error(`엘리먼트가 그 사이 지워졌습니다: ${key}`);
+        if (live.images.length + more.length > MAX_ELEMENT_IMAGES) throw new Error(`이미지는 ${MAX_ELEMENT_IMAGES}장까지 — 지금 ${live.images.length}장`);
+        upd.images = [...live.images, ...more];
       }
       if (!Object.keys(upd).length) throw new Error('바꿀 것이 없습니다 (newName · category · description · addImages · replaceImages)');
       if (Array.isArray(upd.images) && !upd.images.length) throw new Error('이미지가 하나도 없게 바꿀 수는 없습니다');
@@ -4301,7 +4305,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       let data; try { data = JSON.parse(text); } catch { throw new Error(`서버 응답 오류 (${res.status})`); }
       if (!res.ok || (data.code !== undefined && data.code !== 0)) {
         refused = res.ok || (res.status >= 400 && res.status < 500);
-        throw new Error(data.error?.message || data.msg || data.error || JSON.stringify(data));
+        throw new Error(byteplusErrorText(data));
       }
       const taskId = data.id || data.data?.task_id;
       if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
@@ -4606,11 +4610,13 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                           copyImageToClipboard([
                             { src: a.cacheId && `/api/cache/${a.cacheId}`, original: true },
                             { fromPath: a.originalPath, expect: a.cacheId, original: true },
-                            { src: a.url }, { src: a.thumbnailUrl },
+                            { src: imgSrcOk(a.url) ? a.url : undefined }, { src: a.thumbnailUrl },
                           ], a.file_name || '이미지');
                         }}
                         className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200 bg-gray-50 relative group">
-                        {a.type === 'image_url' ? (
+                        {a.type === 'image_url' && isAssetUri(a.url) ? (
+                          <AssetTile url={a.url} />
+                        ) : a.type === 'image_url' ? (
                           <HoverZoom className="block w-full h-full" src={a.url} fullSrc={a.cacheId ? `/api/cache/${a.cacheId}` : undefined}>
                             <img src={a.url} className="w-full h-full object-cover cursor-zoom-in" />
                           </HoverZoom>
@@ -4856,7 +4862,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                           ? <img src={item.thumbnailUrl} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" />
                           : <div className="w-6 h-6 flex items-center justify-center rounded shrink-0" style={{ background: CATEGORY_META[item.category].bg }}><span className="w-2 h-2 rounded-full" style={{ background: CATEGORY_META[item.category].accent }} /></div>
                       ) : (
-                        item.type === 'image_url' && (item.thumbnailUrl || item.url) ? <img src={item.thumbnailUrl || item.url} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" /> : item.type === 'image_url' ? <div className="w-6 h-6 bg-blue-50 flex items-center justify-center rounded shrink-0"><ImageIcon size={14} className="text-blue-500" /></div> : item.type === 'video_url' ? <div className="w-6 h-6 bg-purple-50 flex items-center justify-center rounded shrink-0"><Video size={14} className="text-purple-500" /></div> : <div className="w-6 h-6 bg-green-50 flex items-center justify-center rounded shrink-0"><Music size={14} className="text-green-500" /></div>
+                        item.type === 'image_url' && imgSrcOk(item.thumbnailUrl || item.url) ? <img src={item.thumbnailUrl || item.url} className="w-6 h-6 object-cover rounded shrink-0 border border-gray-200" alt="" /> : item.type === 'image_url' ? <div className="w-6 h-6 bg-blue-50 flex items-center justify-center rounded shrink-0"><ImageIcon size={14} className="text-blue-500" /></div> : item.type === 'video_url' ? <div className="w-6 h-6 bg-purple-50 flex items-center justify-center rounded shrink-0"><Video size={14} className="text-purple-500" /></div> : <div className="w-6 h-6 bg-green-50 flex items-center justify-center rounded shrink-0"><Music size={14} className="text-green-500" /></div>
                       )}
                       <span className="font-medium">[{item.name}]</span>
                       <span className="text-xs ml-auto" style={item.kind === 'element' ? { color: CATEGORY_META[item.category].text } : { color: '#9ca3af' }}>{item.kind === 'element' ? CATEGORY_META[item.category].name : (item as any).role}</span>
@@ -4911,7 +4917,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                   <div className="relative w-20 h-20 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center overflow-hidden group hover:border-indigo-400 transition-colors bg-white dark:bg-[#1c1c1e]">
                     {project.assets.find(a => a.role === 'first_frame') ? (
                       <>
-                        <img src={(project.assets.find(a => a.role === 'first_frame') as any)?.thumbnailUrl || project.assets.find(a => a.role === 'first_frame')?.url} className="w-full h-full object-cover" />
+                        {(() => { const fr: any = project.assets.find(a => a.role === 'first_frame'); const src = fr?.thumbnailUrl || fr?.url; return isAssetUri(fr?.url) ? <AssetTile url={fr.url} /> : imgSrcOk(src) ? <img src={src} className="w-full h-full object-cover" /> : <ImageIcon className="text-gray-400" size={16} />; })()}
                         <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                           <button onClick={() => removeAsset(project.id, project.assets.find(a => a.role === 'first_frame')!.id)} className="text-white bg-red-500 p-1 rounded-full hover:bg-red-600"><X size={12} /></button>
                         </div>
@@ -4930,7 +4936,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
                     <div className="relative w-20 h-20 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center overflow-hidden group hover:border-indigo-400 transition-colors bg-white dark:bg-[#1c1c1e]">
                       {project.assets.find(a => a.role === 'last_frame') ? (
                         <>
-                          <img src={(project.assets.find(a => a.role === 'last_frame') as any)?.thumbnailUrl || project.assets.find(a => a.role === 'last_frame')?.url} className="w-full h-full object-cover" />
+                          {(() => { const fr: any = project.assets.find(a => a.role === 'last_frame'); const src = fr?.thumbnailUrl || fr?.url; return isAssetUri(fr?.url) ? <AssetTile url={fr.url} /> : imgSrcOk(src) ? <img src={src} className="w-full h-full object-cover" /> : <ImageIcon className="text-gray-400" size={16} />; })()}
                           <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                             <button onClick={() => removeAsset(project.id, project.assets.find(a => a.role === 'last_frame')!.id)} className="text-white bg-red-500 p-1 rounded-full hover:bg-red-600"><X size={12} /></button>
                           </div>

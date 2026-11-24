@@ -39,9 +39,15 @@
 //   팀 코드  영문 · 숫자 · _ (시크릿 이름이 된다). 이름은 TEAM_LABELS > 앱 v1 의 키 해시 표 > 코드 모양(T6·6T → 6팀,
 //           그 밖에 코드+'팀') 순으로 정해지고, 등록 때 출입증에 박힌다 — 키를 재발급해도 시트의 팀 이름은 그대로다.
 //
+// ── 어셋 (GET /v1/assets/project · POST /v1/assets/register · POST /v1/assets/status) ─────────────
+// AI 로 만든 가상 인물을 BytePlus 비공개 어셋 라이브러리에 올려 영상 요청에서 asset://<id> 로 부르게 한다. 아래 '어셋' 칸.
+//   시크릿  BP_ASSET_AK · BP_ASSET_SK — 어셋 전용 IAM 사용자(seedance-asset-gateway). PC 에는 절대 내려주지 않는다.
+//   변수    TEAM_PROJECTS(JSON {"TA":"2DT"} — 찾기보다 우선) · BP_OPENAPI_HOST · BP_ASSET_HOST(시험용) · ASSET_TEST_HTTP("1" 이면
+//           http://127.0.0.1 · localhost 주소 허용 — 시험용)
+//
 // ── KV 쓰기 (월 포함량으로 계산, 넘으면 과금, 나노바나나와 공유) ─────────────────────────────
-// 등록(PC 당 한 번) · 입장권 기억(키 하나당 한 번) · 묶음을 받은 기록(PC 당 12시간에 한 번까지, 묶음이 바뀌면 바로)뿐.
-// 생성마다 쓰지 않는다.
+// 등록(PC 당 한 번) · 입장권 기억(키 하나당 한 번) · 묶음을 받은 기록(PC 당 12시간에 한 번까지, 묶음이 바뀌면 바로) ·
+// 어셋(팀 → 프로젝트를 처음 찾을 때 · 그룹 · 어셋을 처음 만들 때(잠금 걸기 · 풀기 포함) · 어셋 상태가 바뀔 때)뿐. 생성마다 쓰지 않는다.
 
 const CLOCK_SKEW_MS = 5 * 60 * 1000;
 const TICKET_MSG = 'seedance-ticket-v1';
@@ -292,6 +298,8 @@ async function bundleFor(env, rec) {
   if (env.GEMINI_KEY) out.SEEDANCE_GEMINI_KEY = env.GEMINI_KEY;
   if (env.GATEWAY_URL) out.SEEDANCE_GATEWAY_URL = env.GATEWAY_URL;
   for (const k of Object.keys(out)) out[k] = String(out[k]);
+  // 어셋 서명 키는 PC 몫이 아니다 — PC_* 로 잘못 넣어도 묶음에 실리지 않게 값으로 한 번 더 거른다.
+  for (const k of Object.keys(out)) if ((env.BP_ASSET_AK && out[k] === env.BP_ASSET_AK) || (env.BP_ASSET_SK && out[k] === env.BP_ASSET_SK)) delete out[k];
   const rev = (await sha256Hex(JSON.stringify(Object.keys(out).sort().map((k) => [k, out[k]])))).slice(0, 12);
   return { env: out, rev, team: rec.team, label };
 }
@@ -391,6 +399,543 @@ async function legacyNcp(request, env) {
   });
 }
 
+// ────────────────────────────────────────────────────────────────── 어셋
+// 어셋은 BytePlus 프로젝트마다 따로다 — 팀 키(BP_KEY_<팀>)가 든 프로젝트에 올려야 그 팀 키로 보낸 영상 요청이 asset://<id> 를
+// 찾는다. 프로젝트 이름은 팀 코드와 다르다(TA → 2DT). 팀은 출입증이 정한다(본문에 팀 칸 없음) — 남의 프로젝트에 올리지 못하게.
+// 서명 키(BP_ASSET_AK/SK)는 ark:*Asset* · ark:ListApiKeys · iam:ListProjects 만 되는 전용 사용자라 여기서만 쓴다.
+// KV  ast:proj:<팀>                 { p, fp, at }  fp = 지금 팀 키 sha256 앞 16자 — 키를 재발급하면 맞지 않아 저절로 다시 찾는다
+//     ast:g:<프로젝트>:<인물 key>    { id, at }
+//     ast:a:<프로젝트>:<내용 key>    { id, status, at }  — 같은 내용을 또 올려도 CreateAsset 을 다시 부르지 않는다
+//                                    (무료 등급에서 분당 3건이라 아껴야 하고, 같은 그림이 어셋 둘로 갈라지지 않게)
+//     ast:lock:… · ast:glock:…      만드는 동안만(TTL 60초, 끝나면 지움) — 다른 PC 와 동시에 만들지 않게
+// 겹침 막기는 세 겹: KV 기록 → BytePlus ListAssets(Name = 내용 key 가 정확히 같은 것) → 잠금. KV 는 곳마다 늦게 맞춰지므로
+// 앞의 하나만 믿지 않는다. 그룹은 새 어셋을 정말 만들 때만 만든다(찾은 어셋은 다른 그룹에 있어도 그대로 쓴다).
+const BP_REGION = 'ap-southeast-1';
+const ARK_VERSION = '2024-01-01';
+const ASSET_TYPES = new Set(['Image', 'Video', 'Audio']);
+const GROUP_KEY_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ITEM_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;   // 어셋 Name 에 그대로 쓴다(64자까지) — 같은 내용 찾기의 열쇠
+const ASSET_ID_RE = /^[A-Za-z0-9._-]{1,80}$/;
+const CREATE_RETRY_AFTER = 25;   // CreateAsset 분당 3건(무료 등급) — 20초에 한 건 + 여유
+const PROJECT_RETRY_AFTER = 10;
+const PROJECT_MISS_TTL = 600;    // 프로젝트를 못 찾은 답(없음 · 여럿)도 10분 기억 — 그동안 ListProjects + ListApiKeys 수십 번을 되풀이하지 않게
+const RATE_CODE_RE = /Throttl|TooManyRequests|FlowLimit|RequestLimitExceeded|RateLimit|QpsLimit|QPSLimit|QpmLimit|QPMLimit/i;
+
+const assetConfigured = (env) => Boolean(env.BP_ASSET_AK && env.BP_ASSET_SK);
+const openapiHost = (env) => env.BP_OPENAPI_HOST || 'open.byteplusapi.com';
+const assetHost = (env) => env.BP_ASSET_HOST || 'ark.ap-southeast-1.byteplusapi.com';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const rfc3986 = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+const chars = (s) => [...s].length;
+
+async function hmacBytes(key, msg) {
+  const k = await crypto.subtle.importKey('raw', typeof key === 'string' ? enc.encode(key) : key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', k, enc.encode(msg)));
+}
+
+// BytePlus 가 돌려준 문구에 서명 키가 섞여 나와도(잘못된 AK 라며 되풀이하는 식) 앱으로 내보내지 않는다.
+function scrub(env, s) {
+  let t = clip(s, 300);
+  for (const v of [env.BP_ASSET_AK, env.BP_ASSET_SK]) if (v) t = t.split(v).join('***');
+  return t;
+}
+
+// 서명 OpenAPI(HMAC-SHA256, V4 꼴). SK 는 콘솔 글자 그대로 키로 쓴다 — base64 를 풀면 서명이 틀린다.
+// 오류는 HTTP 200 이어도 ResponseMetadata.Error 로 온다. → { ok, result } | { ok:false, rate?, code, message }
+async function bpCall(env, { host, service, version, action, query = {}, body = null }) {
+  const method = body ? 'POST' : 'GET';
+  const payload = body ? JSON.stringify(body) : '';
+  const xdate = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const ds = xdate.slice(0, 8);
+  const q = { Action: action, Version: version, ...query };
+  const cq = Object.keys(q).sort().map((k) => `${rfc3986(k)}=${rfc3986(String(q[k]))}`).join('&');
+  const ph = await sha256Hex(payload);
+  const sh = body ? 'content-type;host;x-content-sha256;x-date' : 'host;x-content-sha256;x-date';
+  const ch = (body ? 'content-type:application/json\n' : '') + `host:${host}\nx-content-sha256:${ph}\nx-date:${xdate}\n`;
+  const scope = `${ds}/${BP_REGION}/${service}/request`;
+  const sts = ['HMAC-SHA256', xdate, scope, await sha256Hex([method, '/', cq, ch, sh, ph].join('\n'))].join('\n');
+  let k = await hmacBytes(env.BP_ASSET_SK, ds);
+  k = await hmacBytes(k, BP_REGION); k = await hmacBytes(k, service); k = await hmacBytes(k, 'request');
+  const sig = hex(await hmacBytes(k, sts));
+  const headers = { 'X-Date': xdate, 'X-Content-Sha256': ph, Authorization: `HMAC-SHA256 Credential=${env.BP_ASSET_AK}/${scope}, SignedHeaders=${sh}, Signature=${sig}` };
+  if (body) headers['Content-Type'] = 'application/json';
+  // 시험은 env.FETCH 로 가짜 BytePlus 를 끼운다. 전역 fetch 는 감싸서 부른다(객체의 메서드로 부르면 Illegal invocation).
+  const f = env.FETCH || ((u, i) => fetch(u, i));
+  let res, text;
+  try {
+    res = await f(`https://${host}/?${cq}`, { method, headers, ...(body ? { body: payload } : {}) });
+    text = await res.text();
+  } catch (e) { return { ok: false, code: 'network', message: scrub(env, e && e.message) }; }
+  let j = null; try { j = JSON.parse(text); } catch {}
+  const err = j && j.ResponseMetadata && j.ResponseMetadata.Error;
+  const code = err ? clip(err.Code, 80) : '';
+  // '잠깐 막힘'(속도 한도)만 rate — 'Limit' 한 낱말로 보면 개수 한도(에셋 50개 · 그룹 50개)까지 잠깐 막힘으로 읽혀 앱이 영원히 다시 한다.
+  // 개수 한도는 일반 오류로 돌려 '등록 실패' + 이유로 보이게 한다.
+  if (res.status === 429 || RATE_CODE_RE.test(code)) return { ok: false, rate: true, code: code || 'http_429', message: scrub(env, err && err.Message) };
+  if (err) return { ok: false, code: code || 'error', message: scrub(env, err.Message) };
+  if (!res.ok) return { ok: false, code: `http_${res.status}`, message: scrub(env, text) };
+  return { ok: true, result: (j && j.Result) || {} };
+}
+
+// 찾기(목록)는 몰아서 부르니 한 번 막히면 1초 쉬고 한 번만 더.
+async function bpCallRetry(env, opts) {
+  let r = await bpCall(env, opts);
+  if (!r.ok && r.rate) { await sleep(1000); r = await bpCall(env, opts); }
+  return r;
+}
+
+const arkCall = (env, action, body) => bpCall(env, { host: assetHost(env), service: 'ark', version: ARK_VERSION, action, body });
+
+// 어셋 · 그룹이 없다는 대답 — 코드 이름이 문서마다 달라 낱말로 본다.
+const isNotFound = (r) => !r.ok && !r.rate && (/NotFound|NotExist/i.test(r.code) || /not\s*found|not\s*exist|does\s*not\s*exist/i.test(r.message || ''));
+
+async function pool(list, n, fn) {
+  const out = new Array(list.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, list.length) }, async () => {
+    while (i < list.length) { const at = i++; out[at] = await fn(list[at], at); }
+  }));
+  return out;
+}
+
+// ListApiKeys 의 Key 는 앞 8 + '*'×20 + 뒤 8 로 가려져 온다(길이는 진짜 키와 같다). 앞뒤 8자 · 길이 · Active 가 다 맞아야 같은 키.
+const maskedMatch = (item, k) => Boolean(item && item.Status === 'Active' && typeof item.Key === 'string'
+  && item.Key.length === k.length && item.Key.slice(0, 8) === k.slice(0, 8) && item.Key.slice(-8) === k.slice(-8));
+
+async function discoverProject(env, key) {
+  const names = [];
+  let fetched = 0;   // 받은 줄 수(이름 없는 줄 포함) — Offset 은 이걸로. 거른 수로 넘기면 같은 줄을 또 받는다.
+  for (let page = 0; page < 20; page++) {
+    const r = await bpCallRetry(env, { host: openapiHost(env), service: 'iam', version: '2021-08-01', action: 'ListProjects',
+      query: page ? { Limit: 100, Offset: fetched } : { Limit: 100 } });
+    if (!r.ok) return r;
+    const rows = r.result.Projects || [];
+    fetched += rows.length;
+    for (const p of rows) { const n = p && p.ProjectName; if (typeof n === 'string' && n && !names.includes(n)) names.push(n); }
+    if (rows.length < 100 || !(Number(r.result.Total) > fetched)) break;
+  }
+  const hits = await pool(names, 6, async (ProjectName) => {
+    for (let PageNumber = 1; PageNumber <= 20; PageNumber++) {
+      const r = await bpCallRetry(env, { host: openapiHost(env), service: 'ark', version: ARK_VERSION, action: 'ListApiKeys', body: { ProjectName, PageSize: 100, PageNumber } });
+      if (!r.ok) return r;
+      const items = r.result.Items || [];
+      if (items.some((it) => maskedMatch(it, key))) return { ok: true, hit: true };
+      if (items.length < 100) break;
+    }
+    return { ok: true, hit: false };
+  });
+  // 한 프로젝트라도 못 읽었으면 '없음' · '하나뿐' 을 단정하지 않는다.
+  const bad = hits.find((h) => !h.ok && h.rate) || hits.find((h) => !h.ok);
+  if (bad) return bad;
+  return { ok: true, projects: names.filter((_, i) => hits[i].hit) };
+}
+
+// 팀 → BytePlus 프로젝트. TEAM_PROJECTS > KV(지금 키의 지문일 때만) > 찾기.
+// '없음' · '여럿' 은 10분 기억한다(ast:projmiss — 같은 키 지문일 때만). 한도 · 네트워크 같은 일시 실패는 기억하지 않는다.
+async function assetProjectOf(env, team, ctx) {
+  const over = parseJsonVar(env.TEAM_PROJECTS)[team];
+  if (typeof over === 'string' && over.trim()) return { project: over.trim() };
+  const key = env[`BP_KEY_${team}`];
+  if (!key) return { status: 409, code: 'no_project', error: `팀 ${team} 의 키가 게이트웨이에 없습니다.` };
+  const fp = (await sha256Hex(key)).slice(0, 16);
+  const raw = await env.SD_TOKENS.get(`ast:proj:${team}`);
+  if (raw) { try { const c = JSON.parse(raw); if (c.fp === fp && c.p) return { project: c.p }; } catch {} }
+  const missRaw = await env.SD_TOKENS.get(`ast:projmiss:${team}`);
+  if (missRaw) { try { const m = JSON.parse(missRaw); if (m.fp === fp && m.code && m.error) return { status: 409, code: m.code, error: m.error }; } catch {} }
+  const d = await discoverProject(env, key);
+  if (!d.ok) return d.rate
+    ? { status: 429, code: 'rate_limited', retryAfter: PROJECT_RETRY_AFTER, error: 'BytePlus 가 잠시 막았습니다. 조금 뒤 다시.' }
+    : { status: 502, code: 'byteplus', error: `${d.code}: ${d.message}` };
+  const miss = d.projects.length === 0
+    ? { code: 'no_project', error: `팀 ${team} 의 키가 든 BytePlus 프로젝트를 찾지 못했습니다(키가 꺼졌거나 다른 계정).` }
+    : d.projects.length > 1
+      ? { code: 'ambiguous_project', error: `팀 ${team} 의 키가 여러 프로젝트에 맞습니다(${d.projects.join(', ')}). 관리자가 TEAM_PROJECTS 로 정해 주세요.` }
+      : null;
+  if (miss) {
+    ctx.waitUntil(env.SD_TOKENS.put(`ast:projmiss:${team}`, JSON.stringify({ ...miss, fp, at: new Date().toISOString() }), { expirationTtl: PROJECT_MISS_TTL }).catch(() => {}));
+    return { status: 409, ...miss };
+  }
+  const p = d.projects[0];
+  const at = new Date().toISOString();
+  ctx.waitUntil(env.SD_TOKENS.put(`ast:proj:${team}`, JSON.stringify({ p, fp, at }), { metadata: { p, fp } }).catch(() => {}));
+  ctx.waitUntil(env.SD_TOKENS.delete(`ast:projmiss:${team}`).catch(() => {}));
+  return { project: p };
+}
+
+const bad = (error) => json({ ok: false, code: 'invalid', error }, 400);
+const projectError = (pr) => json({ ok: false, code: pr.code, error: pr.error, ...(pr.retryAfter ? { retryAfter: pr.retryAfter } : {}) }, pr.status);
+const notConfigured = () => json({ ok: false, code: 'not_configured', error: '게이트웨이에 어셋 키(BP_ASSET_AK/SK)가 없습니다. 관리자에게 알려주세요.' }, 503);
+
+function assetUrlOk(env, s) {
+  if (typeof s !== 'string' || !s || s.length > 4096) return false;
+  let u; try { u = new URL(s); } catch { return false; }
+  if (u.protocol === 'https:') return true;
+  return env.ASSET_TEST_HTTP === '1' && u.protocol === 'http:' && (u.hostname === '127.0.0.1' || u.hostname === 'localhost');
+}
+
+/// 고쳐서 받지 않는다 — 틀린 칸을 알려 주고 거절(앱이 같은 값을 다시 보내 같은 결과를 받게).
+// url 은 없어도 된다 — 앱은 먼저 주소 없이 물어 'NeedUpload' 인 것만 R2 에 올린 뒤 주소를 붙여 다시 부른다(이미 올라간 건 안 올림).
+function checkRegister(env, b) {
+  const g = b.group;
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return 'group 이 없습니다';
+  if (typeof g.key !== 'string' || !GROUP_KEY_RE.test(g.key)) return 'group.key 는 영문 · 숫자 · _ · - 1~64자';
+  if (typeof g.name !== 'string' || chars(g.name) < 1 || chars(g.name) > 64) return 'group.name 은 1~64자 문자열';
+  const items = b.items;
+  if (!Array.isArray(items) || items.length < 1 || items.length > 10) return 'items 는 1~10개';
+  const keys = new Set();
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (!it || typeof it !== 'object' || Array.isArray(it)) return `items[${i}] 가 객체가 아닙니다`;
+    if (typeof it.key !== 'string' || !ITEM_KEY_RE.test(it.key)) return `items[${i}].key 는 영문 · 숫자 · . _ - 1~64자`;
+    if (keys.has(it.key)) return `items[${i}].key 가 겹칩니다`;
+    keys.add(it.key);
+    if (it.url !== undefined && !assetUrlOk(env, it.url)) return `items[${i}].url 은 https 주소(4096자 이하)`;
+    if (!ASSET_TYPES.has(it.type)) return `items[${i}].type 은 Image · Video · Audio`;
+    if (it.name !== undefined && (typeof it.name !== 'string' || chars(it.name) < 1 || chars(it.name) > 64)) return `items[${i}].name 은 1~64자 문자열`;
+  }
+  return '';
+}
+
+const errOf = (r) => ({ code: r.code, message: r.message || '' });
+const assetErr = (e) => (e && typeof e === 'object' ? { code: clip(e.Code, 80), message: clip(e.Message, 300) } : undefined);
+const timeOf = (t) => (typeof t === 'number' ? t : Date.parse(t) || Number(t) || Infinity);
+
+// BytePlus 쪽에서 같은 내용(Name = 내용 key)의 어셋을 찾는다 — KV 는 곳마다 늦게 맞춰지고 다른 PC 가 같은 그림을 막 올렸을 수 있어서.
+// Name 거르기는 부분 일치라 이름이 똑같은 것만 남기고, 여럿이면 가장 먼저 만든 것(모두가 같은 하나를 고르게).
+async function findAsset(env, project, key) {
+  const hits = [];
+  let NextToken;
+  for (let page = 0; page < 5; page++) {
+    const r = await arkCall(env, 'ListAssets', { Filter: { GroupType: 'AIGC', Name: key, Statuses: ['Active', 'Processing'] }, MaxResults: 20, ProjectName: project, ...(NextToken ? { NextToken } : {}) });
+    if (!r.ok) return r;
+    for (const x of r.result.Items || []) if (x && x.Name === key && x.Id && (x.Status === 'Active' || x.Status === 'Processing')) hits.push(x);
+    NextToken = r.result.NextToken;
+    if (!NextToken) break;
+  }
+  hits.sort((a, b) => timeOf(a.CreateTime) - timeOf(b.CreateTime) || String(a.Id).localeCompare(String(b.Id)));
+  return { ok: true, found: hits[0] || null };
+}
+
+// 잠금 — 같은 내용 · 같은 인물을 두 PC 가 동시에 만들지 않게 짧게(KV 최소 TTL 60초) 건다. 잠금 값은 이번 호출만의 표(nonce)이고,
+// 적은 뒤 잠깐 기다렸다 다시 읽어 내 표가 남아 있을 때만 잡은 것으로 본다(같은 곳의 두 PC 가 동시에 적으면 나중 것 하나만 남는다).
+// KV 는 곳마다 늦게 맞춰지므로 완벽하진 않다 — 잠금을 잡은 뒤 BytePlus ListAssets 를 한 번 더 본다(그 사이 다른 PC 가 만든 것).
+// 만들기에 성공하면 잠금 자리에 'done:<만든 id>' 를 60초 남긴다 — 이미 지나간 다른 PC 가 KV 기록 · ListAssets 를 못 보고 잠금을
+// 보면, 또 만들지 않고 그 id 를 받아 간다. 실패했을 때는 바로 지운다(다시 부를 때 Busy 로 막히지 않게).
+// staleId — 이번 호출에서 죽은 것으로 확인한 id(Failed · 사라짐 · 그룹이 지워짐). 그 id 의 done 표는 비어 있는 것으로 본다
+// ('등록 실패' 를 바로 다시 누르면 60초 기다리지 않게).
+const LOCK_TTL = 60;
+const BUSY_RETRY_AFTER = 10;
+const lockSettleMs = (env) => { const n = Number(env.ASSET_LOCK_SETTLE_MS); return Number.isFinite(n) && n >= 0 ? n : 300; };
+const doneIdOf = (v) => (typeof v === 'string' && v.startsWith('done:') ? v.slice(5) : '');
+async function takeLock(env, kv, k, staleId = '') {
+  try {
+    const cur = await kv.get(k);
+    if (cur) {
+      const d = doneIdOf(cur);
+      if (!d || d !== staleId) return { ok: false, done: d && d !== staleId ? d : '' };
+    }
+    const mine = crypto.randomUUID();
+    await kv.put(k, mine, { expirationTtl: LOCK_TTL });
+    const ms = lockSettleMs(env);
+    if (ms) await sleep(ms);
+    const now = await kv.get(k);
+    if (now === mine) return { ok: true };
+    const d = doneIdOf(now);
+    return { ok: false, done: d && d !== staleId ? d : '' };
+  } catch { return { ok: false, done: '' }; }
+}
+
+// ── 보관함이 찼을 때(26.11.24~, 사용자 "에셋 보관 다 차면 어떻게 정리할 건지") ──
+// 보관함은 계정 등급의 개수 한도(무료 Entry 50 · Advanced 100만, 실존 인물(Real-human) 에셋과 나눠 씀)다. CreateAsset 이 개수 때문에
+// 거절하면 이 앱이 만든 에셋 중 가장 오래 안 쓴 것부터 몇 개 지우고 한 번 더 만든다. '언제 썼나' 는 BytePlus 가 준다 —
+// ListAssets 항목의 LastInferenceTime(마지막으로 생성에 쓰인 때, 11/24 실측 · ISO 시각). 없으면 CreateTime.
+// 지우는 것: AIGC 그룹 · 이름이 내용 key 꼴(이 앱이 만든 것 — 콘솔에서 사람이 올린 것 · 실존 인물 에셋은 건드리지 않는다) ·
+// 마지막으로 쓰거나 만든 지 24시간이 넘은 것 · 한 번에 EVICT_MAX 개까지. 지운 에셋의 KV 기록(ast:a)도 지운다.
+// 거절 문구는 아직 실측 못 했다(한도까지 채워 본 적 없음) — 낱말로 보고, 규격 문구(크기 · 해상도 …)는 빼고, 이번 호출에서 한 번만 지운다.
+// 잘못 지워도 되살아난다 — 그 사진을 보낸 PC 는 BytePlus 의 'asset … is not found'(11/24 실측, 동기 400)를 보고 다시 등록해 다시 보낸다(앱 send-request).
+const CAPACITY_RE = /quota|capacity|exceed|limit|maximum|insufficient|full/i;
+const SPEC_RE = /size|resolution|pixel|dimension|format|duration|aspect|ratio|width|height|byte|MB\b/i;
+const looksFull = (r) => Boolean(r && !r.ok && !r.rate && !isNotFound(r) && CAPACITY_RE.test(`${r.code} ${r.message}`) && !SPEC_RE.test(String(r.message || '')));
+const OWN_NAME_RE = /^[0-9a-f]{12}\.[a-z0-9]{2,5}$/i;
+const EVICT_KEEP_MS = 24 * 3600 * 1000;
+const EVICT_MAX = 3;
+// 지운 기록(26.11.24~) — 앱이 '지워짐' 을 그리려고 묻는다(/v1/assets/evicted). 한 건에 키 하나(같은 순간 두 정리가 서로 덮지 않게) + 마지막 정리 시각 하나
+// (묻는 쪽이 대부분 '새로 지운 것 없음' 을 목록 없이 받게). 30일 뒤 저절로 사라진다. KV 는 곳마다 늦게 맞춰지므로(보통 1분 안) 돌려주는 기준 시각은
+// 2분 앞으로 잡는다 — 다음 물음이 그 사이 것을 다시 받아도 앱은 같은 결과다.
+const EVICT_LOG_TTL = 30 * 86400;
+const EVICT_LIST_LAG_MS = 120 * 1000;
+const toMs = (t) => {
+  if (typeof t === 'number') return t < 1e12 ? t * 1000 : t;
+  if (typeof t === 'string' && /^\d+$/.test(t)) { const n = Number(t); return n < 1e12 ? n * 1000 : n; }
+  const p = Date.parse(t);
+  return Number.isFinite(p) ? p : 0;
+};
+async function evictIdle(env, project, max) {
+  const all = [];
+  let NextToken;
+  for (let page = 0; page < 20; page++) {
+    const r = await arkCall(env, 'ListAssets', { Filter: { GroupType: 'AIGC' }, MaxResults: 100, ProjectName: project, ...(NextToken ? { NextToken } : {}) });
+    if (!r.ok) return { gone: [], error: r };
+    for (const x of r.result.Items || []) if (x && x.Id && typeof x.Name === 'string' && OWN_NAME_RE.test(x.Name)) all.push(x);
+    NextToken = r.result.NextToken;
+    if (!NextToken) break;
+  }
+  const now = Date.now();
+  const lastOf = (x) => Math.max(toMs(x.LastInferenceTime), toMs(x.CreateTime));
+  const cands = all.filter((x) => now - lastOf(x) > EVICT_KEEP_MS).sort((a, b) => lastOf(a) - lastOf(b) || String(a.Id).localeCompare(String(b.Id)));
+  const gone = [];
+  for (const x of cands.slice(0, max)) {
+    const d = await arkCall(env, 'DeleteAsset', { Id: x.Id, ProjectName: project });
+    if (d.ok || isNotFound(d)) {
+      gone.push(String(x.Id));
+      try { await env.SD_TOKENS.delete(`ast:a:${project}:${x.Name}`); } catch {}
+      // 잠금 자리의 'done:<id>'(만든 뒤 60초)도 지운다 — 남아 있으면 그 사진을 다시 등록할 때 '방금 만든 것' 으로 지운 옛 id 를 돌려준다(11/24 시험 앱에서 찾음)
+      try { await env.SD_TOKENS.delete(`ast:lock:${project}:${x.Name}`); } catch {}
+      const at = Date.now();
+      try { await env.SD_TOKENS.put(`ast:ev:${project}:${at}:${x.Id}`, JSON.stringify({ id: String(x.Id), name: x.Name, at }), { metadata: { id: String(x.Id), at }, expirationTtl: EVICT_LOG_TTL }); } catch {}
+    }
+  }
+  if (gone.length) { try { await env.SD_TOKENS.put(`ast:evv:${project}`, String(Date.now()), { expirationTtl: EVICT_LOG_TTL }); } catch {} }
+  return { gone, candidates: cands.length };
+}
+
+// 이 팀 프로젝트에서 since(ms) 뒤에 보관함 정리로 지운 에셋 — 앱이 칸 · 카드를 '지워짐' 으로 바꾼다. 마지막 정리 시각이 since 보다 오래면 목록 없이 빈 답.
+async function assetsEvicted(request, env, ctx, a) {
+  if (!assetConfigured(env)) return notConfigured();
+  const r = await readJson(request, 1024);
+  if (r.error) return json({ ok: false, code: 'invalid', error: r.error }, 400);
+  const since = Number(r.body && r.body.since);
+  if (!Number.isFinite(since) || since < 0) return bad('since 는 0 이상의 숫자(ms)');
+  const pr = await assetProjectOf(env, a.rec.team, ctx);
+  if (!pr.project) return projectError(pr);
+  const project = pr.project;
+  const until = Math.max(since, Date.now() - EVICT_LIST_LAG_MS);
+  let last = 0;
+  try { last = Number(await env.SD_TOKENS.get(`ast:evv:${project}`)) || 0; } catch {}
+  if (last <= since) return json({ ok: true, project, until, items: [] });
+  const items = [];
+  let cursor;
+  for (let page = 0; page < 10; page++) {
+    const l = await env.SD_TOKENS.list({ prefix: `ast:ev:${project}:`, ...(cursor ? { cursor } : {}) });
+    for (const k of l.keys || []) {
+      const m = k.metadata || {};
+      const at = Number(m.at) || 0;
+      if (at > since && typeof m.id === 'string' && ASSET_ID_RE.test(m.id)) items.push({ id: m.id, at });
+    }
+    if (l.list_complete || !l.cursor) break;
+    cursor = l.cursor;
+  }
+  return json({ ok: true, project, until, items });
+}
+
+async function assetsProject(env, ctx, a) {
+  if (!assetConfigured(env)) return notConfigured();
+  const pr = await assetProjectOf(env, a.rec.team, ctx);
+  return pr.project ? json({ ok: true, project: pr.project }) : projectError(pr);
+}
+
+async function assetsRegister(request, env, ctx, a) {
+  if (!assetConfigured(env)) return notConfigured();
+  const r = await readJson(request, 64 * 1024);
+  if (r.error) return json({ ok: false, code: 'invalid', error: r.error }, 400);
+  const why = checkRegister(env, r.body);
+  if (why) return bad(why);
+  const { group, items } = r.body;
+  const pr = await assetProjectOf(env, a.rec.team, ctx);
+  if (!pr.project) return projectError(pr);
+  const project = pr.project;
+  const kv = env.SD_TOKENS;
+  const now = () => new Date().toISOString();
+  const unlock = (k) => kv.delete(k).catch(() => {});
+  // KV 쓰기가 실패해도 이미 만든 에셋의 답은 돌려준다(500 으로 끝나면 앱은 id 를 모른 채 또 부른다 — 그때는 ② 찾기가 같은 것을 돌려준다).
+  const put = (k, v, o) => kv.put(k, v, o).then(() => true, () => false);
+
+  // 그룹 — 인물 하나에 하나. 정말 새로 만들 어셋이 있을 때만 만든다(찾은 어셋은 다른 그룹에 있어도 그대로 쓴다 — 옮기지 않는다).
+  const gk = `ast:g:${project}:${group.key}`;
+  const glk = `ast:glock:${project}:${group.key}`;
+  let groupId = '';
+  let groupFresh = false;
+  let groupLoaded = false;
+  let groupFail = null;          // 이번 호출에서 그룹을 못 만든 이유 — 남은 줄도 같은 이유로(같은 실패를 되풀이해 부르지 않게)
+  const loadGroup = async () => {
+    if (groupLoaded) return;
+    groupLoaded = true;
+    try { const g = JSON.parse((await kv.get(gk)) || 'null'); if (g && g.id) groupId = g.id; } catch {}
+  };
+  // staleGid — BytePlus 에서 지워진 것으로 확인한 그룹 id(있으면 그 done 표 · KV 기록은 무시하고 새로 만든다)
+  const makeGroup = async (staleGid = '') => {
+    const lr = await takeLock(env, kv, glk, staleGid);
+    if (!lr.ok) {
+      if (!lr.done) return { ok: false, busy: true };
+      groupId = lr.done;   // 다른 PC 가 방금 만든 그룹
+      await put(gk, JSON.stringify({ id: groupId, at: now() }));
+      return { ok: true, result: { Id: groupId } };
+    }
+    // 잠금을 잡는 사이 다른 PC 가 만들었을 수 있다
+    try {
+      const g = JSON.parse((await kv.get(gk)) || 'null');
+      if (g && g.id && g.id !== staleGid) { groupId = g.id; await put(glk, `done:${g.id}`, { expirationTtl: LOCK_TTL }); return { ok: true, result: { Id: g.id } }; }
+    } catch {}
+    const c = await arkCall(env, 'CreateAssetGroup', { Name: group.name, Description: `seedance ${group.key}`, GroupType: 'AIGC', ProjectName: project });
+    if (c.ok && c.result.Id) {
+      groupId = String(c.result.Id); groupFresh = true;
+      await put(gk, JSON.stringify({ id: groupId, at: now() }));
+      await put(glk, `done:${groupId}`, { expirationTtl: LOCK_TTL });
+      return c;
+    }
+    await unlock(glk);
+    if (!c.ok) return c;
+    return { ok: false, code: 'no_id', message: 'CreateAssetGroup 이 Id 를 돌려주지 않았습니다' };
+  };
+
+  const out = [];
+  let throttled = false;
+  let evictTried = false;          // 보관함 정리는 한 호출에 한 번만(잘못 짚었을 때 지우는 수를 묶어 둔다)
+  const evicted = [];
+  for (const it of items) {
+    const ak = `ast:a:${project}:${it.key}`;
+    const lk = `ast:lock:${project}:${it.key}`;
+    let stored = null;
+    try { stored = JSON.parse((await kv.get(ak)) || 'null'); } catch {}
+    let staleId = stored && stored.id && stored.status === 'Failed' ? String(stored.id) : '';
+    // ① KV 에 있는 것 — 상태를 다시 읽는다(Active 도). 등록 요청은 드물고 GetAsset 은 초당 100 이라 부담이 없다. Active 를 그대로 믿으면
+    //   BytePlus 에서 지워진 에셋(유료 권리 만료 15일 뒤 등)을 앱이 '다시 등록' 해도 옛 id 를 계속 돌려받는다(26.11.23 앱 시험 중 찾음).
+    //   Failed 로 적힌 것 · 다시 읽어 보니 Failed 인 것은 없는 것으로 보고 아래에서 다시 찾거나 만든다 — '등록 실패' 카드에서
+    //   한 번 누르면 바로 새로 만들어지게(예전엔 첫 번째 누름이 Failed 를 KV 에 적기만 했다).
+    if (stored && stored.id && stored.status !== 'Failed') {
+      const g = await arkCall(env, 'GetAsset', { Id: stored.id, ProjectName: project });
+      if (g.ok) {
+        const status = String(g.result.Status || stored.status);
+        if (status !== stored.status) await put(ak, JSON.stringify({ id: stored.id, status, at: now() }));
+        if (status !== 'Failed') { out.push({ key: it.key, id: stored.id, status }); continue; }
+        staleId = String(stored.id);
+      } else if (isNotFound(g)) {
+        staleId = String(stored.id);
+      } else {
+        // 만든 뒤 상태만 못 읽은 것 — 실패로 알리면 앱이 멀쩡한 어셋을 버린다. 다시 물어보라고만.
+        out.push({ key: it.key, id: stored.id, status: 'Retry', retryAfter: g.rate ? 2 : CREATE_RETRY_AFTER, ...(g.rate ? {} : { error: errOf(g) }) });
+        continue;
+      }
+      // BytePlus 쪽에서 사라졌거나 Failed — 아래에서 다시 찾는다.
+    }
+    // ② BytePlus 에 같은 이름이 이미 있나(다른 PC · 다른 인물이 올린 것 포함). 못 물어봤으면 만들지 않는다 — 겹칠 수 있어서.
+    const f = await findAsset(env, project, it.key);
+    if (!f.ok) { out.push({ key: it.key, status: 'Retry', retryAfter: f.rate ? 2 : CREATE_RETRY_AFTER, ...(f.rate ? {} : { error: errOf(f) }) }); continue; }
+    if (f.found) {
+      const id = String(f.found.Id), status = f.found.Status;
+      await put(ak, JSON.stringify({ id, status, at: now() }));
+      out.push({ key: it.key, id, status });
+      continue;
+    }
+    // ③ 새로 만들어야 하는데 주소가 없으면 — 앱이 올리고 다시 부르게.
+    if (!it.url) { out.push({ key: it.key, status: 'NeedUpload' }); continue; }
+    if (throttled) { out.push({ key: it.key, status: 'Retry', retryAfter: CREATE_RETRY_AFTER }); continue; }
+    if (groupFail) { out.push({ key: it.key, ...groupFail }); continue; }
+    const lr = await takeLock(env, kv, lk, staleId);
+    if (!lr.ok) {
+      if (lr.done) {   // 다른 PC 가 방금 만들었다 — 또 만들지 않고 그것을 쓴다
+        await put(ak, JSON.stringify({ id: lr.done, status: 'Processing', at: now() }));
+        out.push({ key: it.key, id: lr.done, status: 'Processing' });
+      } else out.push({ key: it.key, status: 'Busy', retryAfter: BUSY_RETRY_AFTER });
+      continue;
+    }
+    // 잠금을 잡는 사이 다른 PC 가 만들었을 수 있다 — BytePlus 에 한 번 더 묻는다(못 물으면 만들지 않는다).
+    const f2 = await findAsset(env, project, it.key);
+    if (!f2.ok || f2.found) {
+      await unlock(lk);
+      if (!f2.ok) { out.push({ key: it.key, status: 'Retry', retryAfter: f2.rate ? 2 : CREATE_RETRY_AFTER, ...(f2.rate ? {} : { error: errOf(f2) }) }); continue; }
+      const id = String(f2.found.Id), status = f2.found.Status;
+      await put(ak, JSON.stringify({ id, status, at: now() }));
+      out.push({ key: it.key, id, status });
+      continue;
+    }
+    await loadGroup();
+    if (!groupId) {
+      const c = await makeGroup();
+      if (!c.ok) {
+        await unlock(lk);
+        groupFail = c.busy ? { status: 'Busy', retryAfter: BUSY_RETRY_AFTER }
+          : c.rate ? { status: 'Retry', retryAfter: CREATE_RETRY_AFTER } : { status: 'Failed', error: errOf(c) };
+        if (c.rate) throttled = true;
+        out.push({ key: it.key, ...groupFail });
+        continue;
+      }
+    }
+    // ④ 만든다. Name 은 내용 key 그대로 — ②의 찾기가 이걸로 같은 내용을 알아본다.
+    const body = () => ({ GroupId: groupId, URL: it.url, AssetType: it.type, Name: it.key, ProjectName: project });
+    let c = await arkCall(env, 'CreateAsset', body());
+    // KV 의 그룹이 BytePlus 쪽에서 지워졌으면 한 번 다시 만들어 이어 간다.
+    if (isNotFound(c) && !groupFresh && /group/i.test(`${c.code} ${c.message}`)) {
+      const dead = groupId;
+      try { await kv.delete(gk); } catch {}
+      groupId = '';
+      const g2 = await makeGroup(dead);
+      c = g2.ok && groupId && groupId !== dead ? await arkCall(env, 'CreateAsset', body()) : g2.ok ? { ok: false, code: 'group_gone', message: '그룹이 BytePlus 에서 지워졌습니다' } : g2;
+    }
+    // 보관함이 찼다 — 오래 안 쓴 것부터 지우고 한 번 더(위 evictIdle). 지울 것이 없거나 지워도 모자라면 이유를 붙여 Failed.
+    if (looksFull(c) && !evictTried) {
+      evictTried = true;
+      // 이번 호출에 남은 줄 수만큼(EVICT_MAX 까지) — 한 장 등록에 여럿을 지우지 않게
+      const ev = await evictIdle(env, project, Math.min(EVICT_MAX, items.length - items.indexOf(it)));
+      evicted.push(...ev.gone);
+      if (ev.gone.length) c = await arkCall(env, 'CreateAsset', body());
+      if (looksFull(c) || (!ev.gone.length && !c.ok && !c.rate)) {
+        const was = `${c.code}: ${c.message}`.slice(0, 160);
+        c = { ok: false, code: 'asset_quota_full', message: ev.gone.length
+          ? `에셋 보관함이 가득 차 오래 안 쓴 ${ev.gone.length}개를 지웠는데도 자리가 없습니다 — ${was}`
+          : ev.error ? `에셋 보관함이 가득 찼고, 정리하려고 목록을 읽지 못했습니다(${ev.error.code}) — ${was}`
+            : `에셋 보관함이 가득 찼고, 지울 수 있는 것(이 앱이 만든 것 중 24시간 넘게 안 쓴 것)이 없습니다 — ${was}` };
+      }
+    } else if (looksFull(c)) {
+      c = { ok: false, code: 'asset_quota_full', message: `에셋 보관함이 가득 찼습니다(이번 요청에서 이미 정리함) — ${c.code}: ${c.message}`.slice(0, 300) };
+    }
+    if (c.ok && c.result && c.result.Id) {
+      const id = String(c.result.Id);
+      await put(ak, JSON.stringify({ id, status: 'Processing', at: now() }));
+      await put(lk, `done:${id}`, { expirationTtl: LOCK_TTL });   // 60초 — 위 설명
+      out.push({ key: it.key, id, status: 'Processing' });
+      continue;
+    }
+    await unlock(lk);
+    if (c.busy) {
+      out.push({ key: it.key, status: 'Busy', retryAfter: BUSY_RETRY_AFTER });
+    } else if (!c.ok && c.rate) {
+      // 분당 한도 — 이번 호출에선 더 만들지 않는다(만들어 둔 것 · 이미 있는 것은 그대로 답한다).
+      throttled = true;
+      out.push({ key: it.key, status: 'Retry', retryAfter: CREATE_RETRY_AFTER });
+    } else {
+      out.push({ key: it.key, status: 'Failed', error: c.ok ? { code: 'no_id', message: 'CreateAsset 이 Id 를 돌려주지 않았습니다' } : errOf(c) });
+    }
+  }
+  if (!groupLoaded) await loadGroup();
+  return json({ ok: true, project, groupId: groupId || null, items: out, ...(evicted.length ? { evicted } : {}) });
+}
+
+async function assetsStatus(request, env, ctx, a) {
+  if (!assetConfigured(env)) return notConfigured();
+  const r = await readJson(request, 8 * 1024);
+  if (r.error) return json({ ok: false, code: 'invalid', error: r.error }, 400);
+  const ids = r.body.ids;
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 20) return bad('ids 는 1~20개');
+  for (let i = 0; i < ids.length; i++) if (typeof ids[i] !== 'string' || !ASSET_ID_RE.test(ids[i])) return bad(`ids[${i}] 모양이 틀립니다`);
+  const pr = await assetProjectOf(env, a.rec.team, ctx);
+  if (!pr.project) return projectError(pr);
+  const project = pr.project;
+  const items = await pool(ids, 5, async (id) => {
+    const g = await arkCall(env, 'GetAsset', { Id: id, ProjectName: project });
+    if (g.ok) {
+      // 다른 프로젝트의 어셋은 이 팀에게 없는 것이다.
+      if (g.result.ProjectName && g.result.ProjectName !== project) return { id, status: 'NotFound' };
+      const status = String(g.result.Status || 'Processing');
+      const error = status === 'Failed' ? assetErr(g.result.Error) : undefined;
+      return { id, status, ...(error ? { error } : {}) };
+    }
+    if (isNotFound(g)) return { id, status: 'NotFound' };
+    return { id, status: 'Retry', retryAfter: g.rate ? 2 : CREATE_RETRY_AFTER, ...(g.rate ? {} : { error: errOf(g) }) };
+  });
+  return json({ ok: true, project, items });
+}
+
 // ────────────────────────────────────────────────────────────────── 관리
 // 값은 절대 내보내지 않는다 — 있나 없나, 키는 sha256 앞 8자(어느 키가 들어갔는지 맞춰 보는 용도)만.
 async function adminStatus(env) {
@@ -401,9 +946,22 @@ async function adminStatus(env) {
     for (const k of page.keys) tickets.add(k.name.slice(4));
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
+  // 어셋 — 팀마다 찾아 둔 프로젝트(KV 메타데이터, 목록 한 번). 키를 재발급해 지문이 안 맞으면 아직 모르는 것(null).
+  const projCache = {};
+  cursor = undefined;
+  do {
+    const page = await env.SD_TOKENS.list({ prefix: 'ast:proj:', cursor });
+    for (const k of page.keys) projCache[k.name.slice(9)] = k.metadata || {};
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  const projOver = parseJsonVar(env.TEAM_PROJECTS);
+  const projects = {};
   const teams = [];
   for (const { code, key } of teamKeys(env)) {
     const kh = await sha256Hex(key);
+    const c = projCache[code];
+    projects[code] = typeof projOver[code] === 'string' && projOver[code].trim() ? projOver[code].trim()
+      : (c && c.fp === kh.slice(0, 16) && c.p) || null;
     const th = await sha256Hex(await ticketOf(key));
     teams.push({
       code, label: labelFor(env, code, kh), key8: kh.slice(0, 8), known: KNOWN_LABELS[kh] || null,
@@ -424,6 +982,7 @@ async function adminStatus(env) {
     bpBase: env.BP_BASE || null,
     gatewayUrl: env.GATEWAY_URL || null,
     generic,
+    assets: { configured: assetConfigured(env), projects },
   };
 }
 
@@ -497,7 +1056,7 @@ async function load(){
   for(const t of s.teams)h+='<tr><td><code>BP_KEY_'+esc(t.code)+'</code></td><td>'+esc(t.label)+'</td><td>'+esc(t.key8)+'</td><td>'+(t.known?(t.known===t.label?'<span class="ok">'+esc(t.known)+' 맞음</span>':'<span class="bad">'+esc(t.known)+' 키인데 이름이 다름</span>'):'<span class="muted">새 키</span>')+'</td><td>'+(t.ticket?'<span class="ok">예</span>':'<span class="bad">아니오</span>')+'</td></tr>';
   const sig={secret:'<span class="ok">직접 넣은 값</span>',pinned:'<span class="ok">고정됨</span>','not yet':'<span class="muted">첫 묶음 때 고정</span>',none:'<span class="bad">없음</span>'}[s.tracker.secret]||esc(s.tracker.secret);
   const opt=(v,label)=>v?'<span class="ok">'+label+'</span>':'<span class="muted">앱 기본값</span>';
-  h+='</table><p>새 PC 등록 '+(s.enrollOpen?'<span class="ok">열림</span>':'<span class="bad">닫힘</span>')+' · v1 NCP 길 '+(s.legacyNcp?'열림':'닫힘')+' · R2 '+yes(s.r2.keys&&s.r2.endpoint&&s.r2.bucket)+' · NCP '+yes(s.ncp.keys)+' · 시트 서명 '+sig+' · 옴니 키 '+yes(s.gemini)+'</p>';
+  h+='</table><p>새 PC 등록 '+(s.enrollOpen?'<span class="ok">열림</span>':'<span class="bad">닫힘</span>')+' · v1 NCP 길 '+(s.legacyNcp?'열림':'닫힘')+' · R2 '+yes(s.r2.keys&&s.r2.endpoint&&s.r2.bucket)+' · NCP '+yes(s.ncp.keys)+' · 시트 서명 '+sig+' · 옴니 키 '+yes(s.gemini)+' · 어셋 키 '+yes(s.assets&&s.assets.configured)+'</p>';
   h+='<p class="muted">바뀔 때만 넣는 값 — 시트 주소 '+opt(s.tracker.url,'게이트웨이 값')+' · BytePlus 주소 '+opt(s.bpBase,esc(s.bpBase))+(s.gatewayUrl?' · 게이트웨이 새 주소 '+esc(s.gatewayUrl):'')+(s.generic.length?' · 그 밖에 '+s.generic.map(esc).join(', '):'')+'</p>';
   document.getElementById('status').innerHTML=h;
   const t=await api('/admin/tokens');
@@ -556,6 +1115,10 @@ export default {
       if (!a.ok) return json({ ok: false, code: a.code, error: a.error }, a.status);
       if (path === '/v1/config' && request.method === 'POST') return config(request, env, ctx, a);
       if (path === '/v1/leave' && request.method === 'POST') return leave(env, a);
+      if (path === '/v1/assets/project' && request.method === 'GET') return assetsProject(env, ctx, a);
+      if (path === '/v1/assets/register' && request.method === 'POST') return assetsRegister(request, env, ctx, a);
+      if (path === '/v1/assets/status' && request.method === 'POST') return assetsStatus(request, env, ctx, a);
+      if (path === '/v1/assets/evicted' && request.method === 'POST') return assetsEvicted(request, env, ctx, a);
       if (path === '/v1/whoami' && request.method === 'GET') {
         return json({ ok: true, team: a.rec.team, label: a.rec.label, pc: a.rec.pc });
       }

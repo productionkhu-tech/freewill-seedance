@@ -6,6 +6,7 @@
 import { useAppStore, MODELS, projectBilling, requestFindMessage } from '../store';
 import { agentMessageIds, agentInLine, onAgentInLine } from './agent-origin';
 import { PERSONAL } from './edition';
+import { translateError } from './translate-error';
 
 export type MiniTask = {
   id: string; projectId: string; project: string; prompt: string;
@@ -88,7 +89,8 @@ export function buildMiniSnap(now = Date.now()): MiniSnap {
         model: shortModel(us.model), res: us.draft ? 'Draft 480p' : String(us.resolution || ''), draft: !!us.draft,
         agent, status: m.status, group: groupOf(p.id, m, agent, cancelled),
         start: m.startTime || m.timestamp, end: m.endTime, taskId: m.taskId,
-        error: m.status === 'failed' ? String(m.error || '').split('\n')[0].slice(0, 80) : undefined,
+        // 카드와 같은 사람 말로(26.11.2301~ — 예전엔 BytePlus 영어 원문 첫 줄이 그대로 떴다). 첫 줄만.
+        error: m.status === 'failed' ? translateError(String(m.error || '')).split('\n')[0].slice(0, 80) : undefined,
         ...(cancelled ? { cancelled: true } : {}),
       });
     }

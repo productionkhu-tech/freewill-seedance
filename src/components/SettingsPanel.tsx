@@ -1,8 +1,13 @@
-import { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect, useMemo, useRef, useLayoutEffect, useSyncExternalStore } from 'react';
 import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, modeRefCaps, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
+import { fileBaseName } from '../store';
 import { PICKABLE_MODELS, modelExtendAddRange, modelFirstLastMaxSec, omniRefVideoMax, modelEditMaxSrcSec, modelHasFirstLastFrame } from '../store';
-import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight } from 'lucide-react';
+import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight, ShieldCheck, ShieldAlert, ShieldOff } from 'lucide-react';
 import { PERSONAL } from '../lib/edition';
+import { certifiedAssetUrl, checkSamePhoto, knownBpScope, panelBpState, registeredPhotos } from '../lib/bp-assets';
+import { certifyPhoto, certifyVideo, subscribeVideoBp, videoBpState } from '../lib/bp-certify';
+import { sameVersion, subscribeSame } from '../lib/same-pixels';
+import { normalizeAssetRef } from '../lib/byteplus-asset';
 import { PersonalKeysCard } from './PersonalKeys';
 import { MiniToggle } from './MiniToggle';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
@@ -12,7 +17,7 @@ import { RevealSourceButton } from './RevealSource';
 import { sourcePathOf } from '../lib/source-path';
 import { ElementLibrary } from './ElementLibrary';
 import { sideOf } from '../lib/split';
-import { getAssetNames } from '../lib/send-request';
+import { getAssetNames, attachAssetRefTo, projectAssetSink } from '../lib/send-request';
 
 const RESOLUTIONS: { id: string; name: string }[] = [
   // Gemini Omni 1.1 · 1.2 only — no Seedance model lists it, so allowedResolutions() filters it
@@ -63,8 +68,17 @@ function FileName({ name }: { name: string }) {
   );
 }
 
-function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, setDragOverId }: {
+// 레퍼런스 칸의 방패(26.11.24~) — 칸 사진으로 라이브러리 인물 카드를 찾거나(같은 바이트) 만들어 등록한다. 길은 lib/bp-certify(자동 인증과 같은 함수).
+const certifyPanelPhoto = (asset: Asset) => certifyPhoto(asset);
+const PANEL_SHIELD_TITLE = '이 사진을 BytePlus 에셋으로 인증 — AI 로 만든 가상 인물이 실사처럼 보여 막힐 때 써요(막히면 보낼 때 저절로도 해요). 실존 인물은 안 돼요(BytePlus 본인 인증 에셋으로). '
+  + '어셋 라이브러리에 인물 카드가 하나 생기고, 한 번 해 두면 이 사진은 어느 칸에 넣어도 계속 통과해요.';
+const PANEL_SHIELD_TITLE_VIDEO = '이 영상을 BytePlus 에셋으로 인증 — AI 로 만든 가상 인물이 나오는 영상이 실사처럼 보여 막힐 때 써요(막히면 보낼 때 저절로도 해요). '
+  + '이 앱(Seedance)에서 만든 영상은 원래 통과해서 필요 없어요 — 누르면 에셋 보관함 칸만 써요. 실존 배우가 나오는 실사 영상은 안 돼요(BytePlus 본인 인증 에셋으로). '
+  + '인증은 이 PC 가 켜져 있는 동안 기억하고, 다시 켠 뒤 누르면 이미 있는 에셋을 바로 돌려받아요.';
+
+function AssetRow({ asset, name, locked, bpOk, onReplaceFile, onRemove, dragOverId, setDragOverId }: {
   asset: Asset; name: string; locked?: boolean;
+  bpOk?: boolean;   // 이 모델이 BytePlus 에셋을 받나(옴니 ✗)
   onReplaceFile: (a: Asset, f: File) => void;
   onRemove: (id: string) => void;
   dragOverId: string | null;
@@ -72,6 +86,80 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
 }) {
   const controls = useDragControls();
   const thumb = (asset as any).thumbnailUrl as string | undefined;
+  // 라이브러리의 '인증 완료' 사진과 같은 바이트면 보낼 때 에셋으로 나간다(lib/bp-assets certifiedAssetUrl, 26.11.24~) — 칸에서 미리 보여 준다.
+  // 프로젝트 이름은 아는 것만(묻지 않는다 — 켤 때 App 이 물어 둔다). 보낼 때 다시 정확히 고르므로 여기는 안내일 뿐이다.
+  const isImg = asset.type === 'image_url', isVid = asset.type === 'video_url';
+  const bpAsset = useAppStore(s => (bpOk && isImg ? certifiedAssetUrl(asset.cacheId, knownBpScope(), s.elementAssets) : null));
+  // 칸의 방패(26.11.24~) — 등록 중 · 실패는 같은 바이트의 라이브러리 사진 상태를 그대로 보여 준다. 누른 직후(카드를 만드는 동안)는 bpBusy.
+  const bpPanel = useAppStore(s => (bpOk && isImg && asset.cacheId ? panelBpState(asset.cacheId, knownBpScope(), s.elementAssets) : 'off'));
+  // 다시 저장 · 복사로 바이트만 달라진 같은 사진인지(화소 비교, lib/same-pixels 26.11.25~) — 새로 알게 되면(sameV) 위 둘을 다시 읽는다.
+  const sameV = useSyncExternalStore(subscribeSame, sameVersion);
+  const regCount = useAppStore(s => (bpOk && isImg ? registeredPhotos(s.elementAssets).length : 0));
+  useEffect(() => { if (bpOk && isImg && asset.cacheId && !bpAsset && regCount) void checkSamePhoto(asset.cacheId); }, [bpOk, isImg, asset.cacheId, bpAsset, sameV, regCount]);
+  // 영상 칸(v2v)도 같은 배지(26.11.24~, 사용자 "이런 경우엔 어떻게 들어가는 거임 인증 버튼이") — 영상은 라이브러리에 두지 않으니 lib/bp-certify 의 메모리 기억을 본다.
+  const vidBp = useSyncExternalStore(subscribeVideoBp, () => (bpOk && isVid && asset.cacheId ? videoBpState(asset.cacheId, knownBpScope()) : 'off'));
+  // 누른 그 사진(내용)에만 '등록 중' — 누른 뒤 칸을 다른 사진으로 바꾸면(↻) 새 사진에 옛 표시가 붙지 않게(id 는 그대로라 칸은 같은 컴포넌트).
+  const [bpBusyFor, setBpBusyFor] = useState<string | null>(null);
+  const bpBusy = !!bpBusyFor && bpBusyFor === asset.cacheId;
+  type Shield = 'off' | 'idle' | 'busy' | 'done' | 'gone' | 'failed';
+  const { shield, doneId, bpFailed } = ((): { shield: Shield; doneId: string; bpFailed: string } => {
+    if (isVid) {
+      if (vidBp === 'off') return { shield: 'off', doneId: '', bpFailed: '' };
+      if (vidBp.startsWith('done|')) return { shield: 'done', doneId: vidBp.slice(5), bpFailed: '' };
+      if (bpBusy || vidBp === 'busy') return { shield: 'busy', doneId: '', bpFailed: '' };
+      if (vidBp.startsWith('failed|')) return { shield: 'failed', doneId: '', bpFailed: vidBp.slice(7) || '등록 실패' };
+      return { shield: 'idle', doneId: '', bpFailed: '' };
+    }
+    if (bpAsset) return { shield: 'done', doneId: bpAsset.replace('asset://', ''), bpFailed: '' };
+    if (bpPanel === 'off') return { shield: 'off', doneId: '', bpFailed: '' };
+    if (bpBusy || bpPanel === 'processing') return { shield: 'busy', doneId: '', bpFailed: '' };
+    if (bpPanel.startsWith('failed|')) return { shield: 'failed', doneId: '', bpFailed: bpPanel.slice(7) || '등록 실패' };
+    if (bpPanel === 'gone') return { shield: 'gone', doneId: '', bpFailed: '' };   // 보관함 정리로 지워짐 — 쓸 때 다시 등록
+    return { shield: 'idle', doneId: '', bpFailed: '' };
+  })();
+  // 상태가 바뀔 때만 살짝 튀어나오게 — 프로젝트를 열 때마다 칸 배지가 다 같이 튀지 않도록 처음 그린 상태는 그냥 둔다.
+  const shieldFirst = useRef(shield);
+  const shieldPop = shield !== shieldFirst.current && shield !== 'idle' ? 'bp-pop' : '';
+  const onCertify = async () => {
+    setBpBusyFor(asset.cacheId || null);
+    try {
+      if (isVid) {
+        const r = await certifyVideo(asset);
+        const who = fileBaseName(asset.file_name || '영상') || '영상';
+        window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { msg: `[${who}] ${r.ok ? 'BytePlus 에셋 인증 완료 — 이 영상은 이제 에셋으로 나가요' : r.message}`, ok: r.ok } }));
+      } else {
+        const r = await certifyPanelPhoto(asset);
+        window.dispatchEvent(new CustomEvent('seedance:toast', { detail: { msg: r.message, ok: r.ok } }));
+      }
+    } finally { setBpBusyFor(null); }
+  };
+  // 인증 배지 — 썸네일 오른쪽 아래 모서리(26.11.24~, 사용자 "저 폴더로 열기랑 인증이랑 겹치자너"). 오른쪽 줄은 파일 동작(폴더 · 바꾸기 · 지우기)만.
+  // 등록 전은 그 칸에 손을 올렸을 때만(막히면 자동 인증이 알아서 한다 — 미리 하고 싶을 때만 누름), 나머지 상태는 늘 보인다. key 가 바뀌면 새로 그려져 bp-pop 이 한 번.
+  const badgeBase = `absolute -right-1 -bottom-1 z-[1] w-4 h-4 rounded-full flex items-center justify-center ring-2 ring-[#fafafc] dark:ring-[#242426] ${shieldPop}`;
+  const what = isVid ? '영상' : '사진';
+  const bpBadge = shield === 'off' ? null
+    : shield === 'done'
+      ? <span key="done" data-bp-ref-state="done" className={`${badgeBase} bg-emerald-600 text-white`}
+          title={isVid ? `BytePlus 인증을 마친 영상이에요 — 영상 대신 에셋(${doneId})으로 보내 실사 인물 차단을 받지 않아요(이 PC 가 켜져 있는 동안 기억)`
+            : `라이브러리에서 BytePlus 인증을 마친 사진이에요 — 사진 대신 에셋(${doneId})으로 보내 실사 얼굴 차단을 받지 않아요`}>
+          <ShieldCheck size={10} strokeWidth={2.5} />
+        </span>
+      : shield === 'busy'
+        ? <span key="busy" data-bp-ref-state="processing" className={`${badgeBase} bg-[#fafafc] dark:bg-[#242426]`}
+            title={`BytePlus 에셋으로 등록하는 중이에요 — ${isVid ? '영상은 조금 더 걸려요' : '보통 몇 초'}. 끝나면 초록 방패로 바뀌어요`}>
+            <span className="w-3 h-3 rounded-full border-[1.5px] border-emerald-500/25 border-t-emerald-500 animate-spin" />
+          </span>
+        : <button key={shield} type="button" data-bp-register-ref data-bp-ref-state={shield === 'idle' ? undefined : shield}
+            onClick={(e) => { e.stopPropagation(); void onCertify(); }}
+            title={shield === 'failed' ? `등록 실패 — ${bpFailed}\n배지를 다시 누르면 다시 등록해요`
+              : shield === 'gone' ? `보관함 정리로 BytePlus 에서 지워졌어요 — 쓸 때 자동으로 다시 등록돼요(지금 누르면 바로 다시 등록)`
+              : isVid ? PANEL_SHIELD_TITLE_VIDEO : PANEL_SHIELD_TITLE}
+            aria-label={`이 ${what}을 BytePlus 에셋으로 인증`}
+            className={`${badgeBase} ${shield === 'failed' ? 'bg-red-500 text-white hover:bg-red-600'
+              : shield === 'gone' ? 'bg-gray-400 text-white hover:bg-emerald-600'
+              : 'bg-[#fafafc] dark:bg-[#242426] text-gray-400 border border-gray-300 hover:text-emerald-600 hover:border-emerald-500 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity duration-150'}`}>
+            {shield === 'failed' ? <ShieldAlert size={10} strokeWidth={2.5} /> : shield === 'gone' ? <ShieldOff size={10} strokeWidth={2.5} /> : <ShieldCheck size={10} strokeWidth={2.25} />}
+          </button>;
   return (
     <Reorder.Item
       value={asset}
@@ -84,7 +172,7 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
         e.preventDefault(); e.stopPropagation(); setDragOverId(null);
         const f = e.dataTransfer.files?.[0]; if (f) onReplaceFile(asset, f);
       }}
-      className={`flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] dark:bg-[#242426] border-black/5 dark:border-white/10'}`}
+      className={`group flex items-start justify-between p-2 rounded-[11px] border-[3px] transition-colors ${dragOverId === asset.id ? 'bg-indigo-50 border-indigo-300' : 'bg-[#fafafc] dark:bg-[#242426] border-black/5 dark:border-white/10'}`}
     >
       <div className="flex items-center gap-2 overflow-hidden min-w-0 flex-1">
         {locked
@@ -96,6 +184,7 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
             >
               <GripVertical size={15} />
             </span>}
+        <span className="relative shrink-0 inline-flex">
         {asset.type === 'image_url' && (
           thumb || asset.url.startsWith('data:image') || asset.url.startsWith('http')
             ? <HoverZoom className="shrink-0 inline-flex" src={thumb || asset.url} fullSrc={asset.cacheId ? `/api/cache/${asset.cacheId}` : undefined}>
@@ -131,9 +220,13 @@ function AssetRow({ asset, name, locked, onReplaceFile, onRemove, dragOverId, se
               : <Video size={14} className="text-purple-500 shrink-0" />
         )}
         {asset.type === 'audio_url' && <Music size={14} className="text-green-500 shrink-0" />}
+        {bpBadge}
+        </span>
         <div className="flex flex-col overflow-hidden min-w-0">
           <span className="flex flex-wrap items-baseline gap-x-1.5 min-w-0 text-xs font-medium text-gray-800"><span className="shrink-0">[{name}]</span>{asset.file_name && <FileName name={asset.file_name} />}</span>
-          <span className="text-[10px] font-medium text-gray-500 truncate">{asset.role}</span>
+          <span className="flex items-center gap-1 min-w-0 text-[10px] font-medium text-gray-500">
+            <span className="truncate">{asset.role}</span>
+          </span>
         </div>
       </div>
       <div className="flex items-center gap-0.5 shrink-0">
@@ -476,17 +569,31 @@ export function SettingsPanel() {
     if (assetIdType === 'video_url') role = 'reference_video';
     if (assetIdType === 'audio_url') role = 'reference_audio';
 
+    // 받는 꼴(26.11.2301~): http(s) 주소는 그대로, 그 밖은 BytePlus 에셋 ID 로 다듬는다(asset-… → asset://asset-…). 모양이 아니면 거절 + 이유.
+    // 예전에는 아무 글에나 asset:// 를 붙여 넣어(빈칸 든 글 · Asset://Asset://…) 보낼 때 BytePlus 오류로만 알았다.
+    const raw = assetIdInput.trim();
+    const finalUrl = /^https?:\/\//i.test(raw) ? raw : normalizeAssetRef(raw);
+    if (!finalUrl) { alert('BytePlus 에셋 ID 모양이 아니에요 — asset- 로 시작하는 ID(예: asset-20260410114236-8cdfz)나 asset://… 주소를 넣어 주세요. http(s) 주소도 돼요.'); return; }
+    // 에셋은 에이전트와 같은 함수로 붙인다(칸 수 · 역할 · 중복 — send-request attachAssetRefTo 한 곳). 아래는 http(s) 주소만.
+    if (finalUrl.startsWith('asset://')) {
+      const why = attachAssetRefTo(projectAssetSink(project.id), finalUrl, assetIdType);
+      if (why) { alert(why); return; }
+      setAssetIdInput('');
+      return;
+    }
+
     if (settings.mode === 'image_to_video_first' && assetIdType === 'image_url') {
       role = 'first_frame';
-      if (assets.some(a => a.role === 'first_frame')) return;
+      if (assets.some(a => a.role === 'first_frame')) { alert('시작 프레임이 이미 있어요 — 지우고 넣어 주세요.'); return; }
     }
 
     if (settings.mode === 'image_to_video_first_last' && assetIdType === 'image_url') {
       const hasFirst = assets.some(a => a.role === 'first_frame');
       const hasLast = assets.some(a => a.role === 'last_frame');
-      if (hasFirst && hasLast) return;
+      if (hasFirst && hasLast) { alert('시작 · 끝 프레임이 다 있어요 — 하나를 지우고 넣어 주세요.'); return; }
       role = hasFirst ? 'last_frame' : 'first_frame';
     }
+    if (assets.some(a => a.url === finalUrl && a.type === assetIdType)) { alert('이미 넣은 레퍼런스예요.'); return; }
 
     let currentCount = assets.filter(a => a.type === assetIdType).length;
     let maxAllowed = Infinity;
@@ -504,11 +611,9 @@ export function SettingsPanel() {
       if (assetIdType === 'audio_url') maxAllowed = extendCaps.audio;
     }
 
-    if (currentCount >= maxAllowed) return;
-
-    let finalUrl = assetIdInput.trim();
-    if (!finalUrl.startsWith('asset://') && !finalUrl.startsWith('http://') && !finalUrl.startsWith('https://')) {
-      finalUrl = `asset://${finalUrl}`;
+    if (currentCount >= maxAllowed) {
+      alert(`이 모드에서는 ${assetIdType === 'image_url' ? '이미지' : assetIdType === 'video_url' ? '영상' : '오디오'}를 ${maxAllowed}개까지 넣을 수 있어요.`);
+      return;
     }
 
     addAsset(project.id, { type: assetIdType, url: finalUrl, role, file_name: finalUrl });
@@ -1102,6 +1207,7 @@ export function SettingsPanel() {
                   asset={asset}
                   name={namedAssets[i]?.name ?? ''}
                   locked={framesFixed}
+                  bpOk={!isOmni && !PERSONAL}
                   onReplaceFile={handleReplaceFile}
                   onRemove={(id) => removeAsset(project.id, id)}
                   dragOverId={dragOverAssetId}
@@ -1336,6 +1442,7 @@ export function SettingsPanel() {
                   {assetIdType === 'audio_url' && (
                     <p className="text-[10px] text-amber-600 bg-amber-50 px-2 py-1 rounded">{`오디오: WAV/MP3, 2~${Math.floor(refAudSec)}초, 15MB 이하`}</p>
                   )}
+                  <p className="text-[10px] text-gray-500 leading-snug">BytePlus 에셋(디지털 캐릭터 · 가상 인물 · 인증한 실존 인물)은 <b>지금 프로젝트 코드의 BytePlus 프로젝트</b>에 등록된 것만 써요. 프롬프트에서는 [Image N] 으로 부르고 에셋 ID 는 쓰지 마세요.</p>
                   <button onClick={handleAddAssetId} disabled={!assetIdInput.trim()} className="w-full py-1.5 bg-[#0071e3] text-white text-[12px] font-medium rounded-[8px] disabled:opacity-50 transition-colors hover:bg-[#0077ed] active:scale-95">
                     추가
                   </button>

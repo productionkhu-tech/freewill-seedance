@@ -9,6 +9,7 @@ import { GlobalGallery } from './GlobalGallery';
 import { sideOf, visibleProjectIds, type PaneSide } from '../lib/split';
 import { paneDragMove, paneDragEnd, paneDrop, paneSideAt } from '../lib/pane-drag';
 import { PERSONAL } from '../lib/edition';
+import { forgetAllVideos } from '../lib/bp-certify';
 
 // ─── Project icon ────────────────────────────────────────────────────────────
 // Emoji are just characters — the OS font draws them (Apple emoji on macOS, Segoe UI
@@ -879,6 +880,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
     try { const r = await fetch('/api/cache/clear', { method: 'POST' }); mediaOk = r.ok && (await r.json()).ok; } catch { mediaOk = false; }
     const result = await api.clearCache();
     if (result?.ok) setDiskCacheSize(0);
+    if (mediaOk) forgetAllVideos();   // 인증한 영상의 기억도 캐시와 같이(26.11.25~)
     if (mediaOk) setSrvCache({ count: 0, bytes: 0, posters: 0, posterBytes: 0 });
     setCacheBusy(false);
     setCacheAsk(false);

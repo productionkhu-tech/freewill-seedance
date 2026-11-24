@@ -255,7 +255,24 @@ function createGateway({ vault, env = process.env, app = '', pc = '', fetchImpl 
     return inFlight;
   }
 
-  return { boot, refreshNow, fetchBundle };
+  // 게이트웨이의 에셋 길(/v1/assets/*, 26.11.2301~ — BytePlus 에셋 등록)을 이 PC 의 출입증으로 부른다. 서버(server.ts)가
+  // globalThis.__seedanceGateway.call 로 쓴다. 출입증 · 주소는 여기 안에서만 쓰고 메모리(process.env) · 화면에 올리지 않는다.
+  // 에셋 길만 — 다른 길(묶음 · 등록 · 떠나기)은 이 함수로 못 부른다. 401(끊김 · 모름)은 그대로 돌려준다 — 다시 등록은 켤 때 하던 대로.
+  // 첫 호출은 게이트웨이가 팀의 BytePlus 프로젝트를 찾느라(프로젝트마다 키 목록) 몇 초 걸릴 수 있어 넉넉히 기다린다.
+  async function call(method, path, body) {
+    if (!vault) return { status: 0, j: { ok: false, code: 'gateway_off' } };
+    if (typeof path !== 'string' || !/^\/v1\/assets\/[a-z]+$/.test(path)) return { status: 0, j: { ok: false, code: 'not_allowed' } };
+    const gw = gwOf(read());
+    if (gw.cut) return { status: 0, j: { ok: false, code: 'revoked' } };
+    if (!gw.token) return { status: 0, j: { ok: false, code: 'not_enrolled' } };
+    try {
+      return await post(fetchImpl, pickUrl(env, gw), path, body, gw.token, Math.max(timeoutMs, 30000), method === 'GET' ? 'GET' : 'POST');
+    } catch (e) {
+      return { status: 0, j: { ok: false, code: 'offline', error: String((e && e.message) || e).slice(0, 200) } };
+    }
+  }
+
+  return { boot, refreshNow, fetchBundle, call };
 }
 
 module.exports = { createGateway, cleanBundle, ticketOf, pickUrl, DEFAULT_URL, TICKET_MSG };

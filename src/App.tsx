@@ -8,6 +8,8 @@ import { PERSONAL } from './lib/edition';
 import { PersonalKeysDialog, PersonalKeyBanner } from './components/PersonalKeys';
 import { TaskFinder } from './components/TaskFinder';
 import { startMiniFeed } from './lib/mini-feed';
+import { kickBpPoll, bpScope } from './lib/bp-assets';
+import { primeVideos, startEvictWatch } from './lib/bp-certify';
 
 export default function App() {
   const { projects, createProject, currentProjectId, _hasHydrated } = useAppStore();
@@ -27,6 +29,20 @@ export default function App() {
   }, [_hasHydrated, projects.length, createProject]);
   // 미니 창에 지금 상태를 보낸다(electron/mini.cjs) — 불러오기가 끝난 뒤부터.
   useEffect(() => (_hasHydrated ? startMiniFeed() : undefined), [_hasHydrated]);
+  // BytePlus 에셋 등록이 끝나지 않은 채 앱을 껐으면(처리 중 · 한도로 대기) 켠 뒤 이어서 상태를 본다(26.11.2301~, lib/bp-assets.ts).
+  // 등록한 적 없는 PC 는 게이트웨이를 부르지 않는다.
+  const elementsHydrated = useAppStore(s => s._elementsHydrated);
+  // '인증 완료' 사진이 있는 PC 는 프로젝트 이름을 켤 때 한 번 미리 물어 둔다 — 켜고 첫 보내기가 3초 안에 답을 못 받아 사진(얼굴 차단)으로
+  // 나가지 않게. 등록한 적 없는 PC 는 아무것도 안 부른다.
+  useEffect(() => {
+    if (!elementsHydrated || PERSONAL) return;
+    const all = useAppStore.getState().elementAssets.flatMap(a => a.images.flatMap(im => Object.values(im.bpAssets || {})));
+    if (all.some(e => e.status === 'processing' || e.status === 'retry')) kickBpPoll(5000);
+    else if (all.some(e => e.status === 'active')) void bpScope();
+    void primeVideos();   // 인증한 영상의 기억이 있는 PC 만(26.11.25~) — 위와 같은 호출을 함께 쓴다
+  }, [elementsHydrated]);
+  // 보관함 정리로 지워진 에셋 알아차리기(26.11.24~, lib/bp-certify checkEvicted) — 켤 때 한 번 · 1시간마다(26.11.25~). 등록한 적 없는 PC 는 묻지 않는다.
+  useEffect(() => (elementsHydrated ? startEvictWatch() : undefined), [elementsHydrated]);
   // 켤 때 한 번 알릴 말(공동 코드로 옮기며 코드를 비웠을 때, 26.10.2004) — 종료 안내와 같은 띠로.
   useEffect(() => {
     if (!_hasHydrated) return;

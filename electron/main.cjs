@@ -74,7 +74,7 @@ const COMPANY_ENV = [
 function preparePersonal() {
   for (const k of COMPANY_ENV) delete process.env[k];
   // 주소를 바꾸는 시험용 스위치도 설치본에서는 받지 않는다(진짜 BytePlus · 진짜 게이트웨이 키 확인으로만).
-  if (app.isPackaged) for (const k of ['SEEDANCE_BP_BASE', 'SEEDANCE_GATEWAY_URL', 'SEEDANCE_GATEWAY', 'SEEDANCE_GEMINI_BASE']) delete process.env[k];
+  if (app.isPackaged) for (const k of ['SEEDANCE_BP_BASE', 'SEEDANCE_GATEWAY_URL', 'SEEDANCE_GATEWAY', 'SEEDANCE_GEMINI_BASE', 'SEEDANCE_ASSETS_TEST_GATEWAY', 'SEEDANCE_ASSETS_TEST_TOKEN']) delete process.env[k];
   if (!process.env.SEEDANCE_PERSONAL_KEYS_FILE || app.isPackaged) {
     process.env.SEEDANCE_PERSONAL_KEYS_FILE = path.join(app.getPath('userData'), 'personal-keys.bin');
   }
@@ -85,6 +85,8 @@ function preparePersonal() {
 
 async function prepareKeys() {
   if (PERSONAL) return preparePersonal();
+  // 에셋 등록을 가짜 게이트웨이로 돌리는 격리 시험 스위치 — 설치본에서는 받지 않는다(server.ts ASSET_TEST_GW, 26.11.2301~).
+  if (app.isPackaged) for (const k of ['SEEDANCE_ASSETS_TEST_GATEWAY', 'SEEDANCE_ASSETS_TEST_TOKEN']) delete process.env[k];
   const { safeStorage } = require('electron');
   const secrets = require('./secrets.cjs');
   try {
@@ -115,7 +117,11 @@ async function prepareKeys() {
     console.log(`[Gateway] ${r.mode}${r.label ? ' · ' + r.label : ''}${r.rev ? ' · ' + r.rev : ''}${r.why ? ' · ' + r.why : ''}${r.switched ? ' · 팀 bat 바뀜' : ''}`);
     writeKeyStatus(r);
     // 서버가 BytePlus · R2 에서 '키가 틀렸다' 를 받으면 부른다(server.ts refreshKeys) — 설치본은 서버가 이 프로세스 안에서 돈다.
-    globalThis.__seedanceGateway = { refresh: (reason) => gateway.refreshNow(reason).then((x) => { if (x && x.mode === 'gateway') writeKeyStatus(x); return x; }) };
+    globalThis.__seedanceGateway = {
+      refresh: (reason) => gateway.refreshNow(reason).then((x) => { if (x && x.mode === 'gateway') writeKeyStatus(x); return x; }),
+      // BytePlus 에셋 등록(26.11.2301~, server.ts /api/bp-assets/*) — 출입증으로 게이트웨이 /v1/assets/* 만.
+      call: (method, path, body) => gateway.call(method, path, body),
+    };
     // 보관본으로 켠 뒤 뒤에서 받아 보니 끊겨 있었다 — 키는 이미 메모리에서 거뒀다(gateway.cjs). 알려만 준다.
     if (r.pending) r.pending.then((p) => { if (p && p.mode !== 'offline') writeKeyStatus(p); if (p && p.mode === 'revoked') notifyCut(); }).catch(() => {});
     return r;

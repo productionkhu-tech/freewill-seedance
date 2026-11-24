@@ -18,6 +18,9 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { MODEL_GRANTS, FOUR_K_GRANTS, brandOf } from './src/lib/model-access';
 import { AgentInputError, agentText, findPowerShellObject, kindOf, AGENT_LIMITS, POWERSHELL_HINT } from './src/lib/agent-input';
 import { PERSONAL_BILLING } from './src/lib/edition';
+import { stripSettingsBoxes } from './src/lib/settings-box-strip';
+import { assetImageProblem, ASSET_SPEC_HEAD_BYTES } from './src/lib/asset-image-spec';
+import { normalizeAssetRef } from './src/lib/byteplus-asset';
 // 생성 결과물의 장기 보관소. R2(입력 임시 저장)와 역할이 겹치지 않는다 — ncp.ts 참고.
 import {
   ensureNcp, initNcpIndex, initNcpQueue, enqueueArchive, drain as drainArchive,
@@ -561,6 +564,14 @@ async function startServer() {
   // 에이전트 입구(/api/agent/*)는 몸통 1MB 까지(26.11.1802~) — 프롬프트 5만 자(한글이면 약 150KB)를 넉넉히 넘는다. 200MB 를 그대로 받던 때는
   // PowerShell 객체 프롬프트(-Depth 6, 4,700만 자)도 다 읽은 뒤에야 거절했다(나노바나나 11/18 사고, 격리 시험 minitestps-probe.ps1).
   // 여기서 먼저 읽으면 아래 전역 express.json 은 이미 읽은 몸통을 건너뛴다(req._body).
+  // ★ 개인판은 에이전트(MCP) 연결을 받지 않는다(26.11.2301~, 사용자 결정 2026-11-23 "개인판엔 MCP 못붙게"). status · manual · jobs ·
+  //   commands · sent 전부 — 설명서가 사용법을 스스로 알려 주므로 열어 두면 MCP 가 아니어도 아무 에이전트나 붙는다. 화면도 개인판에선
+  //   작업함을 들르지 않는다(ChatArea). MCP 스크립트는 /api/team('개인') · /api/personal/status 로 판을 먼저 가려 멈춘다 — 그 둘의 모양은 바꾸지 말 것.
+  if (PERSONAL) {
+    app.use('/api/agent', (_req, res) => {
+      res.status(403).json({ error: '개인판은 에이전트(MCP) 연결을 받지 않습니다 — 회사판에서 쓰세요.', code: 'personal_edition' });
+    });
+  }
   app.use('/api/agent', express.json({ limit: '1mb' }));
   app.use('/api/agent', (err: any, _req: any, res: any, next: any) => {
     if (err?.type === 'entity.too.large') return res.status(413).json({ error: `요청이 너무 큽니다(1MB 까지) — 프롬프트는 ${AGENT_LIMITS.prompt.toLocaleString()}자까지입니다. ${POWERSHELL_HINT}`, code: 'body_too_large' });
@@ -769,6 +780,13 @@ async function startServer() {
   // Upload to R2 → returns a presigned GET URL (12h) BytePlus can fetch directly.
   // Key is unique-per-upload: same source video reused across tasks gets fresh keys,
   // so deleting task A's object never breaks task B that hasn't fetched yet.
+  // 레퍼런스로 BytePlus 에 보낼 바이트 — 앱이 받은 영상 끝의 생성 설정 상자(FWSD)를 뗀 원본(26.11.2301~, src/lib/settings-box-strip.ts).
+  // 실존 인물 얼굴이 든 영상은 '같은 계정의 원본 결과물' 일 때만 받아 준다(신뢰 결과물). 캐시 파일 · cacheId 는 그대로 — 올리는 바이트만.
+  function originalBytesForByteplus(buf: Buffer, label: string): Buffer {
+    const { bytes, stripped } = stripSettingsBoxes(buf);
+    if (stripped) console.log(`[Re-upload] 생성 설정 상자 ${stripped}B 떼고 올림(원본 그대로) — ${label}`);
+    return bytes;
+  }
   async function uploadToR2(fileBuffer: Buffer, filename: string, opts?: { expiresIn?: number; contentType?: string; contentDisposition?: string }): Promise<string> {
     if (!r2Ready()) throw new Error(PERSONAL ? 'R2 가 없어요 — 설정 패널 › 내 키 › R2 를 넣어 주세요.' : 'R2 설정이 없습니다.');
     const ext = path.extname(filename) || '.mp4';
@@ -1716,10 +1734,12 @@ async function startServer() {
   //   프로젝트가 바뀌지 않는다. 과금은 그 프로젝트로 보낼 때의 코드(26.10.2004~ 앱 전체에 하나 — 공동 코드)다. 코드가 없으면
   //   작업을 내주지 않고 기다린다(needsBilling, 사람이 고를 때까지 · 10분). 화면이 claim 마다 프로젝트별 코드(projects)를 알려 준다
   //   — 지금은 모두 같은 값이지만 판단 모양은 프로젝트마다로 둔다(정책은 화면의 projectBilling 한 곳).
+  // 레퍼런스 하나 — 파일 경로, 또는 BytePlus 에셋(asset://… + 종류, 26.11.2301~ — 화면이 주소 그대로 보낸다).
+  type AgentRef = { path: string; role?: string } | { asset: string; type: 'image_url' | 'video_url' | 'audio_url'; role?: string };
   type AgentJob = {
     id: string; createdAt: number; updatedAt: number;
     status: 'pending' | 'taken' | 'sent' | 'done' | 'failed';
-    spec: { prompt: string; project?: string; projectId?: string; billing?: string; name?: string; settings: Record<string, unknown>; refs: { path: string; role?: string }[] };
+    spec: { prompt: string; project?: string; projectId?: string; billing?: string; name?: string; settings: Record<string, unknown>; refs: AgentRef[] };
     takenBy?: string; error?: string; projectName?: string; projectId?: string; messages?: unknown[]; warnings?: string[];
     needsBilling?: boolean; waitingFor?: { project: string; projectId: string };   // 프로젝트 코드를 기다리는 중(대상 프로젝트)
   };
@@ -1834,7 +1854,7 @@ async function startServer() {
     const ps = findPowerShellObject(b);
     if (ps) return res.status(400).json({ error: `${ps} 칸이 PowerShell 객체입니다 — 글자로 보내 주세요. ${POWERSHELL_HINT}`, code: 'powershell_object' });
     let prompt = '';
-    let refs: { path: string; role?: string }[] = [];
+    let refs: AgentRef[] = [];
     try {
       prompt = agentText(b.prompt, 'prompt', { max: AGENT_LIMITS.prompt, required: true, code: 'bad_prompt' })!;
       agentText(b.project, 'project', { max: AGENT_LIMITS.name });
@@ -1845,11 +1865,33 @@ async function startServer() {
       if (b.refs !== undefined && b.refs !== null && !Array.isArray(b.refs)) throw new AgentInputError('bad_field', `refs 는 배열이어야 합니다(받은 것: ${kindOf(b.refs)}).`);
       const rawRefs: unknown[] = Array.isArray(b.refs) ? b.refs : [];
       if (rawRefs.length > 50) throw new AgentInputError('too_long', '레퍼런스는 50개까지입니다');
-      refs = rawRefs.map((r: any, i) => {
-        if (typeof r === 'string') return { path: agentText(r, `refs[${i}]`, { max: AGENT_LIMITS.path, required: true })! };
-        if (!r || typeof r !== 'object' || Array.isArray(r)) throw new AgentInputError('bad_field', `refs[${i}] 는 경로 글자 또는 { path, role } 이어야 합니다(받은 것: ${kindOf(r)}).`);
+      // 경로 자리에 에셋이 오면(글자 · { path }) 종류를 알 수 없어 받지 않는다 — 거절 + 고치는 법(예전엔 파일로 찾다 '없는 파일' 로 실패, 26.11.2301~).
+      // 에셋 ID 모양은 문서의 asset-YYYYMMDDhhmmss-xxxxx 만 본다 — 'asset-01.png' 같은 파일 이름을 에셋으로 잘못 거절하지 않게.
+      const looksAsset = (p: string) => /^\s*asset:\/\//i.test(p) || /^\s*asset-\d{8,}-[A-Za-z0-9]+\s*$/i.test(p);
+      const assetHint = (i: number, p: string) => `refs[${i}] 는 BytePlus 에셋으로 보입니다 — { "asset": "${p.trim().slice(0, 80)}", "type": "image" | "video" | "audio" } 로 주세요.`;
+      refs = rawRefs.map((r: any, i): AgentRef => {
+        if (typeof r === 'string') {
+          const p = agentText(r, `refs[${i}]`, { max: AGENT_LIMITS.path, required: true })!;
+          if (looksAsset(p)) throw new AgentInputError('bad_field', assetHint(i, p));
+          return { path: p };
+        }
+        if (!r || typeof r !== 'object' || Array.isArray(r)) throw new AgentInputError('bad_field', `refs[${i}] 는 경로 글자 · { path, role } · { asset, type } 이어야 합니다(받은 것: ${kindOf(r)}).`);
         const role = agentText(r.role, `refs[${i}].role`, { max: AGENT_LIMITS.short });
-        return { path: agentText(r.path, `refs[${i}].path`, { max: AGENT_LIMITS.path, required: true })!, ...(role ? { role } : {}) };
+        // BytePlus 에셋(asset://, 26.11.2301~) — 파일이 아니다. 앱이 주소 그대로 보내고, 프롬프트의 [Image N] 번호에 같이 들어간다.
+        if (r.asset !== undefined && r.asset !== null) {
+          if (r.path !== undefined && r.path !== null) throw new AgentInputError('bad_field', `refs[${i}] 는 path 와 asset 중 하나만 적어 주세요.`);
+          const raw = agentText(r.asset, `refs[${i}].asset`, { max: 240, required: true })!;
+          const asset = normalizeAssetRef(raw);
+          if (!asset) throw new AgentInputError('bad_field', `refs[${i}].asset 은 BytePlus 에셋 ID 여야 합니다 — 예: "asset-20260410114236-8cdfz" 또는 "asset://asset-20260410114236-8cdfz" (받은 것: "${raw.slice(0, 80)}").`);
+          // 설명서에 적은 값만(고쳐 받지 않는다 — 대소문자 · 공백도 그대로 본다, §7-55). *_url 꼴은 BytePlus 의 content 종류 이름이라 같이 받는다.
+          const t = agentText(r.type, `refs[${i}].type`, { max: AGENT_LIMITS.short, required: true })!;
+          const type = t === 'image' || t === 'image_url' ? 'image_url' : t === 'video' || t === 'video_url' ? 'video_url' : t === 'audio' || t === 'audio_url' ? 'audio_url' : null;
+          if (!type) throw new AgentInputError('bad_field', `refs[${i}].type 은 "image" · "video" · "audio" 중 하나입니다(받은 것: "${t.slice(0, 40)}").`);
+          return { asset, type, ...(role ? { role } : {}) };
+        }
+        const p = agentText(r.path, `refs[${i}].path`, { max: AGENT_LIMITS.path, required: true })!;
+        if (looksAsset(p)) throw new AgentInputError('bad_field', assetHint(i, p));
+        return { path: p, ...(role ? { role } : {}) };
       });
     } catch (e: any) {
       if (e instanceof AgentInputError) return res.status(400).json({ error: e.message, code: e.code });
@@ -2303,7 +2345,7 @@ async function startServer() {
       }
       if (cachePath.startsWith(CACHE_DIR)) touchCache(cachePath); // 전송에 쓰임 → 30일 시계 리셋
       const fileBuffer = fs.readFileSync(cachePath);
-      const publicUrl = await uploadToR2(fileBuffer, path.basename(cachePath));
+      const publicUrl = await uploadToR2(originalBytesForByteplus(fileBuffer, req.params.cacheId), path.basename(cachePath));
       console.log(`[Re-upload] R2 OK → ${publicUrl.substring(0, 80)}...`);
       res.json({ url: publicUrl });
     } catch (error: any) {
@@ -2311,6 +2353,149 @@ async function startServer() {
       res.status(500).json({ error: error.message });
     }
   });
+
+  // ─── BytePlus 에셋 등록 (26.11.2301~) — 어셋 라이브러리 인물 사진을 BytePlus 비공개 에셋으로 ───
+  // 왜: Seedance 2.0 · 2.5 는 실사 얼굴이 든 레퍼런스를 막는다(PrivacyInformation — 실존 인물처럼 보이는 AI 얼굴도). 비공개 가상 인물
+  // 라이브러리에 올려 Active 가 된 에셋은 asset://id 로 막힘 없이 쓴다(HANDOFF §5-8). 등록 API 는 AK/SK 서명이라 키는 게이트웨이에만
+  // 있고, 이 서버는 이 PC 의 출입증으로 게이트웨이 /v1/assets/* 를 부른다(electron/gateway.cjs call — 설치본에서만 있다).
+  // 에셋은 BytePlus 프로젝트마다 따로 — 게이트웨이가 이 PC 팀 키의 프로젝트를 찾아 그 안에 만든다(응답의 project 가 그 이름).
+  // 원본은 R2 서명 주소로 넘긴다(BytePlus 가 받아 가는 주소 · base64 안 됨). 등록은 대기열이라 넉넉히 24시간.
+  // 개인판에는 게이트웨이가 없다 — 404.
+  const ASSET_TEST_GW = (() => {   // 격리 시험만 — 가짜 게이트웨이(127.0.0.1). 설치본은 회사판 · 개인판 모두 main.cjs 가 켜기 전에 지운다.
+    const u = String(process.env.SEEDANCE_ASSETS_TEST_GATEWAY || '').trim().replace(/\/+$/, '');
+    return /^http:\/\/127\.0\.0\.1:\d+$/.test(u) ? u : '';
+  })();
+  async function gatewayAssets(method: 'GET' | 'POST', p: string, body?: unknown): Promise<{ status: number; j: any }> {
+    const g = (globalThis as any).__seedanceGateway;
+    if (g && typeof g.call === 'function') {
+      try { return await g.call(method, p, body); } catch (e: any) { return { status: 0, j: { ok: false, code: 'offline', error: String(e?.message || e) } }; }
+    }
+    if (ASSET_TEST_GW) {
+      try {
+        const r = await fetch(ASSET_TEST_GW + p, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.SEEDANCE_ASSETS_TEST_TOKEN || ''}` }, body: method === 'GET' ? undefined : JSON.stringify(body || {}), signal: AbortSignal.timeout(30000) });
+        let j: any = {}; try { j = await r.json(); } catch { /* 빈 답 */ }
+        return { status: r.status, j };
+      } catch (e: any) { return { status: 0, j: { ok: false, code: 'offline', error: String(e?.message || e) } }; }
+    }
+    return { status: 0, j: { ok: false, code: 'gateway_off' } };
+  }
+  // 게이트웨이 답을 그대로 화면에 — 닿지 못했으면(0) 503.
+  const assetsReply = (res: any, r: { status: number; j: any }) =>
+    res.status(r.status >= 200 && r.status < 600 ? r.status : 503).json(r.j && typeof r.j === 'object' ? r.j : { ok: false, code: 'bad_reply' });
+  const LIB_FILE_ID = /^[0-9a-f]{12}\.[a-z0-9]{2,5}$/;   // 라이브러리 원본 이름(내용 md5 앞 12자리 + 확장자) — 게이트웨이의 중복 막기 열쇠
+  // 약속이 ms 안에 끝나지 않으면 실패로(원래 일은 멈추지 않는다 — 기다리는 쪽만 놓아준다).
+  const withTimeout = <T,>(p: Promise<T>, ms: number, why: string): Promise<T> => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([p, new Promise<T>((_, rej) => { t = setTimeout(() => rej(new Error(why)), ms); })]).finally(() => clearTimeout(t));
+  };
+
+  app.get('/api/bp-assets/project', async (_req, res) => {
+    if (PERSONAL) return res.status(404).json({ ok: false, code: 'personal_edition', error: '개인판은 BytePlus 에셋 등록을 쓰지 않아요.' });
+    assetsReply(res, await gatewayAssets('GET', '/v1/assets/project'));
+  });
+
+  // 보관함 정리로 지워진 에셋(26.11.24~, lib/bp-certify checkEvicted) — { since: ms } → 게이트웨이 /v1/assets/evicted 그대로.
+  app.post('/api/bp-assets/evicted', async (req, res) => {
+    if (PERSONAL) return res.status(404).json({ ok: false, code: 'personal_edition', error: '개인판은 BytePlus 에셋 등록을 쓰지 않아요.' });
+    const since = Number(req.body?.since);
+    if (!Number.isFinite(since) || since < 0) return res.status(400).json({ ok: false, code: 'bad_field', error: 'since 는 0 이상의 숫자(ms)여야 합니다.' });
+    assetsReply(res, await gatewayAssets('POST', '/v1/assets/evicted', { since }));
+  });
+
+  app.post('/api/bp-assets/status', async (req, res) => {
+    if (PERSONAL) return res.status(404).json({ ok: false, code: 'personal_edition', error: '개인판은 BytePlus 에셋 등록을 쓰지 않아요.' });
+    const raw = req.body?.ids;
+    if (!Array.isArray(raw) || !raw.length || raw.length > 20 || !raw.every((x: unknown) => typeof x === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(x))) {
+      return res.status(400).json({ ok: false, code: 'bad_field', error: 'ids 는 에셋 id 1~20개여야 합니다.' });
+    }
+    assetsReply(res, await gatewayAssets('POST', '/v1/assets/status', { ids: raw }));
+  });
+
+  // 몸통: { group: { key: 인물 id, name: 인물 이름 }, items: [{ libId, name?, type? }] } — 라이브러리 원본 · 캐시 파일(이름이 같은 꼴: 내용 md5 12 + 확장자). 1~10개.
+  // type 은 Image(기본) · Video(26.11.24~ — v2v 레퍼런스 영상의 인물을 막혔을 때 자동 인증, send-request · lib/bp-certify certifyVideo).
+  app.post('/api/bp-assets/register', async (req, res) => {
+    if (PERSONAL) return res.status(404).json({ ok: false, code: 'personal_edition', error: '개인판은 BytePlus 에셋 등록을 쓰지 않아요.' });
+    const b = req.body || {};
+    const gk = b.group?.key, gn = b.group?.name;
+    if (typeof gk !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(gk)) return res.status(400).json({ ok: false, code: 'bad_field', error: 'group.key 가 올바르지 않습니다.' });
+    if (typeof gn !== 'string' || !gn.trim() || gn.length > 64) return res.status(400).json({ ok: false, code: 'bad_field', error: 'group.name 은 1~64자 글자여야 합니다.' });
+    const items: unknown = b.items;
+    if (!Array.isArray(items) || !items.length || items.length > 10) return res.status(400).json({ ok: false, code: 'bad_field', error: 'items 는 1~10개여야 합니다.' });
+    const base: { key: string; type: 'Image' | 'Video'; name?: string; file: string }[] = [];
+    const seen = new Set<string>();
+    for (const [i, it] of (items as any[]).entries()) {
+      if (!it || typeof it.libId !== 'string' || !LIB_FILE_ID.test(it.libId)) return res.status(400).json({ ok: false, code: 'bad_field', error: `items[${i}].libId 가 라이브러리 원본 이름이 아닙니다.` });
+      if (it.name !== undefined && (typeof it.name !== 'string' || it.name.length > 64)) return res.status(400).json({ ok: false, code: 'bad_field', error: `items[${i}].name 은 64자까지 글자입니다.` });
+      if (seen.has(it.libId)) return res.status(400).json({ ok: false, code: 'bad_field', error: `items[${i}].libId 가 겹칩니다(같은 원본).` });
+      if (it.type !== undefined && it.type !== 'Image' && it.type !== 'Video') return res.status(400).json({ ok: false, code: 'bad_field', error: `items[${i}].type 은 Image · Video 입니다.` });
+      seen.add(it.libId);
+      const file = resolveMediaFile(it.libId);
+      if (!file) return res.status(404).json({ ok: false, code: 'not_found', error: `원본 이미지를 찾지 못했습니다: ${it.libId}` });
+      base.push({ key: it.libId, type: it.type === 'Video' ? 'Video' : 'Image', ...(it.name ? { name: it.name } : {}), file });
+    }
+    const group = { key: gk, name: gn.trim() };
+    // ★ 한 번에 하나씩(이 PC 안에서 등록끼리 겹치지 않게 — 한도 · 중복 · 업로드 낭비). 다른 PC 와의 겹침은 게이트웨이가 막는다(잠금 · BytePlus 이름 찾기).
+    // 먼저 주소 없이 묻는다 — 이미 있는 에셋(이 PC · 다른 PC · 예전 등록)은 그대로 쓰고, 없다는 것(NeedUpload)만 R2 에 올려 한 번 더.
+    // 규격 밖 사진(BMP · 너무 작음 · 너무 긴 비율 · 30MB 이상)은 게이트웨이에 보내지 않고 그 줄만 Failed + 이유(src/lib/asset-image-spec.ts) —
+    // 보내면 CreateAsset 한도를 한 번 쓰고 몇 초 뒤 Failed 로 돌아온다. 머리(1MB)만 비동기로 읽는다(이벤트 루프를 막지 않게).
+    // 없는 것은 한 장씩 올리고 바로 등록한다 — 분당 한도에 걸리면(이유 없는 Retry) 남은 사진은 올리지 않는다(예전엔 열 장을 다 올리고 세 장만
+    // 만들어졌다, 리뷰 11/23). 한 번 부름은 45초 안에 시작한 것까지만 — 나머지는 이유 없는 Retry(다시 하기 횟수에 안 셈).
+    // 올린 R2 객체는 생성 레퍼런스와 같이 버킷 수명 규칙이 지운다.
+    const run = async (): Promise<{ status: number; j: any }> => {
+      const t0 = Date.now();
+      const strip = (x: typeof base[number], url?: string) => ({ key: x.key, type: x.type, ...(x.name ? { name: x.name } : {}), ...(url ? { url } : {}) });
+      const specFailed = new Map<string, any>();
+      for (const x of base) {
+        if (x.type !== 'Image') continue;   // 규격 미리 거르기는 사진만 — 영상은 BytePlus 가 판단한다(거절이면 Failed + 이유)
+        let why: string | null;
+        try {
+          const fh = await fs.promises.open(x.file, 'r');
+          try {
+            const size = (await fh.stat()).size;
+            const head = Buffer.alloc(Math.min(size, ASSET_SPEC_HEAD_BYTES));
+            await fh.read(head, 0, head.length, 0);
+            why = assetImageProblem(head, size);
+          } finally { await fh.close(); }
+        } catch (e: any) { why = `원본을 읽지 못했습니다: ${String(e?.message || e).slice(0, 200)}`; }
+        if (why) specFailed.set(x.key, { key: x.key, status: 'Failed', error: { code: 'image_spec', message: why } });
+      }
+      const ok = base.filter((x) => !specFailed.has(x.key));
+      if (!ok.length) return { status: 200, j: { ok: true, project: null, items: base.map((x) => specFailed.get(x.key)) } };
+      const first = await gatewayAssets('POST', '/v1/assets/register', { group, items: ok.map((x) => strip(x)) });
+      if (!first.j?.ok || !Array.isArray(first.j.items)) return first;
+      const need = ok.filter((x) => first.j.items.some((it: any) => it?.key === x.key && it?.status === 'NeedUpload'));
+      const later = new Map<string, any>();
+      let stop: any = null;   // 남은 사진에 줄 답 — 한도면 이유 없이, 게이트웨이 통째 실패면 그 이유로
+      for (const x of need) {
+        if (stop) { later.set(x.key, { key: x.key, ...stop }); continue; }
+        if (Date.now() - t0 > 45_000) { later.set(x.key, { key: x.key, status: 'Retry', retryAfter: 5 }); continue; }
+        let url: string;
+        // 앱이 받은 영상은 끝에 설정 상자가 붙어 있다 — 떼고 원본 바이트로(레퍼런스 재업로드와 같은 규칙). 사진은 그대로다.
+        try { url = await withTimeout(uploadToR2(originalBytesForByteplus(await fs.promises.readFile(x.file), x.key), x.key, { expiresIn: 24 * 60 * 60 }), 90_000, '90초 안에 끝나지 않았습니다'); }
+        catch (e: any) { later.set(x.key, { key: x.key, status: 'Retry', error: { code: 'upload_failed', message: `원본을 올리지 못했습니다: ${String(e?.message || e).slice(0, 200)}` } }); continue; }
+        const one = await gatewayAssets('POST', '/v1/assets/register', { group, items: [strip(x, url)] });
+        if (!one.j?.ok || !Array.isArray(one.j.items)) {
+          stop = one.j?.code === 'rate_limited'
+            ? { status: 'Retry', retryAfter: Number(one.j.retryAfter) || 25 }
+            : { status: 'Retry', error: { code: one.j?.code || `http_${one.status}`, message: String(one.j?.error || one.j?.code || '게이트웨이 오류').slice(0, 200) } };
+          later.set(x.key, { key: x.key, ...stop });
+          continue;
+        }
+        const it = one.j.items.find((i: any) => i?.key === x.key) || { key: x.key, status: 'Retry', error: { code: 'no_reply', message: '게이트웨이 답에 이 사진이 없었습니다' } };
+        later.set(x.key, it);
+        if (it.status === 'Retry' && !it.error) stop = { status: 'Retry', retryAfter: Number(it.retryAfter) || 25 };   // 분당 한도 — 남은 것은 올리지 않는다
+      }
+      const byKey = new Map<string, any>([...first.j.items.map((it: any) => [it?.key, it] as [string, any]), ...later, ...specFailed]);
+      return { status: 200, j: { ...first.j, ok: true, items: base.map((x) => byKey.get(x.key) || { key: x.key, status: 'Retry', error: { code: 'no_reply', message: '게이트웨이 답에 이 사진이 없었습니다' } }) } };
+    };
+    const p = assetsChain.then(run, run);
+    // 한 등록이 멎어도(R2 · 게이트웨이가 답하지 않음) 다음 등록이 앱을 다시 켤 때까지 줄에 걸리지 않게 — 줄은 170초까지만 기다린다.
+    assetsChain = Promise.race([p, new Promise((r) => setTimeout(r, 170_000))]).catch(() => {});
+    const r = await p;
+    console.log(`[Assets] register ${gk} · ${base.length}장 → ${r.status} ${r.j?.ok ? (r.j.items || []).map((x: any) => x.status).join(',') : r.j?.code || ''}`);
+    assetsReply(res, r);
+  });
+  let assetsChain: Promise<unknown> = Promise.resolve();
 
   // ★ 경로에서 다시 읽은 파일이 '첨부했던 그 파일' 인가.
   // cacheId 는 첨부 때 내용의 md5 앞 12자리다 — 원본의 지문을 이미 들고 있는 셈이다.
@@ -2475,7 +2660,7 @@ async function startServer() {
       const cachePath = path.join(CACHE_DIR, cacheId);
       if (!fs.existsSync(cachePath)) fs.writeFileSync(cachePath, fileBuffer);
       else touchCache(cachePath);
-      const publicUrl = await uploadToR2(fileBuffer, filename);
+      const publicUrl = await uploadToR2(originalBytesForByteplus(fileBuffer, filename), filename);
       console.log(`[Re-upload from path] R2 OK → ${publicUrl.substring(0, 80)}... (re-cached: ${cacheId})`);
       res.json({ url: publicUrl, cacheId });
     } catch (error: any) {

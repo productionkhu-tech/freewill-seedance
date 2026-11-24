@@ -1,9 +1,11 @@
 // 게이트웨이(seedance-gateway)에 키를 넣는 도우미 — ★ 관리자가 직접 실행한다. 키 값은 화면에 찍지 않는다.
 //
-//   node worker/setup-secrets.mjs "<팀 bat 이 있는 폴더>" [--dry] [--new-admin-key]
+//   node worker/setup-secrets.mjs "<팀 bat 이 있는 폴더>" [--dry] [--new-admin-key] [--bp-asset-key]
 //
 //   --dry             무엇을 넣을지(팀 · 이름)만 보여 주고 올리지 않는다. 먼저 이걸로 확인할 것.
 //   --new-admin-key   관리 화면 키를 새로 만든다(처음이거나 잃어버렸을 때). 화면에 한 번만 나온다.
+//   --bp-asset-key    어셋 서명 키(BP_ASSET_AK · BP_ASSET_SK)도 함께 올린다 — 주간 리포트의 DPAPI 저장소(secrets.dat)에서
+//                     읽는다(이 Windows 계정에서만 열림). 폴더는 REPORT_SECRETS_DIR 로 바꿀 수 있다. 값은 파이프로만 받고 찍지 않는다.
 //
 // 하는 일
 //   1. 폴더의 *.bat · *.cmd 에서 setx / set 으로 심는 값을 읽는다.
@@ -24,8 +26,33 @@ const args = process.argv.slice(2);
 const dir = args.find((a) => !a.startsWith('--'));
 const DRY = args.includes('--dry');
 const NEW_ADMIN = args.includes('--new-admin-key');
+const BP_ASSET = args.includes('--bp-asset-key');
+// --only-bp-asset-key(26.11.23): 어셋 서명 키 둘만 올린다 — bat 폴더 없이. 팀 키 · R2 를 bat 에서 다시 올리면 Cloudflare 에서만 바꾼 값이
+// 옛 bat 값으로 되돌아갈 수 있어서, 어셋 키만 넣을 때는 이걸로. [--dry] 같이 쓸 수 있다.
+if (args.includes('--only-bp-asset-key')) {
+  const cwd = process.env.REPORT_SECRETS_DIR || 'C:/Users/user/Desktop/기획 파일/TA/앱개발/26.05.04 시댄스 크레딧 관리/weekly_report';
+  const py = "import json,secrets_store as s; print(json.dumps({n: s.resolve('secret:' + n) for n in ('BP_ASSET_AK', 'BP_ASSET_SK')}))";
+  const r = spawnSync(process.env.PYTHON || 'python', ['-c', py], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let got = null;
+  try { got = r.status === 0 ? JSON.parse(String(r.stdout).trim().split(/\r?\n/).pop()) : null; } catch {}
+  if (!got || !got.BP_ASSET_AK || !got.BP_ASSET_SK) {
+    const why = r.error ? r.error.message : (String(r.stderr || '').trim().split(/\r?\n/).pop() || `exit ${r.status}`);
+    console.error(`어셋 키를 못 읽었습니다(${cwd}) — ${got ? 'BP_ASSET_AK · BP_ASSET_SK 중 빈 값' : why.slice(0, 200)}. 아무것도 올리지 않았습니다.`);
+    process.exit(1);
+  }
+  console.log(`올릴 것: BP_ASSET_AK · BP_ASSET_SK (값은 안 찍음, AK 길이 ${got.BP_ASSET_AK.length} · SK 길이 ${got.BP_ASSET_SK.length})`);
+  if (DRY) { console.log('--dry: 올리지 않았습니다.'); process.exit(0); }
+  const tmp = path.join(os.tmpdir(), `sd-asset-${crypto.randomBytes(6).toString('hex')}.json`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ BP_ASSET_AK: got.BP_ASSET_AK, BP_ASSET_SK: got.BP_ASSET_SK }), { mode: 0o600 });
+    const u = spawnSync(`npx --yes wrangler@4.148.0 secret bulk "${tmp}"`, { cwd: HERE, stdio: 'inherit', shell: true });
+    if (u.status !== 0) { console.error(`실패(exit ${u.status}). 'npx wrangler login' 이 되어 있는지 확인하세요.`); process.exitCode = 1; }
+    else console.log('올림: 2개 (값은 화면에 안 찍었습니다)');
+  } finally { try { fs.rmSync(tmp, { force: true }); } catch {} }
+  process.exit(process.exitCode || 0);
+}
 if (!dir || !fs.existsSync(dir)) {
-  console.error('사용법: node worker/setup-secrets.mjs "<팀 bat 폴더>" [--dry] [--new-admin-key]');
+  console.error('사용법: node worker/setup-secrets.mjs "<팀 bat 폴더>" [--dry] [--new-admin-key] [--bp-asset-key]');
   process.exit(2);
 }
 
@@ -88,6 +115,25 @@ const gem = one('NANOBANANA_STUDIO_KEY') || (process.env.NANOBANANA_STUDIO_KEY &
 if (gem) secrets.GEMINI_KEY = gem;
 
 secrets.ENROLL_OPEN = '1';
+
+// 어셋 서명 키 — 주간 리포트 저장소에서. 둘 다 있어야 넣는다(하나만 올라가면 서명이 틀려 어셋이 통째로 막힌다).
+// 못 읽으면 아무것도 올리지 않고 멈춘다 — 플래그를 줬는데 조용히 빠지면 올라간 줄 알게 된다.
+if (BP_ASSET) {
+  const cwd = process.env.REPORT_SECRETS_DIR || 'C:/Users/user/Desktop/기획 파일/TA/앱개발/26.05.04 시댄스 크레딧 관리/weekly_report';
+  const py = "import json,secrets_store as s; print(json.dumps({n: s.resolve('secret:' + n) for n in ('BP_ASSET_AK', 'BP_ASSET_SK')}))";
+  const r = spawnSync(process.env.PYTHON || 'python', ['-c', py], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let got = null;
+  try { got = r.status === 0 ? JSON.parse(String(r.stdout).trim().split(/\r?\n/).pop()) : null; } catch {}
+  if (!got || !got.BP_ASSET_AK || !got.BP_ASSET_SK) {
+    // 표준 출력은 값일 수 있어 안 찍는다. 오류 쪽 마지막 줄만(파이썬 예외 이름 · 문구).
+    const why = r.error ? r.error.message : (String(r.stderr || '').trim().split(/\r?\n/).pop() || `exit ${r.status}`);
+    console.error(`\n어셋 키를 못 읽었습니다(${cwd}) — ${got ? 'BP_ASSET_AK · BP_ASSET_SK 중 빈 값' : why.slice(0, 200)}`);
+    console.error("  주간 리포트 폴더에서 'python secrets_store.py --set BP_ASSET_AK' · '--set BP_ASSET_SK' 로 넣은 뒤 다시. 아무것도 올리지 않았습니다.");
+    process.exit(1);
+  }
+  secrets.BP_ASSET_AK = got.BP_ASSET_AK;
+  secrets.BP_ASSET_SK = got.BP_ASSET_SK;
+}
 let adminKey = '';
 if (NEW_ADMIN) { adminKey = crypto.randomBytes(24).toString('base64url'); secrets.ADMIN_KEY = adminKey; }
 
