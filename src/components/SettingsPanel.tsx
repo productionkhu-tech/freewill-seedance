@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useLayoutEffect, useSyncExternalStore } from 'react';
-import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, modeRefCaps, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
+import { useAppStore, AssetRole, Asset, GenerationMode, defaultSettings, MODELS, modelOutputFormats, resolveOutputFormat, allowedResolutions, clampResolution, isFourKAllowed, modelProvider, modelDurationRange, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoMaxPx, modelRefVideoSec, modelRefAudioSec, modelAllowsAudioOnly, ratioLockedFor, durationLockedFor, settingsDefaultsFor, isModelAllowed, modelOmniTasks, resolveOmniTask, modelResolutions, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor, modelSupportsDraft, draftEffective, modeRefCaps, billingKeyOf, findBillingProject, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL, RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX } from '../store';
 import { fileBaseName } from '../store';
 import { PICKABLE_MODELS, modelExtendAddRange, modelFirstLastMaxSec, omniRefVideoMax, modelEditMaxSrcSec, modelHasFirstLastFrame } from '../store';
 import { Settings, Image as ImageIcon, Video, Music, Trash2, Plus, Upload, ChevronDown, GripVertical, RefreshCw, Layers, FolderOpen, PanelLeft, PanelRight, ShieldCheck, ShieldAlert, ShieldOff } from 'lucide-react';
@@ -708,7 +708,7 @@ export function SettingsPanel() {
       const okFmt = /\.(mp4|mov|m4v|webm|mpeg|mpg|wmv|3gp|3gpp|flv)$/i.test(file.name) || /^video\//i.test(file.type);
       vErr = sizeMB > 50 ? `비디오 크기 초과: ${sizeMB.toFixed(1)}MB (Omni 최대 50MB)` : !okFmt ? '지원하지 않는 형식 (mp4·mov·webm·mpeg·wmv·3gpp·flv)' : null;
     } else {
-      vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec, refVidMin) : await validateAudioFile(file, refAudSec);
+      vErr = type === 'video_url' ? await validateVideoFile(file, refVidSec, refVidMin, modelRefVideoMaxPx(settings.model)) : await validateAudioFile(file, refAudSec);
     }
     if (vErr) return { error: vErr };
     // Combined cap: reference videos ≤ 15s total, reference audio ≤ 15s

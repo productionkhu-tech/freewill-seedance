@@ -30,6 +30,10 @@ const BREAKS = [
   ['보내던 중 끊긴 것도 다시 보냄(두 번 과금)', 'busy-line', 'server.ts', 'if (!neverSent(e)) throw e;', ''],
   ['줄에 선 카드의 파일을 붙잡지 않음', 'busy-line', 'server.ts', 'for (const k of keys) r2KeyRefCount.set(k, (r2KeyRefCount.get(k) || 0) + 1);', ''],
   ['줄에서 기다린 카드도 코드를 다시 안 봄', 'busy-line', S, '          if (why) { failed(sysMsgId, `${why}\\n\\n(BytePlus 대기열', '          if (false as boolean) { failed(sysMsgId, `${why}\\n\\n(BytePlus 대기열'],
+  ['오류 글이 상자 밖으로 나감(옛 모양)', 'error-card', 'src/components/ChatArea.tsx', 'min-w-0 flex-1 [overflow-wrap:anywhere]', ''],
+  ['2.5 영상 화소를 2.0 값으로 막음', 'error-card', 'src/store.ts', '  refVideoMaxPx: 4096 * 2160,', ''],
+  ['설정 패널만 화소 한도를 안 넘김', 'error-card', 'src/components/SettingsPanel.tsx', 'refVidMin, modelRefVideoMaxPx(settings.model))', 'refVidMin)'],
+  ['고칠 수 없는 칸의 이유를 안 남김', 'error-card', S, 'const whyNoFix = (err: string) => (!PERSONAL', 'const whyNoFix = (err: string) => (false as boolean'],
   ['본편이 대기열에 막히면 실패', 'busy-line', 'src/components/ChatArea.tsx', "if (isLineFull(res.status, data)) { busyError = byteplusErrorText(data); return 'busy'; }", ''],
   ['정리 뒤 옛 번호를 돌려줌(옛 버그)', 'evict', 'worker/seedance-gateway.js', 'try { await env.SD_TOKENS.delete(`ast:lock:${project}:${x.Name}`); } catch {}', ''],
 ];

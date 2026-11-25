@@ -454,7 +454,7 @@ E 1분마다 변화 + 숨김 없음(사고 상황) → 첫 변화 15.0분 뒤 ·
 | `edit_video` | `reference_image/video/audio` | 비디오 1 필수 (2.5 는 비디오 1-10, §5-5) |
 | `extend_video` | `reference_video` (2.5 는 `reference_image/video/audio`) | 비디오 1-3 (2.5 는 비디오 1-10 · 이미지 0-30 · 오디오 0-10, §5-5) |
 
-**에셋 제한** (2026-06-12 공식 문서 대조 완료)
+**에셋 제한** (2026-06-12 · 2026-11-25 공식 문서 대조 — 용량 · 개수 · 길이는 문서 최대치와 같음, BytePlus 에셋 등록 한도도 같은 값)
 
 | 타입 | 개당 | 길이 | 해상도/비율 |
 |---|---|---|---|
@@ -462,6 +462,10 @@ E 1분마다 변화 + 숨김 없음(사고 상황) → 첫 변화 15.0분 뒤 ·
 | 비디오 | **200MB** (2026-07-29 공식 문서, 26.7.2905) | 개당 2~15초, **합산 ≤15.2초** | 480/720/1080p, fps 24~60 |
 | 오디오 | 15MB | 개당 2~15초, **합산 ≤15초** | — |
 
+- **레퍼런스 영상 화소 합은 모델마다(11/25)**: 2.5 · 2.5 Flash `[614×664=407696, 4096×2160=8847360]`(`refVideoMaxPx`), 2.0 계열 `[407696, 3326×2494=8295044]`(UHD 3840×2160 까지).
+  문서 + 무과금 확인(후보 영상 뒤에 4400×2160 을 붙여 어느 칸이 걸리는지 봄 — API 가 숫자를 그대로 말함) + **실제 생성 1건**(2.5 480p 4초, 4096×2160 레퍼런스,
+  `cgt-20261125160404-3jqaj` 139초 67,652 토큰). 예전엔 2.5 도 2.0 값으로 막았고, 아래쪽 409600 은 852×480 을 막았다(BytePlus 는 셋 다 받음).
+  2.5 에 넣은 채 2.0 으로 바꾸면 생성 전 400 — `translate-error` 가 사람 말로. 이미지 HEIC 는 문서상 되지만 앱은 안 받음(화면에 못 띄움).
 - 전부 R2 presigned URL 로 전달한다(base64 아님).
 - **오디오 단독 불가** — 이미지나 비디오가 최소 1개 있어야 한다.
 - HEIC/HEIF 는 API 는 받지만 앱이 거부한다(Chromium 이 디코드 못 해 썸네일·검증이 깨진다).
@@ -1711,6 +1715,8 @@ R2 에 올린다. 미리보기 JPG 는 화면에만 — 크기·품질을 바꾸
 그 전 시험은 임시 폴더(scratchpad)에만 있었다 — 이 문서에 나오는 `portrait\t-*.mjs` · `minitest\run-*.ps1` 은 이제 여기로 옮겨졌다(이름: t-autofix → auto-certify ·
 t-same → same-picture · t-vidkeep → video-record · t-vidbadge → video-badge · t-refshield → panel-badge · t-refedge → panel-edits · t-evictwatch → evict-watch · 나머지 같은 이름).
 
+- 오류 카드(11/25): `lib/translate-error faceBlock` 이 실사 얼굴 글을 나눠 준다(한 줄 설명 · 다음에 할 일 또는 자동 인증을 못 한 이유 · 접힌 '다른 방법' · 원문). 자동 인증을 시작할 수 없는 칸도
+  이유를 남긴다(send-request `whyNoFix`). 개인판은 자동 인증 안내가 없다. 카드 안쪽 칸의 `min-w-0` 이 없어 긴 요청 번호가 상자를 밀어내던 것도 고침. 시험 `error-card`.
 - `node tests/harness/verify.mjs` — 바뀐 파일을 보고 위험 · 돌릴 시험을 고른다(모르는 파일은 전부). 결과에 **코드 도장**이 붙고, 코드가 바뀌면 무효, 안 돌린 것은 '안 함'.
   배포 전 `--gate`(지금 코드에 결과가 다 있나 — 말만 한다, 막으려면 `HARNESS_GATE=enforce`).
 - `node tests/harness/compare-send.mjs` — 커밋된 코드와 지금 코드에 같은 것을 시켜 BytePlus 로 나가는 내용을 견준다. 일부러 바꾼 것만 `approved.json` 에 이유와 함께.
@@ -1738,6 +1744,9 @@ t-same → same-picture · t-vidkeep → video-record · t-vidbadge → video-ba
     서버가 `touchCache` 로 mtime 을 바꾼다; 진짜 폴더를 물리면 30일 정리가 진짜 파일을 지운다).
   - ★ **윈도우 예약 포트**: `netsh interface ipv4 show excludedportrange protocol=tcp` 에 든 포트는 EACCES(이 PC: 3673-3772,
     3779-3878, 3952-4051 …). 3918 · 3925 는 비어 있다.
+    **실제 앱도 이것으로 안 켜진다(2026-11-25)**: PC 를 다시 켠 뒤 winnat 이 2917-3016 을 예약해 3000 이 EACCES(쥔 프로세스는 없음 — `netstat` 로는 안 보임), 개인판 3100 도 같음.
+    까닭은 이 PC 의 동적 포트 시작이 1024(윈도우 기본 49152)라 앱 포트가 무작위 예약에 걸림. 고치기(관리자): `net stop winnat` → `netsh int ipv4 add excludedportrange protocol=tcp
+    startport=3000 numberofports=1 store=persistent`(3100 도) → `net start winnat`. 관리 예약(`*`)된 포트는 앱이 열 수 있다(50000 으로 확인). 포트를 바꾸면 기록(IndexedDB 는 주소마다)이 안 보이므로 앱이 다른 포트로 피하면 안 된다.
   - ★ **화면 밖에서 스토어를 만질 때**: `await import('/src/store.ts')` 는 앱과 같은 인스턴스를 준다 — **시험 중 저장소를
     고치기 전까지만**. Vite 가 HMR 로 store.ts 를 갈아 끼우면 앱은 `?t=` 붙은 새 모듈을 쓰고 import 는 옛 인스턴스를 줘서,
     읽기 · 쓰기가 화면과 따로 논다(새로고침해도 그대로). 고친 뒤에는 하네스를 다시 띄울 것. 사이드바 강조 줄과

@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { REPO, HARNESS } from './app.mjs';
 
 // 걸리는 시간(초) — 긴 것부터 나눠 맡기려고. 실제 시간은 마찰 기록에서 다시 읽는다.
-export const CASES = { modes: 390, 'auto-certify': 250, evict: 150, cancel: 140, 'same-picture': 125, 'video-record': 100, 'panel-badge': 95, 'evict-watch': 95, 'panel-edits': 55, frames: 30, 'video-badge': 25, 'busy-line': 60 };
+export const CASES = { modes: 390, 'auto-certify': 250, evict: 150, cancel: 140, 'same-picture': 125, 'video-record': 100, 'panel-badge': 95, 'evict-watch': 95, 'panel-edits': 55, frames: 30, 'video-badge': 25, 'busy-line': 105, 'error-card': 40 };
 const ALL = Object.keys(CASES);
 const SEND = ['modes', 'auto-certify', 'frames', 'cancel', 'same-picture', 'video-record', 'busy-line'];
 const PANEL = ['panel-badge', 'panel-edits', 'video-badge', 'same-picture'];
@@ -16,12 +16,13 @@ const RULES = [
   [/^tests\/harness\/cases\/([\w-]+)\.mjs$/, 'low', (m) => (CASES[m[1]] ? [m[1]] : [])],
   [/^tests\/harness\//, 'low', ['video-badge']],
   [/^src\/lib\/busy-line\.ts$/, 'medium', ['busy-line', 'cancel']],
+  [/^src\/lib\/utils\.ts$/, 'high', ALL],
   [/^src\/lib\/same-pixels\.ts$/, 'medium', ['same-picture', 'auto-certify', 'panel-edits', 'frames']],
-  [/^src\/lib\/translate-error\.ts$/, 'medium', ['auto-certify']],
+  [/^src\/lib\/translate-error\.ts$/, 'medium', ['auto-certify', 'error-card']],
   [/^src\/components\/SettingsPanel\.tsx$/, 'medium', PANEL],
   [/^src\/components\/ElementLibrary\.tsx$/, 'medium', ['panel-badge', 'evict']],
   [/^src\/components\/Sidebar\.tsx$/, 'medium', ['video-record']],
-  [/^src\/components\/ChatArea\.tsx$/, 'medium', ['auto-certify', 'cancel', 'panel-edits', 'same-picture', 'busy-line']],
+  [/^src\/components\/ChatArea\.tsx$/, 'medium', ['auto-certify', 'cancel', 'panel-edits', 'same-picture', 'busy-line', 'error-card']],
   [/^src\/App\.tsx$/, 'medium', ['evict-watch', 'video-record']],
   [/^src\/index\.css$|^src\/components\//, 'medium', ['panel-badge', 'video-badge']],
   [/^src\/lib\/(bp-certify|bp-assets)\.ts$/, 'high', ALL],

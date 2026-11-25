@@ -16,7 +16,7 @@ import { agentSettings, buildAgentManual, AGENT_COMMANDS, AGENT_FEATURES } from 
 import { visibleProjectIds } from '../lib/split';
 import { PERSONAL } from '../lib/edition';
 import { isAssetUri, imgSrcOk, assetLabel } from '../lib/byteplus-asset';
-import { translateError, byteplusErrorText } from '../lib/translate-error';
+import { translateError, byteplusErrorText, faceBlock } from '../lib/translate-error';
 import { isLineFull, joinLine } from '../lib/busy-line';
 import { CATEGORY_META, fileToElementImage, MAX_ELEMENT_IMAGES } from './ElementLibrary';
 import { motion, AnimatePresence } from 'motion/react';
@@ -1773,9 +1773,19 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
           ) : msg.status === 'failed' ? (
             <div className="flex items-start gap-2.5 text-sm text-red-600 bg-red-50 px-4 py-3 rounded-xl border border-red-100">
               <AlertCircle size={16} className="shrink-0 mt-0.5" />
-              <div>
+              <div data-card-error className="min-w-0 flex-1 [overflow-wrap:anywhere]">{/* 요청 번호 · 주소처럼 끊을 곳 없는 긴 글이 상자 밖으로 나가지 않게 */}
                 <p className="font-medium">생성 실패</p>
                 {(() => {
+                  const face = faceBlock(msg.error || '');
+                  if (face) return <>
+                    <p className="text-red-500 mt-0.5 text-[13px] break-keep">{face.head}</p>
+                    <p className="text-red-600 mt-1 text-[13px] font-medium break-keep">{face.next}</p>
+                    <details className="mt-1.5 text-[12px] text-red-500">
+                      <summary className="cursor-pointer select-none w-fit hover:text-red-700">다른 방법 보기</summary>
+                      <ul className="mt-1 list-disc pl-4 space-y-1 leading-[18px] break-keep">{face.ways.map((w) => <li key={w}>{w}</li>)}</ul>
+                    </details>
+                    <p className="text-red-400 mt-1.5 text-[11px] font-mono">{face.raw}</p>
+                  </>;
                   // 에셋(asset://)을 넣은 요청이면 에셋 쪽 흔한 원인을 덧붙인다(lib/translate-error.ts). 줄바꿈이 든 안내라 pre-line.
                   const friendly = translateError(msg.error || '', { hasAsset: !!(msg as any).bpAssetRefs || (msg.usedAssets || []).some((a: any) => isAssetUri(a?.url)) });
                   return <>

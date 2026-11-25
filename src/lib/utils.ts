@@ -136,10 +136,11 @@ export const API_LIMITS = {
     // "why 15.2?" — the extra 0.2s is deliberately a silent tolerance, not a feature.
     displayMaxDuration: 15,
     minPx: 300, maxPx: 6000, minRatio: 0.4, maxRatio: 2.5,
-    // Total px must fall in [640×640=409600, 3326×2494=8295044] per the Seedance
-    // 2.0 API (covers up to 4k input). Previously mis-capped at ~1080p (2086876),
-    // which wrongly rejected valid 1080p+/4k reference videos. Size cap 200MB (was 50).
-    minTotalPx: 409600, maxTotalPx: 8295044,
+    // Total px: 2.0 [614×664=407696, 3326×2494=8295044] · 2.5 계열은 위쪽이 4096×2160=8847360(MODELS.refVideoMaxPx).
+    // 문서(2026-11-20 판) + 2026-11-25 무과금 확인: API 가 "must be less than or equal to 8847360 for model dreamina-seedance-2-5
+    // (-flash)" · "8295044 for … 2-0-fast" 라고 직접 말함 · 614×664 · 852×480 은 셋 다 통과 · 4096×2160 은 2.5 로 실제 생성까지.
+    // 예전 아래쪽 409600(640×640)은 852×480 을 잘못 막았다. Size cap 200MB (was 50).
+    minTotalPx: 407696, maxTotalPx: 8295044,
   },
   // ★ Audio behaves EXACTLY like video: the real cap is 15.2s, not 15, both per-clip and
   // summed — and it is per-model. Measured 2026-08-07 by submitting an over-length clip,
@@ -194,12 +195,16 @@ export function validateImageDimensions(source: File | string): Promise<string |
   });
 }
 
+// 화소 합 한도를 사람이 아는 크기로 — 3326×2494 같은 값은 아무도 모른다.
+export const videoPxLabel = (px: number) => (px >= 8847360 ? '4096x2160' : '3840x2160');
+
 // Validate video file (size + duration + resolution + fps)
 // maxSec: per-model reference-video cap. minSec: per-TASK floor — Seedance 2.5 editing
 // requires 4s (BytePlus doc 2607688), everything else keeps the API-wide 2s. Both omitted
 // (every pre-existing caller) → the original API_LIMITS values, so behaviour for
 // 2.0/Fast/Mini/Omni is unchanged.
-export function validateVideoFile(file: File, maxSec?: number, minSec?: number): Promise<string | null> {
+// maxPx: per-model total-pixel cap (2.5 계열 4096×2160). 안 넘기면 2.0 값.
+export function validateVideoFile(file: File, maxSec?: number, minSec?: number, maxPx?: number): Promise<string | null> {
   return new Promise((resolve) => {
     const sizeMB = file.size / (1024 * 1024);
     if (sizeMB > API_LIMITS.video.maxSizeMB) { resolve(`비디오 크기 초과: ${sizeMB.toFixed(1)}MB (최대 ${API_LIMITS.video.maxSizeMB}MB)`); return; }
@@ -230,17 +235,18 @@ export function validateVideoFile(file: File, maxSec?: number, minSec?: number):
       const h = video.videoHeight;
       const w = video.videoWidth;
       if (h > 0 && w > 0) {
-        const { minPx, maxPx, minRatio, maxRatio, minTotalPx, maxTotalPx } = API_LIMITS.video;
-        if (w < minPx || h < minPx || w > maxPx || h > maxPx) {
-          resolve(`비디오 해상도 범위 초과: ${w}x${h} (각 변 ${minPx}~${maxPx}px)`); return;
+        const { minPx, maxPx: maxSide, minRatio, maxRatio, minTotalPx } = API_LIMITS.video;
+        const maxTotalPx = maxPx ?? API_LIMITS.video.maxTotalPx;
+        if (w < minPx || h < minPx || w > maxSide || h > maxSide) {
+          resolve(`비디오 해상도 범위 초과: ${w}x${h} (각 변 ${minPx}~${maxSide}px)`); return;
         }
         const ratio = w / h;
         if (ratio < minRatio || ratio > maxRatio) {
           resolve(`비디오 비율 벗어남: ${ratio.toFixed(2)} (가로÷세로가 0.4~2.5 사이여야 합니다)`); return;
         }
         const totalPx = w * h;
-        if (totalPx < minTotalPx) { resolve(`비디오 해상도 너무 작음: ${w}x${h} (최소 640x640 상당)`); return; }
-        if (totalPx > maxTotalPx) { resolve(`비디오 해상도 초과: ${w}x${h} (최대 4k — 3326x2494 상당까지)`); return; }
+        if (totalPx < minTotalPx) { resolve(`비디오 해상도 너무 작음: ${w}x${h} (최소 614x664 상당)`); return; }
+        if (totalPx > maxTotalPx) { resolve(`비디오 해상도 초과: ${w}x${h} (이 모델은 ${videoPxLabel(maxTotalPx)} 상당까지${maxTotalPx < 8847360 && totalPx <= 8847360 ? ' · Seedance 2.5 는 4096x2160 까지' : ''})`); return; }
       }
       resolve(null);
     };

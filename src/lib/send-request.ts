@@ -15,7 +15,7 @@ import { isLineFull, joinLine } from './busy-line';
 import { certifyPhoto, certifyVideo, videoAssetUrl, videoKnown, forgetVideoAsset } from './bp-certify';
 import {
   useAppStore, Asset, AssetRole, ElementImage, GenerationSettings, applyAssetUpdate,
-  clampResolution, allowedResolutions, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec,
+  clampResolution, allowedResolutions, isFourKAllowed, modelImageMax, modelVideoMax, modelAudioMax, modelRefVideoSec, modelRefAudioSec, modelRefVideoMaxPx,
   modelAllowsAudioOnly, resolveOutputFormat, refTaskTypeFor, applyTaskConstraints, isModelAllowed, MODELS, modelProvider,
   resolveOmniTask, modelResolutions, modelHasFirstLastFrame, modelExtendMaxSrcSec, modelExtendMaxOutSec, refVideoMinSecFor,
   modeRefCaps, omniTaskRefCaps, OMNI_VIDEO_MAX_MB, OUTPUT_COUNT_MAX, projectBilling, billingOf, boundCollectionOf,
@@ -351,7 +351,7 @@ export async function attachFilesTo(sink: AssetSink, allFiles: File[], src?: (f:
       if (!shouldReplace && vidCount >= maxVid) {
         rejected.push(`${file.name}: 비디오 한도 ${maxVid}개 초과`); continue;
       }
-      const vidErr = await validateVideoFile(file, modelRefVideoSec(model), refVideoMinSecFor(model, mode));
+      const vidErr = await validateVideoFile(file, modelRefVideoSec(model), refVideoMinSecFor(model, mode), modelRefVideoMaxPx(model));
       if (vidErr) { rejected.push(`${file.name}: ${vidErr}`); continue; }
       const vidDuration = await getMediaDurationSec(file, 'video');
       // Combined cap: all reference videos in one request ≤ 15s total.
@@ -882,6 +882,9 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
       const n = content.slice(1, index + 1).filter(c => c.type === t).length;
       return { index, src, kind: (gone ? 'gone' : 'face') as 'gone' | 'face', goneId: gone?.[1], label: `[${t === 'video_url' ? 'Video' : 'Image'} ${n}] ${src.name}` };
     };
+    // 실사 얼굴인데 자동 인증을 시작할 수 없는 칸 — 카드에 이유를 남긴다(없으면 카드는 '재생성하면 자동 인증' 이라고 말한다).
+    const whyNoFix = (err: string) => (!PERSONAL && /PrivacyInformation|real person/i.test(err) && !err.includes('[자동 인증 못 함]')
+      ? `${err}\n\n[자동 인증 못 함] 어느 사진 · 영상인지 알 수 없거나 이 PC 에 원본이 없는 칸이에요 — 그 칸을 파일로 다시 넣고 재생성(✦)해 주세요.` : err);
     const markGone = (id: string) => {
       const now = Date.now();
       const patches = useAppStore.getState().elementAssets.flatMap(el => el.images.flatMap(im => Object.entries(im.bpAssets || {})
@@ -965,7 +968,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
             if (r.taskId) { started(sysMsgId, r.taskId); return 'sent'; }
             if (r.busy) return 'busy';
             if (fixPlan(r.error!)) { void recover(sysMsgId, r.error!); return 'end'; }
-            failed(sysMsgId, r.error!);
+            failed(sysMsgId, whyNoFix(r.error!));
           } catch (e: any) { failed(sysMsgId, e?.message || String(e)); }
           return 'end';
         },
@@ -1003,7 +1006,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
           if (r.busy) { left = 'line'; waitTurn(sysMsgId, r.error!); return; }
           err = r.error || '알 수 없는 오류';
         }
-        failed(sysMsgId, err);
+        failed(sysMsgId, whyNoFix(err));
       } catch (e: any) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${e?.message || e}`); }
       finally { if (left !== 'line') hold(sysMsgId, left); }   // 줄에 섰으면 줄이 이어서 붙잡는다
     };
@@ -1014,7 +1017,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
         if (r.taskId) { started(sysMsgId, r.taskId); return; }
         if (r.busy) { waitTurn(sysMsgId, r.error!); return; }
         if (fixPlan(r.error!)) { void recover(sysMsgId, r.error!); return; }
-        failed(sysMsgId, r.error!);
+        failed(sysMsgId, whyNoFix(r.error!));
       } catch (error: any) {
         failed(sysMsgId, error.message);
       }

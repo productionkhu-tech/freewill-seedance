@@ -10,14 +10,14 @@ import {
   MODELS, GENERATION_MODES, SEEDANCE_RATIOS, OMNI_RATIO_IDS, OMNI_TASK_NAMES, OUTPUT_FORMAT_LABEL,
   RETURN_LAST_FRAME_MODES, OUTPUT_COUNT_MAX, OMNI_VIDEO_MAX_MB, DRAFT_RESOLUTION, DRAFT_FINAL_RESOLUTION, DRAFT_FINAL_RESOLUTIONS, fourKNeedsGrant,
   modelProvider, modelDurationRange, modelResolutions, modelSupportsDraft, draftEffective, modelOutputFormats,
-  modelOutputFormat, modelRefVideoSec, modelRefAudioSec, refVideoMinSecFor, modelAllowsAudioOnly, modelOmniTasks,
+  modelOutputFormat, modelRefVideoSec, modelRefAudioSec, modelRefVideoMaxPx, refVideoMinSecFor, modelAllowsAudioOnly, modelOmniTasks,
   resolveOmniTask, modelHasFirstLastFrame, modelExtendMaxSrcSec, ratioLockedFor, durationLockedFor, modelGrant,
   modeRefCaps, omniTaskRefCaps, settingsDefaultsFor, defaultSettings, GenerationMode, GenerationSettings,
 } from '../store';
 import { PICKABLE_MODELS } from '../store';
 import { kindOf, isPowerShellObject, POWERSHELL_HINT, AGENT_LIMITS } from './agent-input';
 import { resolveModelId } from './model-access';
-import { API_LIMITS } from './utils';
+import { API_LIMITS, videoPxLabel } from './utils';
 
 export const AGENT_MODES: GenerationMode[] = GENERATION_MODES.map(m => m.id);
 
@@ -200,6 +200,7 @@ export function buildAgentManual(appVersion: string): AgentManual {
       outputFormats: modelOutputFormats(id).map(f => ({ id: f, label: OUTPUT_FORMAT_LABEL[f] || f, isDefault: f === modelOutputFormat(id) })),
       audioOnly: !omni && modelAllowsAudioOnly(id),
       refSeconds: omni ? null : { video: modelRefVideoSec(id), audio: modelRefAudioSec(id) },
+      refVideoMaxPx: omni ? null : modelRefVideoMaxPx(id),
       modes: omni ? null : GENERATION_MODES.map(mo => ({
         id: mo.id, name: mo.name, refs: modeRefCaps(id, mo.id),
         ratioLocked: ratioLockedFor(id, mo.id), durationLocked: durationLockedFor(id, mo.id),
@@ -264,6 +265,7 @@ function manualText(m: any, version: string): string {
     if (x.provider === 'gemini') L.push(`- 비율: ${m.ratios.omni.join(' / ')} · 오디오 레퍼런스 없음 · generate_audio 설정 없음`);
     if (x.draft) L.push(`- 초안(draft): 있음${x.draft.defaultOn ? '(기본 켬)' : ''} — ${x.draft.resolution} 로 나가고, 고른 것만 앱 카드에서 ${(x.draft.finals || [x.draft.final]).join(' 또는 ')} 본편(card.final 의 resolution, 기본 ${x.draft.final})`);
     if (x.outputFormats.length) L.push(`- 출력 형식(output_format): ${x.outputFormats.map((o: any) => `${o.id}(${o.label}${o.isDefault ? ', 기본' : ''})`).join(' / ')}`);
+    if (x.refVideoMaxPx) L.push(`- 레퍼런스 영상 크기: ${videoPxLabel(x.refVideoMaxPx)} 상당까지(화소 합 ${x.refVideoMaxPx})`);
     if (x.refSeconds) L.push(`- 레퍼런스 길이: 영상 ${x.refSeconds.video}초 · 오디오 ${x.refSeconds.audio}초까지(각각, 그리고 합계)${x.audioOnly ? ' · 오디오만으로도 생성 가능' : ' · 오디오만으로는 생성 불가 — 이미지나 영상을 함께'}`);
     if (x.modes) {
       L.push('', '| mode | 이름 | 레퍼런스 | 고정 · 조건 | 마지막 프레임 |', '|---|---|---|---|---|');

@@ -40,6 +40,9 @@ const all = await until(() => Promise.all([1, 2, 3, 4, 5].map((i) => card(pid, `
 const seq = (await marks()).filter((m) => m.text.startsWith('BLQ'));
 const again = seq.slice(5), refusedAgain = again.filter((m) => m.what === '429');
 ok('2 다섯 모두 나감 · 처음 다섯 번 뒤로는 맨 앞 하나만 물어봄', all.every((c) => c?.task) && refusedAgain.length === 3 && new Set(refusedAgain.map((m) => m.text.slice(0, 5))).size === 1 && seq.length === 13, { tasks: all.map((c) => !!c?.task), seq: again.map((m) => m.text.slice(0, 4) + ':' + m.what) });
+// 저마다 물으면 우연히 같은 순서가 나올 수 있다(11/25 망가뜨리기가 한 번 못 잡음) — 묻는 사이가 0.4초(20초의 0.8배 ÷ 40) 이상 떨어져야 한 카드만 묻는 것이다. 두 번 만들어진 것도 본다.
+const gaps = again.slice(1, 4).map((m, i) => m.at - again[i].at), made = again.filter((m) => m.what === 'in').map((m) => m.text.slice(0, 4));
+ok('2 묻는 사이가 벌어져 있음(한 카드만 물음) · 두 번 만들어진 것 없음', gaps.length === 3 && gaps.every((g) => g >= 350) && new Set(made).size === made.length && made.length === 5, { gaps, made });
 const ins = again.filter((m) => m.what === 'in').map((m) => +m.text[3]);
 ok('2 줄 선 순서대로 나감', JSON.stringify(ins) === JSON.stringify([...ins].sort((a, b) => a - b)) || ins.length === 5, ins);
 

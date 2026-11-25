@@ -1477,6 +1477,8 @@ const SEEDANCE_25 = {
   // 편집 영상 1 + 오디오 1 도 생성됨. 소리는 레퍼런스를 그대로 붙이지 않고 참고해 새로 만든다(음 높이 지문이 원본 0.12~0.13 → 0.31~0.55 로 레퍼런스 쪽).
   editVidMax: 10, extendVidMax: 10, extendImgMax: 30, extendAudMax: 10,
   refVideoSec: 30.2, refAudioSec: 30.2,
+  // 레퍼런스 영상 화소 합 — 2.5 계열(Flash 포함)만 4096×2160. 2.0 은 기본값 3326×2494(API_LIMITS.video, 2026-11-25 실측).
+  refVideoMaxPx: 4096 * 2160,
   // 2.5 can take reference audio with no image/video alongside it. 2.0 cannot.
   audioOnly: true,
   // mov = H.264 High 4:4:4 + PCM. Chromium plays it — MEASURED, not assumed: readyState 4,
@@ -1596,7 +1598,7 @@ export const OMNI_VIDEO_MAX_MB = 50;
 export const MODELS: {
   id: string; name: string; provider?: 'byteplus' | 'gemini';
   res?: string[]; dur?: [number, number]; imgMax?: number; vidMax?: number; audMax?: number;
-  refVideoSec?: number; refAudioSec?: number;
+  refVideoSec?: number; refAudioSec?: number; refVideoMaxPx?: number;
   // Shortest reference video the EDITING task accepts, when the model states one.
   editRefVideoMinSec?: number;
   // 편집 · 연장에 붙일 수 있는 수(26.10.2801~ · 연장 오디오 2802~). 없으면 예전 그대로 — 편집 영상 1(새로 넣으면 교체) · 연장 영상 3 ·
@@ -1782,6 +1784,9 @@ export function modelAudioMax(model: string): number {
 }
 export function modelRefVideoSec(model: string): number {
   return MODELS.find(m => m.id === model)?.refVideoSec ?? API_LIMITS.video.maxDuration;
+}
+export function modelRefVideoMaxPx(model: string): number {
+  return MODELS.find(m => m.id === model)?.refVideoMaxPx ?? API_LIMITS.video.maxTotalPx;
 }
 // Shortest reference video for THIS model in THIS mode. Only editing declares a floor, and
 // only on models that state one — every other combination keeps the API-wide 2s, so no

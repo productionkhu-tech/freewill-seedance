@@ -1,16 +1,34 @@
 // 오류 → 사람 말(한국어). 카드 · 미니 창 · 에이전트가 같이 쓴다(26.11.2301~ ChatArea 에서 옮김). UI · 스토어를 들이지 말 것.
 
+import { PERSONAL } from './edition';
+
 // 실사 얼굴 차단 때 쓸 수 있는 길(BytePlus 문서 seedance-portrait-asset-guide, 2026-11-19 — 오류 코드
 // InputImageSensitiveContentDetected.PrivacyInformation · InputVideoSensitiveContentDetected.PrivacyInformation, HTTP 400).
 // 실존 인물만이 아니다 — GPT 이미지로 만든 실사풍 AI 인물도 막혔다(11/23 실측). 가장 쉬운 길(라이브러리 인증)을 먼저 적는다.
 // 실존 인물(배우 본인) 에셋을 만드는 곳 — BytePlus 콘솔 Model Playground › 아래 My assets › Real-human(문서 upload-real-person-portrait-assets 의 링크, 11/24).
 export const REAL_HUMAN_URL = 'https://ai.byteplus.com/ark/region:ap-southeast-1/experience/gen_video?model=dreamina-seedance-2-0-260128';
-const FACE_WAYS = '얼굴은 이렇게 넣을 수 있어요:\n'
-  + '  ① AI 로 만든 가상 인물이면 — 레퍼런스 칸이나 어셋 라이브러리 인물 카드의 방패를 눌러 \'인증\' 이 되면, 그 사진을 @이름 으로 부르거나 첫 · 끝 프레임 · 레퍼런스 칸에 그대로 넣어도 앱이 알아서 에셋으로 보내요(한 번 해 두면 계속).\n'
-  + '  ② BytePlus 에셋 ID — 공개 디지털 캐릭터 · 본인 인증한 실존 인물 등. 설정 패널 "URL / Asset ID로 추가" 에 asset-… ID 를 넣으세요(지금 프로젝트 코드의 BytePlus 프로젝트에 등록된 것만).\n'
-  + '  ③ 같은 계정이 30일 안에 만든 원본 결과물 — Seedance 영상 · 그 영상의 마지막 프레임(마지막 프레임 받기) · Seedream 5.0 텍스트→이미지. 받은 그대로여야 해요(캡처 · 편집 · 재압축하면 안 받아요).\n'
-  + '  ④ 실사가 아닌(스타일라이즈) 캐릭터 이미지.\n'
-  + `  ⑤ 실존 배우 본인 — BytePlus 콘솔 Model Playground › 아래 My assets › Real-human 에서 에셋 그룹을 만들고 QR 로 배우가 본인 인증 · 업로드 → 그 asset ID 를 ② 처럼(${REAL_HUMAN_URL}).`;
+const FACE_WAYS = (personal: boolean) => [
+  ...(personal ? [] : ['AI 로 만든 인물 — 레퍼런스 칸이나 어셋 라이브러리 카드의 방패를 눌러 직접 인증할 수도 있어요(한 번 하면 계속).']),
+  'BytePlus 에셋 ID — 설정 패널 "URL / Asset ID로 추가" 에 asset-… 를 넣으세요(지금 키의 BytePlus 프로젝트에 등록된 것만).',
+  '같은 계정이 30일 안에 만든 원본 — Seedance 영상 · 그 영상의 마지막 프레임 · Seedream 5.0 텍스트→이미지. 받은 그대로여야 해요(캡처 · 편집 · 재압축 안 됨).',
+  '실사가 아닌(스타일라이즈) 캐릭터 이미지.',
+  `실존 배우 본인 — BytePlus 콘솔 Model Playground › My assets › Real-human 에서 그룹을 만들고 배우가 QR 로 본인 인증 · 업로드한 뒤 그 asset ID 를 넣으세요(${REAL_HUMAN_URL}).`,
+];
+// 자동 인증을 못 한 이유는 원문 뒤에 이 표로 붙는다(send-request failed).
+const NO_CERT = '[자동 인증 못 함]';
+/** 실사 얼굴 차단(Seedance 2.0 · 2.5 공통)이면 카드가 나눠 그릴 조각 — 한 줄 설명 · 다음에 할 일(또는 자동 인증을 못 한 이유) · 다른 길 · 원문. 아니면 null. */
+export function faceBlock(error: string): { head: string; next: string; ways: string[]; raw: string } | null {
+  if (!/real person|PrivacyInformation/.test(error || '')) return null;
+  const [raw, why] = error.split(NO_CERT).map((x) => x.trim());
+  // 코드에 Image / Video 가 들어 있어 어느 쪽 레퍼런스인지 말해 준다.
+  const which = /InputVideo|input video/i.test(raw) ? '레퍼런스 영상' : /InputImage|input image/i.test(raw) ? '레퍼런스 이미지' : '레퍼런스';
+  return {
+    head: `${which}에 실사 얼굴이 있어 BytePlus 가 막았어요(AI 로 만든 실사풍 인물도 포함 · 과금 없음).`,
+    // 이유가 없는 카드 = 자동 인증이 생기기 전(26.11.1802 까지)에 막힌 카드이거나 만드는 도중 실패 — 다시 만들면 자동 인증을 거친다. 개인판에는 자동 인증이 없다.
+    next: why ? `자동 인증도 하지 못했어요 — ${why}` : PERSONAL ? '아래 방법 가운데 하나로 넣어 주세요.' : '재생성(✦)하면 앱이 자동으로 인증해서 보내요.',
+    ways: FACE_WAYS(PERSONAL), raw,
+  };
+}
 
 /** BytePlus 응답 몸통 → 카드에 남길 오류 글. 코드가 메시지에 없으면 '코드: 메시지' 로 — 원인(PrivacyInformation 등)은 코드에 있다(26.11.2301~). */
 export function byteplusErrorText(data: any): string {
@@ -59,14 +77,8 @@ function translateErrorBase(error: string): string {
   if (error.includes('Input blocked') || error.includes('Prohibited Use'))
     return '프롬프트가 Google 정책 필터에 막혔습니다. (생성 전 단계라 과금은 없습니다.)\n"연장 / 늘려줘 / extend" 처럼 작업을 지시하면 거의 항상 막힙니다 — 이어질 장면을 묘사로 적어주세요.\n장면 묘사인데도 막혔다면 필터가 원본 영상까지 함께 본 경우입니다. 같은 문장이 다른 영상에서는 통과하니, 문장을 조금 바꾸거나 다시 시도해보세요.';
   if (error.includes('resource download failed')) return '리소스 다운로드 실패: 이미지에 접근할 수 없습니다. 파일을 다시 업로드해주세요.';
-  // 실사 얼굴 차단(Seedance 2.0 · 2.5 공통). 코드에 Image / Video 가 들어 있어 어느 쪽 레퍼런스인지 말해 준다.
-  if (error.includes('real person') || error.includes('PrivacyInformation')) {
-    const which = /InputVideo|input video/i.test(error) ? '레퍼런스 영상' : /InputImage|input image/i.test(error) ? '레퍼런스 이미지' : '레퍼런스 이미지 · 영상';
-    // 26.11.24~ 앱이 막힌 사진 · 영상을 자동으로 인증해 같은 카드로 다시 보낸다(send-request). 이 글이 보이면 그것도 안 된 경우다 — 이유는 원문 끝 [자동 인증 못 함].
-    return `실사 얼굴 — 아직 인증(등록)되지 않은 인물: ${which}에 실사 얼굴(AI 로 만든 인물 포함)이 있어 BytePlus 가 막았어요(Seedance 2.0 · 2.5 는 실사 얼굴이 든 레퍼런스를 바로 받지 않아요).\n`
-      + '앱이 자동으로 인증해 다시 보내는데, 이 카드는 그게 안 된 경우예요(이유는 아래 원문 끝).\n'
-      + FACE_WAYS;
-  }
+  const face = faceBlock(error);
+  if (face) return [face.head, face.next, '다른 방법:', ...face.ways.map((w) => `  · ${w}`)].join('\n');
   // 저작권(유명 인물 · 캐릭터 · 장면) — PrivacyInformation(아직 인증 안 된 인물)과 다르다. 에셋 인증으로 풀리지 않고, 앱도 자동 인증하지 않는다
   // (send-request fixPlan 은 PrivacyInformation 만 본다). 문서 error-codes(11/24): Input{Image,Video,Audio}SensitiveContentDetected.PolicyViolation
   // = "may be related to copyright restrictions".
@@ -109,6 +121,9 @@ function translateErrorBase(error: string): string {
   if (/draft[_ ]?task/i.test(error)) return 'Draft → 본편 요청이 거절되었습니다.\nDraft는 만든 뒤 14일(2026-10-29 오전 9시 전에 만든 Draft는 7일)까지만 본편으로 만들 수 있습니다. 아래 원문을 확인해주세요.';
   // 4k is flagship-only: Fast/Mini reject it at parameter validation, before a task exists.
   if (error.includes('parameter resolution') && error.includes('not valid')) return '이 모델은 선택한 해상도를 지원하지 않습니다. 4K는 Seedance 2.0(플래그십) 전용입니다.';
+  // 2.5 에 넣은 4096×2160 영상을 그대로 두고 2.0 으로 바꿔 보냈을 때(붙일 때의 검사를 지나간 것) — 생성 전 거절이라 과금 없음.
+  const px = /video pixel count[^.]*less than or equal to (\d+)/i.exec(error);
+  if (px) return `레퍼런스 영상 해상도 초과: 이 모델은 ${Number(px[1]) >= 8847360 ? '4096x2160' : '3840x2160'} 상당까지 받아요.${Number(px[1]) < 8847360 ? ' Seedance 2.5 는 4096x2160 까지예요.' : ''}`;
   if (error.includes('not valid')) return `잘못된 파라미터: ${error}`;
   if (error.includes('timeout') || error.includes('ETIMEDOUT')) return '요청 시간 초과: 네트워크 연결을 확인해주세요.';
   if (error.includes('Failed to fetch') || error.includes('NetworkError')) return '네트워크 오류: 인터넷 연결을 확인해주세요.';
