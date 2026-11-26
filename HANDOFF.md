@@ -692,6 +692,9 @@ BytePlus 가 준 **데모 엔드포인트**. 약관이 **엔드포인트 공유 
 
 ### 5-8. 실존 인물 얼굴 · BytePlus 에셋(asset://) · 신뢰 결과물 (26.11.2301~)
 
+> **배포 2026-11-26**: 게이트웨이(버전 `7818e4a5`, 배포 전 떠 있던 판 = 저장소 10/8 판 확인) → `BP_ASSET_AK` · `BP_ASSET_SK` 넣음(`setup-secrets.mjs --only-bp-asset-key`,
+> 넣은 뒤에도 코드 = 저장소) → 앱 **26.11.2601** 회사판 · 개인판 공개(커밋 a4056e8). 코드 이름 26.11.2301 은 배포 전 작업 이름이고 실제 판은 2601 이다.
+
 BytePlus 문서 셋(2026-11-19~20 갱신 — 본문이 스크립트로 그려져 WebFetch 로는 빈 껍데기만 온다, 브라우저로 읽을 것):
 `seedance-portrait-asset-guide` · `upload-real-person-portrait-assets` · `private-virtual-avatar-library-guide`(ModelArk/2333565) · `error-codes`.
 - **Seedance 2.0 · 2.5 는 실존 인물 얼굴이 든 레퍼런스 이미지 · 영상을 바로 받지 않는다.** 오류 `InputImageSensitiveContentDetected.PrivacyInformation`
@@ -852,7 +855,9 @@ lib/bp-assets.ts 가 처리 중이면 몇 초마다 /api/bp-assets/status ─▶
   - 생성과 분리: 보낼 때는 Active 인 것만 asset:// 로 바꾸고, 프로젝트 이름은 '인증 완료' 사진이 있을 때만 3초까지 기다린다(`bpScopeQuick`) — 모르면
     예전처럼 사진을 올린다. 인증 완료가 있는 PC 는 켤 때 프로젝트 이름을 한 번 미리 받는다(App). 등록 기록이 없는 PC 는 켤 때 · 라이브러리 · 보내기 모두 호출 0.
     등록은 보내기를 기다리게 하지 않고, 보내기도 등록을 기다리지 않는다.
-- **한도 · 다시 하기**: 지금 무료 Entry(에셋 50 · 분당 3). 속도 한도(429 · Throttl · FlowLimit · TooManyRequests …)만 'retry'(25초부터 두 배씩, 5분까지) —
+- **한도 · 다시 하기**: **2026-11-26 부터 Advanced**(에셋 · 그룹 100만 · CreateAsset 분당 120, 결제 사용자 확인). 확인법(무료 · 읽고 지움): 사람 없는 색 그림으로
+  시험 에셋 49개를 한꺼번에 — 4.2초에 49개 모두 Active, 계정 합 52(무료면 분당 3 · 50개에서 막힘) → 만든 것 · 그룹 지움(scratchpad `portrait/bp/tier-check.mjs`).
+  등급을 알려 주는 API 는 없다(문서: 등급에 따라 다른 것은 CreateAsset 횟수와 보관 개수뿐). 그 전엔 무료 Entry(에셋 50 · 분당 3). 속도 한도(429 · Throttl · FlowLimit · TooManyRequests …)만 'retry'(25초부터 두 배씩, 5분까지) —
   개수 한도(QuotaExceeded · AssetLimit 같은 이름)는 '등록 실패 + 이유'(끝없이 다시 하지 않게). **저절로 다시 하기는 'retry' 사진만**(같은 인물의 실패 사진은
   사람이 누를 때만 — 계속 거절되는 사진이 에셋을 계속 만들지 않게). 셈은 둘: `tries`(기다림 늘리기, 한도 · Busy 포함, 끝없음) · `fails`(이유가 붙은 실패만 —
   게이트웨이 오류 · 업로드 실패 · 원본 없음 · 오프라인). fails 가 8 을 넘으면 '등록 실패 + 마지막 이유'. 한도 대기만으로는 실패가 되지 않는다(인물 다섯 × 열 장을
