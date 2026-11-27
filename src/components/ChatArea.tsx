@@ -799,13 +799,22 @@ const agentReportSure = (kind: 'jobs' | 'commands', id: string, body: Record<str
 const agentReport = (id: string, body: Record<string, unknown>) => agentReportSure('jobs', id, body);
 
 // 카드 상태 → 에이전트에게 보여 줄 모양. 카드를 지웠으면 missing.
+// 막혀서 기다리는 카드(bpFix)가 왜 기다리나 — 에이전트에게 알린다(26.11.2701~, MCP 설명서와 짝). 아직 BytePlus 작업이 없어 과금 없음.
+//   certifying: 실사 얼굴이라 그 사진 · 영상을 에셋으로 인증 중(또는 지워진 에셋을 다시 등록 중) · queue_full: BytePlus 대기열이 꽉 차 줄에 섬(tries = 물어본 횟수)
+const waitingOf = (m: any) => (m?.status === 'queued' && !m.taskId && m.bpFix
+  ? (m.bpFix.kind === 'busy' ? { waiting: 'queue_full', tries: m.bpFix.tries || 1 } : { waiting: 'certifying' }) : {});
+// 기다리는 카드 취소 — 카드의 '취소' 단추와 에이전트 card.cancel 이 같이 쓴다. 기다리던 쪽(자동 인증 · 대기열 줄)은 카드가 failed 인 것을 보고 더 보내지 않는다.
+const cancelWaitingCard = (projectId: string, m: any) => useAppStore.getState().updateMessage(projectId, m.id, {
+  status: 'failed', content: '취소함', bpFix: undefined, endTime: Date.now(),
+  error: m.bpFix?.kind === 'busy' ? '대기열을 기다리다 취소했어요 — 보내지 않았어요(거절된 요청은 과금이 없어요).' : '자동 인증 중에 취소했어요 — 다시 보내지 않았어요.',
+} as any);
 const agentCards = (projectId: string, ids: string[]) => {
   const msgs = useAppStore.getState().projects.find(p => p.id === projectId)?.messages || [];
   return ids.map(id => {
     const m = msgs.find(x => x.id === id) as any;
     if (!m) return { id, status: 'missing' };
     return {
-      id, status: m.status || 'queued',
+      id, status: m.status || 'queued', ...waitingOf(m),
       ...(m.taskId ? { taskId: m.taskId } : {}),
       ...(m.videoUrl ? { videoUrl: m.videoUrl } : {}),
       ...(m.error ? { error: String(m.error).slice(0, 500) } : {}),
@@ -1742,7 +1751,7 @@ const MessageCard = memo(function MessageCard({ msg, projectId, divider, divider
                       </p>
                         <p className="col-start-2 @xs:col-end-4 row-start-2 text-[12px] leading-[18px] text-amber-600 mt-0.5 break-keep [overflow-wrap:anywhere] @max-[9rem]:hidden">{busy ? `자리가 나면 이 카드로 저절로 보내요 — 거절된 요청은 과금이 없어요. 지금까지 ${fx.tries || 1}번 물어봤어요.` : `끝나면 이 카드로 저절로 다시 보내요 — 보통 10초 안팎, 막힌 요청은 과금이 없어요.${fx.kind === 'face' ? ' AI 로 만든 가상 인물이 아니면(실존 인물) 취소해 주세요.' : ''}`}</p>
                     <button
-                      onClick={() => useAppStore.getState().updateMessage(projectId, msg.id, { status: 'failed', content: '취소함', error: busy ? '대기열을 기다리다 취소했어요 — 보내지 않았어요(거절된 요청은 과금이 없어요).' : '자동 인증 중에 취소했어요 — 다시 보내지 않았어요.', bpFix: undefined, endTime: Date.now() } as any)}
+                      onClick={() => cancelWaitingCard(projectId, msg)}
                       className="col-start-2 row-start-3 justify-self-start -ml-2 @xs:col-start-3 @xs:row-start-1 @xs:ml-0 @xs:-my-[3px] h-[26px] whitespace-nowrap text-[12px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2 rounded-md transition-colors"
                     >
                       취소
@@ -3854,7 +3863,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const agentCardView = (m: any, projectName?: string) => {
     const us = m.usedSettings || {};
     return {
-      id: m.id, status: m.status || 'queued', created: m.timestamp,
+      id: m.id, status: m.status || 'queued', ...waitingOf(m), created: m.timestamp,
       ...(projectName ? { project: projectName } : {}),
       prompt: String(m.promptText || '').slice(0, 600),
       settings: m.usedSettings ? { model: us.model, mode: us.mode, ...(modelProvider(us.model || '') === 'gemini' ? { omniTask: us.omniTask } : {}),
@@ -4128,6 +4137,15 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
     },
     'card.cancel': async (a) => {
       const { project: p, card: m } = agentFindCard(a.id);
+      // 자동 인증 · 대기열을 기다리는 카드(아직 BytePlus 작업 없음 — 26.11.2701~): 화면의 '취소' 와 같다. 기다리던 쪽이 마침 보내는 중이었으면
+      // 그 요청은 이미 나갔다 — 잠깐 뒤 다시 보고 그렇다고 말한다(과금).
+      if (!m.taskId && m.status === 'queued' && (m as any).bpFix) {
+        cancelWaitingCard(p.id, m);
+        await new Promise(r => setTimeout(r, 1500));
+        const cur = useAppStore.getState().projects.find(x => x.id === p.id)?.messages.find(x => x.id === m.id) as any;
+        if (cur?.taskId) throw new Error(`취소하는 사이 이미 BytePlus 로 나갔습니다(task ${cur.taskId}) — 지금 ${cur.status}, 과금됩니다.`);
+        return { id: m.id, status: 'failed', canceled: 'waiting' };
+      }
       if (!m.taskId || m.status !== 'queued') throw new Error(`대기 중(queued)인 카드만 취소할 수 있습니다 — 지금 ${m.status || 'queued'}`);
       const warnings: string[] = [];
       agentWarnRef.current = warnings;

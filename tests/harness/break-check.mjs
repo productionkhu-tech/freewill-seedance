@@ -34,6 +34,8 @@ const BREAKS = [
   ['2.5 영상 화소를 2.0 값으로 막음', 'error-card', 'src/store.ts', '  refVideoMaxPx: 4096 * 2160,', ''],
   ['설정 패널만 화소 한도를 안 넘김', 'error-card', 'src/components/SettingsPanel.tsx', 'refVidMin, modelRefVideoMaxPx(settings.model))', 'refVidMin)'],
   ['고칠 수 없는 칸의 이유를 안 남김', 'error-card', S, 'const whyNoFix = (err: string) => (!PERSONAL', 'const whyNoFix = (err: string) => (false as boolean'],
+  ['에이전트에게 기다리는 이유를 안 알림', 'agent-wait', 'src/components/ChatArea.tsx', "const waitingOf = (m: any) => (m?.status === 'queued' && !m.taskId && m.bpFix", "const waitingOf = (m: any) => (false && m.bpFix"],
+  ['에이전트가 기다리는 카드를 못 멈춤(옛 동작)', 'agent-wait', 'src/components/ChatArea.tsx', "if (!m.taskId && m.status === 'queued' && (m as any).bpFix) {", "if (false as boolean) {"],
   ['본편이 대기열에 막히면 실패', 'busy-line', 'src/components/ChatArea.tsx', "if (isLineFull(res.status, data)) { busyError = byteplusErrorText(data); return 'busy'; }", ''],
   ['정리 뒤 옛 번호를 돌려줌(옛 버그)', 'evict', 'worker/seedance-gateway.js', 'try { await env.SD_TOKENS.delete(`ast:lock:${project}:${x.Name}`); } catch {}', ''],
 ];

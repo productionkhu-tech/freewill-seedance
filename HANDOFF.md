@@ -713,6 +713,9 @@ BytePlus 문서 셋(2026-11-19~20 갱신 — 본문이 스크립트로 그려져
   에이전트 refs `{ "asset", "type": "image"|"video"|"audio" }`(AGENT_FEATURES `asset_refs`) — 둘 다 `attachAssetRefTo`(send-request) 한 함수로 칸 수 · 역할 · 중복을 본다.
   에셋은 캐시 · R2 · 재업로드를 안 거치고 주소 그대로 나간다. 화면은 `<img>` 로 그리지 않는다(`imgSrcOk` · `AssetTile` — 브라우저는 asset:// 을 못 연다).
   재사용 · 재생성(`prepareReuse`) · 받은 영상의 설정 상자는 asset:// 를 그대로 되살린다. 옴니는 받지 않는다(거절 + 이유).
+- **에이전트에게 기다리는 이유(26.11.2701~, AGENT_FEATURES `wait_reason`)**: 작업 상태 `messages[]` · `cards.list` · `card.get` 의 queued 카드에 `waiting`
+  (`certifying` = 자동 인증 중 · `queue_full` + `tries` = BytePlus 대기열 줄) — ChatArea `waitingOf`. `card.cancel` 은 기다리는 카드도 멈춘다(`cancelWaitingCard`, 화면 '취소' 와 같은 함수 ·
+  마침 나가던 중이었으면 1.5초 뒤 보고 '이미 나갔다' 고 말함). 설명서의 얼굴 문장(영상도 자동) · 대기열 · 끊김 문구도 이때 고침. MCP 회신 `D:\연구6.10.02 api mcp\시댄스앱_회신_2026-11-27.md`. 시험 `agent-wait`.
 - **앱이 받은 영상 = 원본 + 설정 상자**(§6 '영상에 생성 설정 넣기'). 그 파일을 다시 레퍼런스로 넣으면 R2 에 올리기 직전에 상자를 떼어 원본 바이트로 보낸다
   (`src/lib/settings-box-strip.ts`, server `/api/reupload` · `/api/reupload-from-path` 의 `originalBytesForByteplus`). 캐시 파일 · cacheId · '수정됐나' 검사는 그대로.
 - R2 에 다시 올린 원본 사본도 '신뢰' 로 받는다(11/23 실측 — 영상 v2v, 아래 '실제 시험'. 이미지 사본은 아직 안 해 봄).

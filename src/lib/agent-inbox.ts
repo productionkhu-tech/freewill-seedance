@@ -27,7 +27,8 @@ export const AGENT_MODES: GenerationMode[] = GENERATION_MODES.map(m => m.id);
 //     projects.list 의 프로젝트마다 billing 은 그 프로젝트로 보낼 때의 코드(지금은 모두 같은 공동 코드).
 //   agent_model_defaults (26.11.601~, 나노바나나와 같은 이름): 빠진 설정은 모델 기본값 — 프로젝트 설정을 따르지 않는다. model 이 없으면 거절.
 // asset_refs(26.11.2301~): refs 에 { asset, type } — BytePlus 에셋(asset://)을 주소 그대로 보낸다. 없는 옛 앱은 bad_field 로 거절한다.
-export const AGENT_FEATURES = ['send-any-project', 'agent_model_defaults', 'asset_refs'];
+// wait_reason(26.11.2701~): queued 카드에 waiting('certifying' | 'queue_full') · tries, card.cancel 이 기다리는 카드도 취소.
+export const AGENT_FEATURES = ['send-any-project', 'agent_model_defaults', 'asset_refs', 'wait_reason'];
 
 // 에이전트 요청의 설정 — 요청에 적힌 값과 모델 기본값만으로 만든다. ★ 프로젝트의 지금 설정은 읽지 않는다(사용자 결정 2026-11-06
 // "앱설정은 과금만 따르는 거임"). 예전엔 그 위에 얹어서, 같은 요청이 프로젝트에 남은 값에 따라 3편이 되거나 소리가 꺼진 채 나갔다.
@@ -150,14 +151,16 @@ export const AGENT_COMMANDS: { name: string; args: string; does: string; costs?:
   { name: 'card.download', args: '{ "id": "카드 id" }', does: '영상을 다운로드 폴더에 저장한다(카드의 다운로드 버튼과 같음) — 저장한 경로를 돌려준다' },
   { name: 'card.final', args: '{ "id": "초안 카드 id", "resolution"?: "1080p" | "4k" }', does: '초안(480p) 카드로 본편을 만든다(같은 시드 · 구도, 기본 1080p · 4k 는 그 코드에 2.5 4K 권한이 있을 때만 — 없으면 낮추지 않고 거절) — 과금된다. 과금은 초안을 만든 코드다(결과의 billing — 지금 코드와 다를 수 있다). 시작하지 못하면 오류로 돌아온다("응답이 없습니다" 가 들어 있으면 만들어졌는지 모르는 것 — 앱에서 카드를 확인)', costs: true },
   { name: 'card.regenerate', args: '{ "id": "카드 id" }', does: '그 카드와 같은 설정 · 레퍼런스 · 프롬프트로 한 편 다시 만든다(묶음 개수는 따르지 않는다) — 그 카드의 프로젝트로(열지 않아도 됨) · 앱의 프로젝트 코드로 과금된다(결과의 billing). 그 코드에 2.5 4K 권한이 없는데 2.5 4K 카드면 낮추지 않고 거절한다', costs: true },
-  { name: 'card.cancel', args: '{ "id": "카드 id" }', does: '대기 중(queued) 작업을 취소한다 — 이미 돌기 시작했으면 앱이 거절한다(그때는 과금된다)' },
+  { name: 'card.cancel', args: '{ "id": "카드 id" }', does: '대기 중(queued) 작업을 취소한다 — 자동 인증 · 대기열을 기다리는 카드(waiting 이 있는 것)도 된다(아직 BytePlus 에 안 나가 과금 없음). 이미 돌기 시작했으면 앱이 거절한다(그때는 과금된다)' },
 ];
 
 const RULES = [
   '보낼 프로젝트는 요청의 projectId(projects.list 의 id — 권장) 또는 project(사이드바 이름 그대로)로 정한다. 앱 화면(열린 프로젝트 · 작성 칸 · 설정 · 레퍼런스 칸)은 바뀌지 않고, 카드는 그 프로젝트에 생긴다. 같은 이름이 둘이면 보내지 않고 후보 id 를 돌려준다 — projectId 로 다시. 프로젝트를 안 적으면 보내지 않는다.',
   '설정은 요청에 적은 값과 모델 기본값으로만 정한다 — 앱 · 프로젝트의 지금 설정은 읽지 않는다(앱에서 따르는 것은 과금 코드뿐). model 은 꼭 적는다(없으면 보내지 않는다). 안 적은 값은 "설정 키" 의 기본값이다.',
   '레퍼런스는 프롬프트에서 [Image N] · [Video N] · [Audio N] 으로 부른다 — 번호는 refs 에 넘긴 순서대로 종류별로 센다. 첫·끝 프레임은 refs 의 role(first_frame / last_frame)로 정한다.',
-  '실사 얼굴(실존 인물처럼 보이는 AI 인물 포함 — 그림체는 괜찮다)이 든 레퍼런스 이미지 · 영상은 Seedance 2.0 · 2.5 가 받지 않는다(BytePlus 오류 PrivacyInformation). 이미지가 막히면 앱이 그 사진을 BytePlus 에셋으로 자동 인증하고 같은 카드로 다시 보낸다(26.11.24~ — 카드는 잠깐 queued, 보통 10초 안팎 · 막힌 요청은 과금 없음 · 인증 명령은 없다). 영상의 얼굴 · 인증이 실패한 사진은 실패로 돌아온다. 인물을 어셋 라이브러리에 넣고 @{이름} 으로 부르면 처음부터 막히지 않는다 — 그 사진이 \'BytePlus 인증 완료\'면 앱이 알아서 에셋으로 보낸다. 인증한 그 사진 파일을 refs 경로로 넘겨도(첫 · 끝 프레임 포함) 바이트가 같으면 앱이 에셋으로 바꿔 보낸다 — 캡처 · 편집본은 다른 사진이다. 에셋 ID 를 직접 넘길 때는 refs 에 { "asset": "asset-…", "type": "image" | "video" | "audio" }(공개 디지털 캐릭터 · 가상 인물 · 인증한 실존 인물, 지금 프로젝트 코드의 BytePlus 프로젝트에 등록된 것만 — 다른 프로젝트 것은 실패). 에셋도 위 [Image N] 번호에 순서대로 들어간다 — 프롬프트에 에셋 ID 를 쓰지 않는다. 같은 계정이 30일 안에 만든 원본 결과물(card.download 로 받은 영상 · 마지막 프레임 이미지 · Seedream 5.0 이미지)은 경로로 넘겨도 된다 — 캡처 · 편집 · 재압축한 것은 안 된다. Omni 는 에셋을 받지 않는다.',
+  '실사 얼굴(실존 인물처럼 보이는 AI 인물 포함 — 그림체는 괜찮다)이 든 레퍼런스 이미지 · 영상은 Seedance 2.0 · 2.5 가 받지 않는다(BytePlus 오류 PrivacyInformation). 사진이든 영상이든 막히면 앱이 그것을 BytePlus 에셋으로 자동 인증하고 같은 카드로 다시 보낸다(26.11.2601~ · 인증 명령은 없다 — 할 일 없음). 그동안 카드는 queued 이고 waiting 이 "certifying" — 보통 10초 안팎, 영상이거나 한도에 걸리면 몇 분. 막힌 요청은 과금이 없다. 인증이 안 되면(실존 배우로 판단 · 앱에 원본이 없는 칸 등) failed 이고 error 끝에 "[자동 인증 못 함] 이유". …PolicyViolation(저작권 · 유명인 · 유명 캐릭터)은 인증으로 풀리지 않아 바로 failed — 소재를 바꿔야 한다. 인물을 어셋 라이브러리에 넣고 @{이름} 으로 부르면 처음부터 막히지 않는다 — 그 사진이 \'BytePlus 인증 완료\'면 앱이 알아서 에셋으로 보낸다. 인증한 그 사진 파일을 refs 경로로 넘겨도(첫 · 끝 프레임 포함) 바이트가 같으면 앱이 에셋으로 바꿔 보낸다 — 캡처 · 편집본은 다른 사진이다. 에셋 ID 를 직접 넘길 때는 refs 에 { "asset": "asset-…", "type": "image" | "video" | "audio" }(공개 디지털 캐릭터 · 가상 인물 · 인증한 실존 인물, 지금 프로젝트 코드의 BytePlus 프로젝트에 등록된 것만 — 다른 프로젝트 것은 실패). 에셋도 위 [Image N] 번호에 순서대로 들어간다 — 프롬프트에 에셋 ID 를 쓰지 않는다. 같은 계정이 30일 안에 만든 원본 결과물(card.download 로 받은 영상 · 마지막 프레임 이미지 · Seedream 5.0 이미지)은 경로로 넘겨도 된다 — 캡처 · 편집 · 재압축한 것은 안 된다. Omni 는 에셋을 받지 않는다.',
+  'BytePlus 대기열이 꽉 차면(동시 작업 한도 — 회사 계정 전체 합산) 카드는 실패하지 않고 queued 로 줄을 선다 — waiting 이 "queue_full", tries 는 물어본 횟수(26.11.2601~). 거절된 요청은 과금이 없고, 자리가 나면 같은 카드로 저절로 나간다 — 몇 분, 길면 몇 시간(6시간 넘으면 failed). 같은 것을 다시 보내지 말 것(나중에 둘 다 만들어진다). 그만두려면 card.cancel. 앱을 끄면 기다리던 카드는 failed 로 남고 저절로 보내지 않는다.',
+  '보내다 연결이 끊긴 실패는 error 로 가른다 — "요청이 나가지 않아 과금이 없어요" 면 다시 보내도 되고, "과금됐을 수 있어요" 면 BytePlus 가 받았는지 모르니 바로 다시 보내지 말고 사람에게 확인한다(26.11.2601~ 앱이 연결 전에 끊긴 것만 저절로 다시 보낸다).',
   '어셋 라이브러리의 엘리먼트는 프롬프트에서 @{이름} 으로 부른다 — 프로젝트에 연결된 컬렉션에서 찾고(collection.bind), 앱이 그 엘리먼트 이미지를 레퍼런스로 붙인다. 못 찾으면 보내지 않는다. 레퍼런스 이미지를 받는 모드에서만 된다 — 시댄스는 multimodal_reference · edit_video, 그리고 모드 표에서 extend_video 가 이미지를 받는 모델의 extend_video. Omni 는 reference_to_video.',
   '비율·길이·해상도·개수·오디오는 프롬프트에 쓰지 말고 설정으로 넘긴다.',
   '프롬프트 본문에 소수 길이 지시(예: "4.5초로")를 쓰지 않는다 — BytePlus 가 내부 오류로 실패한다.',
