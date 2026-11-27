@@ -824,21 +824,25 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
 
     // Settings + assets are preserved after send so user can iterate quickly with same setup
 
-    const post = async (): Promise<{ taskId?: string; error?: string; busy?: boolean }> => {
+    // charged: BytePlus 가 거절이라고 답했으면(4xx · 코드) 생성 전 거절이라 none, 서버가 끊김을 알려 왔으면 그 값(store ChatMessage.charged)
+    const post = async (): Promise<{ taskId?: string; error?: string; busy?: boolean; charged?: 'none' | 'unknown' }> => {
       const res = await fetch('/api/byteplus/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const text = await res.text();
-      let data; try { data = JSON.parse(text); } catch { return { error: res.status === 413 ? '파일 크기 초과 (이미지 개당 30MB, 전체 64MB 이하)' : `서버 응답 오류 (${res.status})` }; }
-      if (!res.ok || (data.code !== undefined && data.code !== 0)) return { error: byteplusErrorText(data), busy: isLineFull(res.status, data) };
+      let data; try { data = JSON.parse(text); } catch { return { error: res.status === 413 ? '파일 크기 초과 (이미지 개당 30MB, 전체 64MB 이하)' : `서버 응답 오류 (${res.status})`, ...(res.status === 413 ? { charged: 'none' as const } : {}) }; }
+      if (!res.ok || (data.code !== undefined && data.code !== 0)) {
+        const charged = data.charged === 'none' || data.charged === 'unknown' ? data.charged : (res.ok || (res.status >= 400 && res.status < 500)) ? 'none' as const : undefined;
+        return { error: byteplusErrorText(data), busy: isLineFull(res.status, data), ...(charged ? { charged } : {}) };
+      }
       const taskId = data.id || data.data?.task_id;
       return taskId ? { taskId } : { error: 'Task ID를 받지 못했습니다.' };
     };
     const started = (sysMsgId: string, taskId: string) => {
       const refs = content.filter(c => isAssetUri(c?.[c?.type]?.url)).length;
-      useAppStore.getState().updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, ...(apiText !== plainText ? { apiPrompt: apiText } : {}), bpFix: undefined, ...(refs ? { bpAssetRefs: refs } : {}) } as any);
+      useAppStore.getState().updateMessage(project.id, sysMsgId, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), charged: undefined, canceled: undefined, usedSettings: currentSettings, usedAssets: thumbAssets, usedElementImages, promptText: plainText, promptHtml, ...(apiText !== plainText ? { apiPrompt: apiText } : {}), bpFix: undefined, ...(refs ? { bpAssetRefs: refs } : {}) } as any);
       useAppStore.getState().pollTask(project.id, sysMsgId, taskId);
     };
-    const failed = (sysMsgId: string, error: string) =>
-      useAppStore.getState().updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error, endTime: Date.now(), bpFix: undefined } as any);
+    const failed = (sysMsgId: string, error: string, charged?: 'none' | 'unknown') =>
+      useAppStore.getState().updateMessage(project.id, sysMsgId, { content: '영상 생성 실패', status: 'failed', error, endTime: Date.now(), bpFix: undefined, charged } as any);
     // ── 막히면 고쳐서 같은 카드로 다시(26.11.24~, 사용자 "오류 뜨면 … 자동으로 인증 날려준다고 뜨면 되지 않을까 기다리라고" — 완전 자동을 고름) ──
     //   face: 실사 얼굴(PrivacyInformation, 이미지) → 그 칸 사진을 인증(레퍼런스 칸 방패와 같은 certifyPhoto · @이름 이면 그 인물 registerElement)
     //   gone: 'asset … is not found'(보관함 정리 · 만료로 지워진 에셋, 11/24 실측 문구) → 그 에셋을 쓰던 라이브러리 사진을 '없어짐' 으로 두고 다시 등록
@@ -959,23 +963,23 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
         left: (sent) => { if (sent || (cardOf(sysMsgId) as any)?.bpFix?.kind !== 'face' && (cardOf(sysMsgId) as any)?.bpFix?.kind !== 'gone') hold(sysMsgId, sent ? 'sent' : 'end'); },   // 줄에서 자동 인증으로 넘어갔으면 그쪽이 이어서 붙잡는다
         wanted: () => { const m = cardOf(sysMsgId) as any; return !!m && m.status === 'queued' && m.bpFix?.kind === 'busy'; },
         tell: (n) => mark(n + 1),
-        giveUp: () => failed(sysMsgId, `${error}\n\n[대기열] 6시간 동안 자리가 나지 않아 그만 기다렸어요(거절된 요청은 과금이 없어요).`),
+        giveUp: () => failed(sysMsgId, `${error}\n\n[대기열] 6시간 동안 자리가 나지 않아 그만 기다렸어요(거절된 요청은 과금이 없어요).`, 'none'),
         attempt: async () => {
           const why = recheckBeforePost(project.id, bill.key, currentSettings.model, currentSettings.resolution);
-          if (why) { failed(sysMsgId, `${why}\n\n(BytePlus 대기열을 기다리던 중이었어요 — 거절된 요청은 과금이 없어요)`); return 'end'; }
+          if (why) { failed(sysMsgId, `${why}\n\n(BytePlus 대기열을 기다리던 중이었어요 — 거절된 요청은 과금이 없어요)`, 'none'); return 'end'; }
           try {
             const r = await post();
             if (r.taskId) { started(sysMsgId, r.taskId); return 'sent'; }
             if (r.busy) return 'busy';
             if (fixPlan(r.error!)) { void recover(sysMsgId, r.error!); return 'end'; }
-            failed(sysMsgId, whyNoFix(r.error!));
+            failed(sysMsgId, whyNoFix(r.error!), r.charged);
           } catch (e: any) { failed(sysMsgId, e?.message || String(e)); }
           return 'end';
         },
       });
     };
     const recover = async (sysMsgId: string, firstError: string) => {
-      let err = firstError, left: 'sent' | 'end' | 'line' = 'end';
+      let err = firstError, left: 'sent' | 'end' | 'line' = 'end', ch: 'none' | 'unknown' | undefined = 'none';   // 처음 막힘은 생성 전 거절
       hold(sysMsgId);
       try {
         for (let n = 0; n < MAX_FIX; n++) {
@@ -996,18 +1000,18 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
           const fixed = await p;
           const card = cardOf(sysMsgId);
           if (!card || card.status === 'failed') return;   // 사람이 취소했거나 카드를 지움 — 다시 보내지 않는다
-          if (!fixed.ok) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${fixed.why || ''}`); return; }
+          if (!fixed.ok) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${fixed.why || ''}`, ch); return; }
           // 다시 보내기 직전에도 처음 보낼 때와 같은 확인(26.11.24~) — 인증을 기다린 몇십 초 ~ 몇 분 사이 프로젝트가 지워졌거나 코드가 바뀌었거나
           // 종료됐거나 모델 · 4K 권한이 풀렸으면 보내지 않는다(그 사이 바뀐 코드로 과금되지 않게). 인증은 끝났으니 재생성하면 에셋으로 나간다.
           const why = recheckBeforePost(project.id, bill.key, currentSettings.model, currentSettings.resolution);
-          if (why) { failed(sysMsgId, `${why}\n\n(자동 인증은 끝났어요 — 확인한 뒤 재생성(✦)하면 인증된 사진으로 나가요)`); return; }
+          if (why) { failed(sysMsgId, `${why}\n\n(자동 인증은 끝났어요 — 확인한 뒤 재생성(✦)하면 인증된 사진으로 나가요)`, ch); return; }
           const r = await post();
           if (r.taskId) { left = 'sent'; started(sysMsgId, r.taskId); return; }
           if (r.busy) { left = 'line'; waitTurn(sysMsgId, r.error!); return; }
-          err = r.error || '알 수 없는 오류';
+          err = r.error || '알 수 없는 오류'; ch = r.charged;
         }
-        failed(sysMsgId, whyNoFix(err));
-      } catch (e: any) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${e?.message || e}`); }
+        failed(sysMsgId, whyNoFix(err), ch);
+      } catch (e: any) { failed(sysMsgId, `${err}\n\n[자동 인증 못 함] ${e?.message || e}`, ch); }
       finally { if (left !== 'line') hold(sysMsgId, left); }   // 줄에 섰으면 줄이 이어서 붙잡는다
     };
 
@@ -1017,7 +1021,7 @@ export async function sendRequest(input: SendInput, io: SendIO): Promise<string[
         if (r.taskId) { started(sysMsgId, r.taskId); return; }
         if (r.busy) { waitTurn(sysMsgId, r.error!); return; }
         if (fixPlan(r.error!)) { void recover(sysMsgId, r.error!); return; }
-        failed(sysMsgId, whyNoFix(r.error!));
+        failed(sysMsgId, whyNoFix(r.error!), r.charged);
       } catch (error: any) {
         failed(sysMsgId, error.message);
       }

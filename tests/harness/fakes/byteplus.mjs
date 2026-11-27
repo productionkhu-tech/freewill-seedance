@@ -72,7 +72,7 @@ const server = http.createServer(async (req, res) => {
     const list = clips();
     const clip = state.queue.length ? state.queue.shift() : list[(state.n - 1) % list.length];
     const dly = /DLY(\d+)/.exec(body);   // 시험용: 프롬프트에 DLY12 → 12초 · FAILTEST → 실패
-    state.tasks[id] = { clip, at: Date.now(), delay: dly ? +dly[1] * 1000 : state.delayMs, fail: body.includes('FAILTEST') ? 'test' : body.includes('FACEFAIL') ? 'face' : false };
+    state.tasks[id] = { queued: body.includes('QUEUEDTEST'), clip, at: Date.now(), delay: dly ? +dly[1] * 1000 : state.delayMs, fail: body.includes('FAILTEST') ? 'test' : body.includes('FACEFAIL') ? 'face' : false };
     mark('in');   // 작업이 정말 만들어진 것만
     return send(res, 200, { id });
   }
@@ -88,7 +88,8 @@ const server = http.createServer(async (req, res) => {
     const done = t && Date.now() - t.at >= t.delay;
     if (done && t.fail === 'face') return send(res, 200, { id: m[1], status: 'failed', error: { code: 'InputVideoSensitiveContentDetected.PrivacyInformation', message: 'The request failed because the input video may contain real person.Request ID: fake' } });
     if (done && t.fail) return send(res, 200, { id: m[1], status: 'failed', error: { code: 'OutputVideoSensitiveContentDetected', message: 'fake failure for test' } });
-    return send(res, 200, { id: m[1], status: done ? 'succeeded' : 'running', ...(done ? { content: { video_url: `http://127.0.0.1:${FAKE_PORT}/v/${m[1]}.mp4?sig=x` }, usage: { total_tokens: 1 } } : {}) });
+    return send(res, 200, { id: m[1], status: done ? 'succeeded' : t?.queued ? 'queued' : 'running',   // QUEUEDTEST — BytePlus 대기열에 있는 작업(취소 시험)
+      ...(done ? { content: { video_url: `http://127.0.0.1:${FAKE_PORT}/v/${m[1]}.mp4?sig=x` }, usage: { total_tokens: 1 } } : {}) });
   }
   let vm = /^\/v\/(.+)\.mp4$/.exec(u.pathname);
   if (vm) {

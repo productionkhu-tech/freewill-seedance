@@ -3174,7 +3174,9 @@ async function startServer() {
       res.status(response.status).json(data);
     } catch (error: any) {
       console.error('[BytePlus API] Create Error:', error);
-      res.status(500).json({ error: createFailText(error) });
+      // charged(26.11.2702~, MCP 부탁): none = 요청이 나가지 않음 · unknown = 보내던 중 끊김(BytePlus 가 받았는지 모름). 문구 대신 이 칸으로 가린다.
+      const net = error?.message === 'fetch failed' || error?.name === 'TypeError';
+      res.status(500).json({ error: createFailText(error), ...(neverSent(error) ? { charged: 'none' } : net ? { charged: 'unknown' } : {}) });
     }
   });
 

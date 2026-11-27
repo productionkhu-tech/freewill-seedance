@@ -1042,7 +1042,12 @@ export interface ChatMessage {
   bpAssetRefs?: number;  // 이 요청에 실린 BytePlus 에셋(asset://) 수(26.11.24~ — @이름 · 패널 · 프레임 칸의 '인증 완료' 사진 포함). 오류 글의 에셋 안내용
   // 막혀서 자동으로 고치는 중(26.11.24~, send-request) — face: 실사 얼굴이라 그 사진을 인증 중 · gone: 에셋이 BytePlus 에서 지워져 다시 등록 중.
   // 끝나면 같은 카드로 다시 보낸다. 카드의 '취소' 가 status 를 failed 로 바꾸면 다시 보내지 않는다.
-  bpFix?: { kind: 'face' | 'gone' | 'busy'; label: string; at: number; tries?: number };   // busy — BytePlus 대기열이 꽉 차 줄에 섬(26.11.25~ lib/busy-line)
+  bpFix?: { kind: 'face' | 'gone' | 'busy'; label: string; at: number; tries?: number };
+  // 실패 카드의 기계가 읽을 칸(26.11.2702~, MCP 부탁 — 문구가 바뀌어도 판정이 틀어지지 않게). BytePlus 작업이 없는 실패만:
+  //   charged none = 생성 전 거절 · 나가지 않음(과금 없음) · unknown = 보내던 중 끊김 · 보내는 중 앱이 꺼짐(과금됐을 수 있음)
+  //   canceled waiting = 자동 인증 · 대기열을 기다리다 사람이 취소 · task = 대기 중인 BytePlus 작업을 취소(무료)
+  charged?: 'none' | 'unknown';
+  canceled?: 'waiting' | 'task';   // busy — BytePlus 대기열이 꽉 차 줄에 섬(26.11.25~ lib/busy-line)
   apiPrompt?: string;  // BytePlus·구글에 실제로 보낸 문장(@hero → [Image 3], 옴니는 <IMAGE_REF_N>). 26.10.801~ 카드만 — 받은 영상의
                        // 설정(settings-box)에 참고로 싣는다. 되살리기는 promptHtml 로 한다.
                        // 26.11.1802~ promptText 와 같으면 넣지 않는다(없음 = 같음, 801 이전 카드는 모름) — dropSameApiPrompt.
@@ -3183,6 +3188,7 @@ export const useAppStore = create<AppState>()(
             status: 'failed',
             error: '사용자가 작업을 취소했습니다.',
             endTime: Date.now(),
+            canceled: 'task', charged: 'none',   // BytePlus 는 대기 중(queued)인 작업만 취소를 받는다 — 무료
           });
         } catch (error: any) {
           // Network failure — we don't know whether it cancelled. Keep polling rather
@@ -3423,7 +3429,7 @@ function closeOrphanCards(messages: ChatMessage[]): ChatMessage[] {
   // 자동 인증을 기다리던 카드(bpFix, 26.11.24~)는 막힌 요청만 나갔다(생성 전 거절 · 과금 없음) — 그렇게 말한다. 인증은 라이브러리에서 이어진다.
   const fixError = '자동 인증을 기다리는 사이 앱이 꺼져 다시 보내지 못했어요(막힌 요청은 과금이 없어요).\n재생성(✦)을 누르면 인증된 사진으로 다시 보내요.';
   const busyError = 'BytePlus 대기열에 자리가 나길 기다리는 사이 앱이 꺼져 보내지 못했어요(거절된 요청은 과금이 없어요).\n재생성(✦)을 누르면 다시 보내요.';
-  return messages.map(m => orphan(m) ? { ...m, status: 'failed' as const, content: '생성 실패', error: m.bpFix ? (m.bpFix.kind === 'busy' ? busyError : fixError) : error, endTime: now, bpFix: undefined } : m);
+  return messages.map(m => orphan(m) ? { ...m, status: 'failed' as const, content: '생성 실패', error: m.bpFix ? (m.bpFix.kind === 'busy' ? busyError : fixError) : error, endTime: now, bpFix: undefined, charged: m.bpFix ? 'none' as const : 'unknown' as const } : m);
 }
 
 // ─── 켜질 때 프로젝트 설정 정리 (hydration 과 백업 되살리기가 같이 쓴다) ──────────────

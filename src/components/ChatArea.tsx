@@ -799,13 +799,15 @@ const agentReportSure = (kind: 'jobs' | 'commands', id: string, body: Record<str
 const agentReport = (id: string, body: Record<string, unknown>) => agentReportSure('jobs', id, body);
 
 // 카드 상태 → 에이전트에게 보여 줄 모양. 카드를 지웠으면 missing.
+// 실패 카드의 기계가 읽을 칸(26.11.2702~, MCP 부탁) — 작업이 없는 실패만(store ChatMessage.charged · canceled). 문구로 가리지 않게.
+const flagsOf = (m: any) => ({ ...(m?.canceled ? { canceled: m.canceled } : {}), ...(m?.status === 'failed' && !m.taskId && m.charged ? { charged: m.charged } : {}) });
 // 막혀서 기다리는 카드(bpFix)가 왜 기다리나 — 에이전트에게 알린다(26.11.2701~, MCP 설명서와 짝). 아직 BytePlus 작업이 없어 과금 없음.
 //   certifying: 실사 얼굴이라 그 사진 · 영상을 에셋으로 인증 중(또는 지워진 에셋을 다시 등록 중) · queue_full: BytePlus 대기열이 꽉 차 줄에 섬(tries = 물어본 횟수)
 const waitingOf = (m: any) => (m?.status === 'queued' && !m.taskId && m.bpFix
   ? (m.bpFix.kind === 'busy' ? { waiting: 'queue_full', tries: m.bpFix.tries || 1 } : { waiting: 'certifying' }) : {});
 // 기다리는 카드 취소 — 카드의 '취소' 단추와 에이전트 card.cancel 이 같이 쓴다. 기다리던 쪽(자동 인증 · 대기열 줄)은 카드가 failed 인 것을 보고 더 보내지 않는다.
 const cancelWaitingCard = (projectId: string, m: any) => useAppStore.getState().updateMessage(projectId, m.id, {
-  status: 'failed', content: '취소함', bpFix: undefined, endTime: Date.now(),
+  status: 'failed', content: '취소함', bpFix: undefined, endTime: Date.now(), canceled: 'waiting', charged: 'none',
   error: m.bpFix?.kind === 'busy' ? '대기열을 기다리다 취소했어요 — 보내지 않았어요(거절된 요청은 과금이 없어요).' : '자동 인증 중에 취소했어요 — 다시 보내지 않았어요.',
 } as any);
 const agentCards = (projectId: string, ids: string[]) => {
@@ -814,7 +816,7 @@ const agentCards = (projectId: string, ids: string[]) => {
     const m = msgs.find(x => x.id === id) as any;
     if (!m) return { id, status: 'missing' };
     return {
-      id, status: m.status || 'queued', ...waitingOf(m),
+      id, status: m.status || 'queued', ...waitingOf(m), ...flagsOf(m),
       ...(m.taskId ? { taskId: m.taskId } : {}),
       ...(m.videoUrl ? { videoUrl: m.videoUrl } : {}),
       ...(m.error ? { error: String(m.error).slice(0, 500) } : {}),
@@ -3863,7 +3865,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
   const agentCardView = (m: any, projectName?: string) => {
     const us = m.usedSettings || {};
     return {
-      id: m.id, status: m.status || 'queued', ...waitingOf(m), created: m.timestamp,
+      id: m.id, status: m.status || 'queued', ...waitingOf(m), ...flagsOf(m), created: m.timestamp,
       ...(projectName ? { project: projectName } : {}),
       prompt: String(m.promptText || '').slice(0, 600),
       settings: m.usedSettings ? { model: us.model, mode: us.mode, ...(modelProvider(us.model || '') === 'gemini' ? { omniTask: us.omniTask } : {}),
@@ -4335,19 +4337,20 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
       const text = await res.text();
       let data; try { data = JSON.parse(text); } catch { throw new Error(`서버 응답 오류 (${res.status})`); }
       if (!res.ok || (data.code !== undefined && data.code !== 0)) {
-        refused = res.ok || (res.status >= 400 && res.status < 500);
+        refused = res.ok || (res.status >= 400 && res.status < 500) || data.charged === 'none';   // 서버가 '나가지 않음' 이라고 하면 거절과 같다
         if (isLineFull(res.status, data)) { busyError = byteplusErrorText(data); return 'busy'; }
         throw new Error(byteplusErrorText(data));
       }
       const taskId = data.id || data.data?.task_id;
       if (!taskId) throw new Error('Task ID를 받지 못했습니다.');
-      updateMessage(owner.id, id, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), bpFix: undefined } as any);
+      updateMessage(owner.id, id, { content: `Task 생성 완료. ID: ${taskId}`, taskId, status: 'running', startTime: Date.now(), bpFix: undefined, charged: undefined, canceled: undefined } as any);
       useAppStore.getState().pollTask(owner.id, id, taskId);
       showToast(`${label} 본편을 만들기 시작했습니다 — 맨 아래에 추가됩니다.`, true);
       return 'sent';
     };
     let busyError = '';
-    const failFinal = (error: string) => updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error, endTime: Date.now(), bpFix: undefined } as any);
+    // charged: 거절(4xx · '나가지 않음')이면 none, 그 밖(5xx · 끊김 · 빈 답)은 만들어졌는지 모름 — agentMakeFinal 의 unsure 와 같은 기준
+    const failFinal = (error: string, charged: 'none' | 'unknown' = refused ? 'none' : 'unknown') => updateMessage(owner.id, id, { content: '본편 생성 실패', status: 'failed', error, endTime: Date.now(), bpFix: undefined, charged } as any);
     try {
       // 대기열이 꽉 찼으면 실패시키지 않고 줄에 세운다(26.11.25~ lib/busy-line) — 일반 보내기(send-request waitTurn)와 같은 줄.
       if ((await postFinal()) === 'busy') {
@@ -4356,7 +4359,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
         joinLine({
           wanted: () => { const m = useAppStore.getState().projects.find(p => p.id === owner.id)?.messages.find(x => x.id === id) as any; return !!m && m.status === 'queued' && m.bpFix?.kind === 'busy'; },
           tell: (n) => mark(n + 1),
-          giveUp: () => failFinal(`${busyError}\n\n[대기열] 6시간 동안 자리가 나지 않아 그만 기다렸어요(거절된 요청은 과금이 없어요).`),
+          giveUp: () => failFinal(`${busyError}\n\n[대기열] 6시간 동안 자리가 나지 않아 그만 기다렸어요(거절된 요청은 과금이 없어요).`, 'none'),
           attempt: async () => {
             // 기다린 사이 초안이 만료됐거나 · 프로젝트(코드)가 종료됐거나 · 권한이 풀렸으면 보내지 않는다(처음과 같은 확인)
             const now = useAppStore.getState();
@@ -4367,7 +4370,7 @@ export function ChatArea({ projectId, slot = 0, split = false, active = true }: 
               : !live ? '보내는 사이 프로젝트 코드가 종료됐거나 목록에서 빠져 보내지 않았습니다.'
               : !isModelAllowed(model, scope) ? '보내는 사이 이 모델 권한이 풀려 보내지 않았습니다.'
               : target === '4k' && !allowedResolutions(model, isFourKAllowed(scope)).includes('4k') ? '보내는 사이 2.5 4K 권한이 풀려 보내지 않았습니다.' : '';
-            if (why) { failFinal(`${why}\n\n(BytePlus 대기열을 기다리던 중이었어요 — 거절된 요청은 과금이 없어요)`); return 'end'; }
+            if (why) { failFinal(`${why}\n\n(BytePlus 대기열을 기다리던 중이었어요 — 거절된 요청은 과금이 없어요)`, 'none'); return 'end'; }
             try { return await postFinal(); } catch (e: any) { failFinal(e?.message || String(e)); return 'end'; }
           },
         });

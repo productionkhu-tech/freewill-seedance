@@ -23,7 +23,7 @@ const BREAKS = [
   ['저작권 막힘도 자동 인증하려 함', 'auto-certify', S, 'const face = /PrivacyInformation|real person/i.test(err);', 'const face = /PrivacyInformation|real person|PolicyViolation/i.test(err);'],
   ['막힌 칸을 6번까지만 고침(옛 버그)', 'modes', S, 'const MAX_FIX = Math.min(16,', 'const MAX_FIX = Math.min(6,'],
   ['정리 확인을 10분마다', 'evict-watch', C, 'setInterval(run, 60 * 60_000)', 'setInterval(run, 10 * 60_000)'],
-  ['대기열이 꽉 차면 카드를 실패시킴(옛 동작)', 'busy-line', S, 'busy: isLineFull(res.status, data) };', 'busy: false };'],
+  ['대기열이 꽉 차면 카드를 실패시킴(옛 동작)', 'busy-line', S, 'busy: isLineFull(res.status, data),', 'busy: false,'],
   ['줄에서 취소해도 보냄', 'busy-line', 'src/lib/busy-line.ts', 'for (let i = line.length - 1; i >= 0; i--) if (!line[i].w.wanted()) line.splice(i, 1)[0].w.left?.(false);', ''],
   ['쓰기 한도(안 풀리는 429)도 줄에 세움', 'busy-line', 'src/lib/busy-line.ts', '  return !/SetLimit|Overdue', '  return true || !/SetLimit|Overdue'],
   ['기다린 카드가 저마다 물어봄', 'busy-line', 'src/lib/busy-line.ts', '  if (pumping) return;', ''],
@@ -36,6 +36,8 @@ const BREAKS = [
   ['고칠 수 없는 칸의 이유를 안 남김', 'error-card', S, 'const whyNoFix = (err: string) => (!PERSONAL', 'const whyNoFix = (err: string) => (false as boolean'],
   ['에이전트에게 기다리는 이유를 안 알림', 'agent-wait', 'src/components/ChatArea.tsx', "const waitingOf = (m: any) => (m?.status === 'queued' && !m.taskId && m.bpFix", "const waitingOf = (m: any) => (false && m.bpFix"],
   ['에이전트가 기다리는 카드를 못 멈춤(옛 동작)', 'agent-wait', 'src/components/ChatArea.tsx', "if (!m.taskId && m.status === 'queued' && (m as any).bpFix) {", "if (false as boolean) {"],
+  ['에이전트에게 charged · canceled 칸을 안 줌', 'agent-wait', 'src/components/ChatArea.tsx', "const flagsOf = (m: any) => ({", "const flagsOf = (m: any) => ({} || {"],
+  ['끊김의 charged 를 서버가 안 알림', 'agent-wait', 'server.ts', "...(neverSent(error) ? { charged: 'none' } : net ? { charged: 'unknown' } : {})", ""],
   ['본편이 대기열에 막히면 실패', 'busy-line', 'src/components/ChatArea.tsx', "if (isLineFull(res.status, data)) { busyError = byteplusErrorText(data); return 'busy'; }", ''],
   ['정리 뒤 옛 번호를 돌려줌(옛 버그)', 'evict', 'worker/seedance-gateway.js', 'try { await env.SD_TOKENS.delete(`ast:lock:${project}:${x.Name}`); } catch {}', ''],
 ];
